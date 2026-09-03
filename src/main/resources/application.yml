@@ -1,0 +1,42 @@
+# 公共配置（环境无关的部分）；环境差异放 application-{profile}.yml
+spring:
+  application:
+    name: newcoupon-server
+  profiles:
+    active: dev          # 本地开发默认 dev；生产用启动参数 --spring.profiles.active=prod 覆盖
+
+  # SQL 版本化：应用启动时自动执行未跑过的迁移脚本（docs/adr/ADR-0002）
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+server:
+  port: 8080
+  # 优雅停机：收到 SIGTERM 后先停止接新请求，等在途请求完成（最多30s）再退出。
+  # 没有它，每次发版都会切断在途领券/核销请求，制造出一批"扣了库存没落库"的不一致。
+  shutdown: graceful
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    # 生产环境打印 SQL 走慢日志/审计，不在这里；dev 由 logging.level 控制可见性
+  global-config:
+    banner: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info     # 最小暴露原则：只开健康检查，不多暴露一个端点
+  endpoint:
+    health:
+      show-details: never        # 健康详情不对外暴露（含中间件拓扑，属于敏感信息）
+
+logging:
+  level:
+    root: INFO
+    com.newcoupon: DEBUG         # 开发期自己的包开 DEBUG，生产改 INFO

@@ -1,0 +1,37 @@
+# ---- 构建 ----
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# ---- IDE ----
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# ---- 运行时 ----
+logs/
+*.log
+heapdump.*
+hs_err_pid*
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+
+# ---- 本地私有配置（不进仓库，含密码等敏感信息）----
+application-local.yml
+
+# ---- 意外产物防护 ----
+# Windows 侧工具（如 VSCode Java 扩展）以 Windows 路径在 WSL 项目内跑 Maven 时，
+# 会生成字面名为 C: 的目录（C:\xxx 被当作相对路径）——拦截之
+/C:/
+
+# Claude Code 个人本地配置（权限等，不共享）
+.claude/settings.local.json
+
+# ---- 学习资料（讲解/教学文档，永不进入 git 与远端）----
+study/

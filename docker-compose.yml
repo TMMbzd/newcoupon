@@ -1,0 +1,38 @@
+# 本地依赖环境：MySQL 8 + Redis 7
+# 用法：docker compose up -d   （数据落在 named volume，可重复启停）
+# 注意：阶段0只依赖 MySQL；Redis 是阶段1（Lua 库存扣减）的预备，顺手起好。
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: newcoupon-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: newcoupon
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot123456"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: newcoupon-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]   # AOF 持久化：阶段1 库存扣减的数据安全底线
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+volumes:
+  mysql-data:
+  redis-data:
