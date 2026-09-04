@@ -1,0 +1,22 @@
+# EditorConfig：让所有编辑器/IDE 对同一份代码使用相同的缩进、编码、换行规则。
+# 解决"队友 A 用 tab、队友 B 用 2 空格，diff 全是格式噪音"的问题——
+# 格式统一后，代码评审才能聚焦逻辑而不是格式（大厂代码规约的地基）。
+# VSCode 装	EditorConfig for VS Code 插件后自动生效；IntelliJ 原生支持。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml}]
+indent_size = 2
+
+[Makefile]
+indent_style = tab           # Make 的语法强制要求命令行以 TAB 开头
+
+[*.md]
+trim_trailing_whitespace = false   # Markdown 行尾双空格=换行语义，不能剪

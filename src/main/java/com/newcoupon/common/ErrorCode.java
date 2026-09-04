@@ -27,6 +27,7 @@ public enum ErrorCode {
     // ---- 2xxx 模板域 ----
     TEMPLATE_NOT_FOUND(2001, "券模板不存在"),
     TEMPLATE_NOT_RECEIVABLE(2002, "券模板不可领取（未发布/不在领取期/审批未通过）"),
+    TEMPLATE_STATE_INVALID(2003, "模板状态不允许该操作"),
 
     // ---- 3xxx 领券域 ----
     STOCK_OUT(3001, "已售罄"),
