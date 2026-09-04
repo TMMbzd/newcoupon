@@ -75,32 +75,18 @@ class CouponIssueTxServiceTest {
     }
 
     @Test
-    @DisplayName("扣减0行且重读已售罄 → STOCK_OUT，不落券不记事件")
-    void zeroRowSoldOut() {
+    @DisplayName("扣减0行 → 抛 StockDeductRejectedException（不在事务内分类：RR 快照会误判），不落券不记事件")
+    void zeroRowThrowsSignal() {
         when(templateRepository.findById(1L))
-                .thenReturn(Optional.of(template(PublishStatus.PUBLISHED, 99, 100)))
-                .thenReturn(Optional.of(template(PublishStatus.PUBLISHED, 100, 100)));  // 重读：已满
+                .thenReturn(Optional.of(template(PublishStatus.PUBLISHED, 99, 100)));
         when(templateRepository.casDeductStock(1L)).thenReturn(0);
 
         assertThatThrownBy(() -> service.issue(req(), NOW))
-                .isInstanceOf(BizException.class)
-                .extracting(e -> ((BizException) e).getErrorCode())
-                .isEqualTo(ErrorCode.STOCK_OUT);
+                .isInstanceOf(StockDeductRejectedException.class);
         verify(userCouponRepository, never()).save(any());
         verify(couponEventRepository, never()).append(any());
-    }
-
-    @Test
-    @DisplayName("扣减0行但库存有余 → 模板状态竞态（被下线/审批回退）→ TEMPLATE_NOT_RECEIVABLE")
-    void zeroRowStatusRace() {
-        when(templateRepository.findById(1L))
-                .thenReturn(Optional.of(template(PublishStatus.PUBLISHED, 10, 100)))
-                .thenReturn(Optional.of(template(PublishStatus.OFFLINE, 10, 100)));     // 重读：已下线
-        when(templateRepository.casDeductStock(1L)).thenReturn(0);
-
-        assertThatThrownBy(() -> service.issue(req(), NOW))
-                .isInstanceOf(BizException.class)
-                .hasMessageContaining("下线");
+        // 事务内不再做分类重读（findById 只被调用一次：步骤a 的模板读取）
+        verify(templateRepository, times(1)).findById(1L);
     }
 
     @Test

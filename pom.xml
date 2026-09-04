@@ -79,6 +79,25 @@
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
     </dependency>
+
+    <!-- 集成测试：Testcontainers 在测试启动时拉起一次性真实 MySQL 容器。
+         为什么不用 H2 内存库：方言差异会让"唯一索引行为/事务隔离"测不准——
+         并发正确性必须在真 MySQL 上验证；为什么不用常驻 dev 库：测试要可重复、无残留。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-testcontainers</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>mysql</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>

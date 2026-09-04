@@ -4,7 +4,9 @@ import com.newcoupon.application.dto.ReceiveRequest;
 import com.newcoupon.application.dto.ReceiveResult;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
+import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.UserCoupon;
+import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import java.time.LocalDateTime;
 import java.util.Optional;
@@ -31,11 +33,14 @@ public class ReceiveAppService {
     private static final Logger log = LoggerFactory.getLogger(ReceiveAppService.class);
 
     private final UserCouponRepository userCouponRepository;
+    private final TemplateRepository templateRepository;
     private final CouponIssueTxService issueTxService;
 
     public ReceiveAppService(UserCouponRepository userCouponRepository,
+                             TemplateRepository templateRepository,
                              CouponIssueTxService issueTxService) {
         this.userCouponRepository = userCouponRepository;
+        this.templateRepository = templateRepository;
         this.issueTxService = issueTxService;
     }
 
@@ -56,7 +61,22 @@ public class ReceiveAppService {
         } catch (DuplicateKeyException e) {
             // ③ 内层事务已在代理处回滚（库存扣减一并撤销），此处做冲突分类
             return classifyAfterRollback(req, e);
+        } catch (StockDeductRejectedException e) {
+            // ④ 扣减 0 行：事务已回滚，用事务外的新快照重读分类
+            // （事务内读旧快照会误判，见 StockDeductRejectedException 注释）
+            return classifyDeductReject(req, e);
         }
+    }
+
+    /** 扣减被拒分类：新连接新快照读真实状态——真售罄 or 模板状态竞态 */
+    private ReceiveResult classifyDeductReject(ReceiveRequest req, StockDeductRejectedException e) {
+        log.warn("stock deduct rejected: userId={}, templateId={}", req.userId(), req.templateId());
+        CouponTemplate fresh = templateRepository.findById(req.templateId())
+                .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + req.templateId()));
+        if (fresh.getIssuedCount() >= fresh.getTotalCount()) {
+            throw new BizException(ErrorCode.STOCK_OUT);
+        }
+        throw new BizException(ErrorCode.TEMPLATE_NOT_RECEIVABLE, "模板状态已变化（被下线/审批回退）");
     }
 
     /**

@@ -11,8 +11,14 @@ import com.newcoupon.application.dto.ReceiveRequest;
 import com.newcoupon.application.dto.ReceiveResult;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
+import com.newcoupon.domain.coupon.ApproveStatus;
 import com.newcoupon.domain.coupon.CouponStatus;
+import com.newcoupon.domain.coupon.CouponTemplate;
+import com.newcoupon.domain.coupon.CouponType;
+import com.newcoupon.domain.coupon.PublishStatus;
 import com.newcoupon.domain.coupon.UserCoupon;
+import com.newcoupon.domain.coupon.ValidType;
+import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import java.time.LocalDateTime;
 import java.util.Optional;
@@ -34,6 +40,8 @@ class ReceiveAppServiceTest {
 
     @Mock
     private UserCouponRepository userCouponRepository;
+    @Mock
+    private TemplateRepository templateRepository;
     @Mock
     private CouponIssueTxService issueTxService;
 
@@ -147,5 +155,41 @@ class ReceiveAppServiceTest {
         assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-3", 42L, 1L)))
                 .extracting(e -> ((BizException) e).getErrorCode())
                 .isEqualTo(ErrorCode.SYSTEM_ERROR);
+    }
+
+    // ---------- 扣减被拒分类（事务外新快照） ----------
+
+    private static CouponTemplate tpl(long issued, long total) {
+        return CouponTemplate.reconstitute(1L,
+                CouponTemplate.Creation.builder()
+                        .templateCode("T1").activityId(1L).name("n")
+                        .couponType(CouponType.NO_THRESHOLD).faceValue(500L).threshold(0L)
+                        .totalCount(total).perUserLimit(1)
+                        .validType(ValidType.AFTER_RECEIVE).validDays(7).build(),
+                issued, ApproveStatus.APPROVED, PublishStatus.PUBLISHED);
+    }
+
+    @Test
+    @DisplayName("扣减被拒+新快照已售罄 → STOCK_OUT")
+    void deductRejectedSoldOut() {
+        when(userCouponRepository.findByIdempotentKey(42L, "sd-1")).thenReturn(Optional.empty());
+        when(issueTxService.issue(any(), any())).thenThrow(new StockDeductRejectedException(1L));
+        when(templateRepository.findById(1L)).thenReturn(java.util.Optional.of(tpl(100, 100)));
+
+        assertThatThrownBy(() -> service.receive(new ReceiveRequest("sd-1", 42L, 1L)))
+                .extracting(e -> ((BizException) e).getErrorCode())
+                .isEqualTo(ErrorCode.STOCK_OUT);
+    }
+
+    @Test
+    @DisplayName("扣减被拒+新快照库存有余 → 模板状态竞态 → TEMPLATE_NOT_RECEIVABLE")
+    void deductRejectedStatusRace() {
+        when(userCouponRepository.findByIdempotentKey(42L, "sd-2")).thenReturn(Optional.empty());
+        when(issueTxService.issue(any(), any())).thenThrow(new StockDeductRejectedException(1L));
+        when(templateRepository.findById(1L)).thenReturn(java.util.Optional.of(tpl(10, 100)));
+
+        assertThatThrownBy(() -> service.receive(new ReceiveRequest("sd-2", 42L, 1L)))
+                .extracting(e -> ((BizException) e).getErrorCode())
+                .isEqualTo(ErrorCode.TEMPLATE_NOT_RECEIVABLE);
     }
 }

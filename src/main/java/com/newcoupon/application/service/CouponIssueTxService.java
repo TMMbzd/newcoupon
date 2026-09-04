@@ -63,13 +63,10 @@ public class CouponIssueTxService {
         // b. 条件扣库存：检查+写入一条 SQL 原子完成（check-then-act 竞态无从发生）
         int deducted = templateRepository.casDeductStock(req.templateId());
         if (deducted == 0) {
-            // 0 行重读分类（ADR-0004 增补1）：区分"真售罄"与"校验后被下线/取消审批"
-            CouponTemplate fresh = templateRepository.findById(req.templateId())
-                    .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND));
-            if (fresh.getIssuedCount() >= fresh.getTotalCount()) {
-                throw new BizException(ErrorCode.STOCK_OUT);
-            }
-            throw new BizException(ErrorCode.TEMPLATE_NOT_RECEIVABLE, "模板状态已变化（被下线/审批回退）");
+            // 0 行=售罄或模板状态竞态。⚠️ 不能在本事务内重读分类：
+            // RR 隔离级别下事务内 SELECT 读旧快照（见 StockDeductRejectedException 的完整解释），
+            // 必须抛出异常让事务回滚，由编排层用新快照重查分类。
+            throw new StockDeductRejectedException(req.templateId());
         }
 
         // c. 落券：领取工厂内完成快照固化与全部不变量校验；撞唯一索引时抛 DuplicateKeyException
