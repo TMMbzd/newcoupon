@@ -162,6 +162,33 @@ public final class CouponTemplate {
     }
 
     /**
+     * 可领取性校验：审批通过 + 已发布 + 在领取期内。
+     * 领取期规则（ADR-0004 增补2，阶段0口径）：
+     * - FIXED 固定区间券：领取期 = 使用有效期区间 [validStart, validEnd]；
+     * - AFTER_RECEIVE 相对有效期券：无领取窗口列（valid_start/valid_end 为 NULL），只校验状态——
+     *   "校验后一瞬过期仍领到"的时间窗竞态已登记容忍，阶段1补窗口列后消除。
+     * 状态竞态（校验后被下线）由扣库存 SQL 的 WHERE 守卫兜底（ADR-0004 增补1）。
+     */
+    public void assertReceivable(LocalDateTime now) {
+        if (approveStatus != ApproveStatus.APPROVED) {
+            throw new BizException(ErrorCode.TEMPLATE_NOT_RECEIVABLE,
+                    "审批状态=" + approveStatus.getDesc() + "，仅已通过可领取");
+        }
+        if (publishStatus != PublishStatus.PUBLISHED) {
+            throw new BizException(ErrorCode.TEMPLATE_NOT_RECEIVABLE,
+                    "生命周期状态=" + publishStatus.getDesc() + "，仅已发布可领取");
+        }
+        if (validType == ValidType.FIXED) {
+            if (now.isBefore(validStart)) {
+                throw new BizException(ErrorCode.TEMPLATE_NOT_RECEIVABLE, "领取未开始");
+            }
+            if (now.isAfter(validEnd)) {
+                throw new BizException(ErrorCode.TEMPLATE_NOT_RECEIVABLE, "领取已结束");
+            }
+        }
+    }
+
+    /**
      * 重建（reconstitution）：从持久化数据还原聚合。
      *
      * <p>与 {@link #create} 的区别是 DDD 的重要区分：
