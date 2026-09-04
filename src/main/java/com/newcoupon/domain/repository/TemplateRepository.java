@@ -30,4 +30,13 @@ public interface TemplateRepository {
      * @return true=更新成功；false=影响行数为 0（已被并发变更，调用方按状态冲突处理）
      */
     boolean casUpdatePublishStatus(long id, PublishStatus from, PublishStatus to);
+
+    /**
+     * 条件扣库存（ADR-0004 增补1）：issued_count+1，守卫
+     * {@code issued_count < total_count AND publish_status=1 AND approve_status=1}。
+     * 检查与写入在一条 SQL 内原子完成——这是阶段 0 防超发的核心。
+     *
+     * @return 影响行数：1=扣减成功；0=售罄或模板不可领（调用方须重读模板分类错误码）
+     */
+    int casDeductStock(long templateId);
 }

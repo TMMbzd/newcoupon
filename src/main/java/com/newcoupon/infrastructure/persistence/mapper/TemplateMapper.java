@@ -25,4 +25,14 @@ public interface TemplateMapper extends BaseMapper<CouponTemplatePO> {
     int casUpdatePublishStatus(@Param("id") long id,
                                @Param("from") int from,
                                @Param("to") int to);
+
+    /**
+     * 条件扣库存（ADR-0004 增补1）：守卫=库存未售罄 + 已发布 + 已审批。
+     * "检查+写入"在一条 SQL 内原子完成，check-then-act 竞态无从发生。
+     * 影响行数=0 → 调用方在同一事务内重读模板分类 STOCK_OUT / TEMPLATE_NOT_RECEIVABLE。
+     */
+    @Update("UPDATE coupon_template SET issued_count = issued_count + 1 "
+            + "WHERE id = #{id} AND issued_count < total_count "
+            + "AND publish_status = 1 AND approve_status = 1")
+    int casDeductStock(@Param("id") long id);
 }

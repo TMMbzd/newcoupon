@@ -28,4 +28,13 @@ public enum EventType {
     public String getDesc() {
         return desc;
     }
+
+    public static EventType of(int code) {
+        for (EventType t : values()) {
+            if (t.code == code) {
+                return t;
+            }
+        }
+        throw new IllegalArgumentException("未知的事件类型码: " + code);
+    }
 }

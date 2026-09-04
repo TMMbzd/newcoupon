@@ -40,4 +40,9 @@ public class TemplateRepositoryImpl implements TemplateRepository {
     public boolean casUpdatePublishStatus(long id, PublishStatus from, PublishStatus to) {
         return mapper.casUpdatePublishStatus(id, from.getCode(), to.getCode()) == 1;
     }
+
+    @Override
+    public int casDeductStock(long templateId) {
+        return mapper.casDeductStock(templateId);
+    }
 }
