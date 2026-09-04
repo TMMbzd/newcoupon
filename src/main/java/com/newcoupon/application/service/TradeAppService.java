@@ -45,10 +45,18 @@ public class TradeAppService {
     }
 
     public LockResult lock(LockRequest req) {
+        // 幂等快查（与领券同构）：锁券的幂等证据在占用单（usageNo 唯一），不在券状态上——
+        // 必须在进事务前先查，否则事务层对券状态的内存快检会先抛冲突（E2E 抓到的真实Bug）
+        String usageNo = req.orderNo() + ":" + req.couponId();
+        var existingUsage = couponUsageRepository.findByUsageNo(usageNo);
+        if (existingUsage.isPresent()) {
+            return new LockResult(usageNo, req.couponId(), CouponStatus.LOCKED.getDesc(), true);
+        }
+
         try {
             return tradeTxService.lock(req, LocalDateTime.now());
         } catch (DuplicateKeyException e) {
-            // 撞 uk_usage_no = 同一订单重复锁同一券（回调重放）——查回当成功
+            // 撞 uk_usage_no = 同一订单并发重复锁（快查同时穿过）——回滚后重查当成功
             LockResult existing = idempotentLock(req);
             if (existing != null) {
                 return existing;
@@ -60,7 +68,6 @@ public class TradeAppService {
             UserCoupon fresh = userCouponRepository.findById(req.couponId())
                     .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
             if (fresh.getStatus() == CouponStatus.LOCKED) {
-                // 已被锁定：若正是本订单锁的 → 幂等成功；否则提示被别的订单占用
                 LockResult existing = idempotentLock(req);
                 if (existing != null) {
                     return existing;
@@ -70,6 +77,15 @@ public class TradeAppService {
             }
             throw new BizException(ErrorCode.STATE_CONFLICT,
                     "券当前状态=" + fresh.getStatus().getDesc() + "，仅待使用可锁定");
+        } catch (BizException e) {
+            // 兜底：并发窗口内事务层内存快检读到"已锁定"抛的冲突——若占用单是本单的，按幂等处理
+            if (e.getErrorCode() == ErrorCode.STATE_CONFLICT) {
+                LockResult existing = idempotentLock(req);
+                if (existing != null) {
+                    return existing;
+                }
+            }
+            throw e;
         }
     }
 
