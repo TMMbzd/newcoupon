@@ -44,6 +44,7 @@ public final class CouponTemplate {
     private final Integer validDays;
     private final ApproveStatus approveStatus;
     private final PublishStatus publishStatus;
+    private final long issuedCount;
 
     private CouponTemplate(Creation c, ApproveStatus approveStatus, PublishStatus publishStatus) {
         this.id = null;
@@ -62,10 +63,16 @@ public final class CouponTemplate {
         this.validDays = c.validDays();
         this.approveStatus = approveStatus;
         this.publishStatus = publishStatus;
+        this.issuedCount = 0L;   // 新建模板已发放量为 0
     }
 
     private CouponTemplate(CouponTemplate src, Long id) {
+        this(src, id, src.issuedCount);
+    }
+
+    private CouponTemplate(CouponTemplate src, Long id, long issuedCount) {
         this.id = id;
+        this.issuedCount = issuedCount;
         this.templateCode = src.templateCode;
         this.activityId = src.activityId;
         this.name = src.name;
@@ -154,6 +161,21 @@ public final class CouponTemplate {
         return new CouponTemplate(this, id);
     }
 
+    /**
+     * 重建（reconstitution）：从持久化数据还原聚合。
+     *
+     * <p>与 {@link #create} 的区别是 DDD 的重要区分：
+     * create 是"出生"——强制当前全部创建规则；reconstitute 是"复活"——
+     * 数据落库时已通过当时的校验，<b>不重跑创建校验</b>（否则规则升级后，历史数据全部加载失败，
+     * 这是真实事故模式："加了条新校验，线上查询全 500"），也<b>不重置状态</b>——
+     * 状态以 DB 为准（曾被误写成走 create()，导致读回来的模板永远是"未发布"）。
+     */
+    public static CouponTemplate reconstitute(Long id, Creation c, long issuedCount,
+                                              ApproveStatus approveStatus, PublishStatus publishStatus) {
+        CouponTemplate t = new CouponTemplate(c, approveStatus, publishStatus);
+        return new CouponTemplate(t, id, issuedCount);
+    }
+
     private static void require(boolean condition, String message) {
         if (!condition) {
             throw new BizException(ErrorCode.PARAM_ERROR, message);
@@ -198,6 +220,10 @@ public final class CouponTemplate {
 
     public long getTotalCount() {
         return totalCount;
+    }
+
+    public long getIssuedCount() {
+        return issuedCount;
     }
 
     public int getPerUserLimit() {

@@ -10,3 +10,9 @@ spring:
       minimum-idle: 5
       connection-timeout: 3000     # 3s 拿不到连接快速失败，宁可报错也不堆积线程
       max-lifetime: 1800000
+
+# dev 环境 SQL 直打控制台：==> Preparing 是 SQL 模板，==> Parameters 是实参，<== Total 是返回行数——
+# 排障第一手资料。仅 dev 打开：生产环境的 SQL 观测走慢日志与审计（控制台全量打印量太大且有泄露风险）。
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl

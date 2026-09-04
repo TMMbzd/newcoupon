@@ -25,4 +25,13 @@ public enum PublishStatus {
     public String getDesc() {
         return desc;
     }
+
+    public static PublishStatus of(int code) {
+        for (PublishStatus s : values()) {
+            if (s.code == code) {
+                return s;
+            }
+        }
+        throw new IllegalArgumentException("未知的发布状态码: " + code);
+    }
 }

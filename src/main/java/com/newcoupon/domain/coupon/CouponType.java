@@ -26,4 +26,14 @@ public enum CouponType {
     public String getDesc() {
         return desc;
     }
+
+    /** 按 DB 存储值还原枚举；未知值直接抛错（脏数据第一时间暴露，不静默吞掉） */
+    public static CouponType of(int code) {
+        for (CouponType t : values()) {
+            if (t.code == code) {
+                return t;
+            }
+        }
+        throw new IllegalArgumentException("未知的券类型码: " + code);
+    }
 }

@@ -26,4 +26,13 @@ public enum ApproveStatus {
     public String getDesc() {
         return desc;
     }
+
+    public static ApproveStatus of(int code) {
+        for (ApproveStatus s : values()) {
+            if (s.code == code) {
+                return s;
+            }
+        }
+        throw new IllegalArgumentException("未知的审批状态码: " + code);
+    }
 }
