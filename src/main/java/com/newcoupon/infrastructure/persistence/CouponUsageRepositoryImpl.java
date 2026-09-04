@@ -1,0 +1,44 @@
+package com.newcoupon.infrastructure.persistence;
+
+import com.newcoupon.domain.coupon.CouponUsage;
+import com.newcoupon.domain.repository.CouponUsageRepository;
+import com.newcoupon.infrastructure.persistence.converter.CouponUsagePOConverter;
+import com.newcoupon.infrastructure.persistence.mapper.CouponUsageMapper;
+import com.newcoupon.infrastructure.persistence.po.CouponUsagePO;
+import java.time.LocalDateTime;
+import java.util.Optional;
+import org.springframework.stereotype.Repository;
+
+/** 占用单仓储适配器 */
+@Repository
+public class CouponUsageRepositoryImpl implements CouponUsageRepository {
+
+    private final CouponUsageMapper mapper;
+
+    public CouponUsageRepositoryImpl(CouponUsageMapper mapper) {
+        this.mapper = mapper;
+    }
+
+    @Override
+    public Optional<CouponUsage> findByUsageNo(String usageNo) {
+        return Optional.ofNullable(mapper.selectByUsageNo(usageNo))
+                .map(CouponUsagePOConverter::toDomain);
+    }
+
+    @Override
+    public CouponUsage save(CouponUsage usage) {
+        CouponUsagePO po = CouponUsagePOConverter.toPO(usage);
+        mapper.insert(po);   // 撞 uk_usage_no → DuplicateKeyException（同一订单重复锁同一券）
+        return usage.withId(po.getId());
+    }
+
+    @Override
+    public boolean casConfirm(String usageNo, long discountAmt, LocalDateTime useTime) {
+        return mapper.casConfirm(usageNo, discountAmt, useTime) == 1;
+    }
+
+    @Override
+    public boolean casRelease(String usageNo, LocalDateTime releaseTime) {
+        return mapper.casRelease(usageNo, releaseTime) == 1;
+    }
+}

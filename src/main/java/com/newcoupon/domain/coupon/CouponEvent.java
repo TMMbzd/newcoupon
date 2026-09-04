@@ -51,6 +51,33 @@ public final class CouponEvent {
                 null, null, now);
     }
 
+    /**
+     * 锁定事件。event_no 用 "LCK:"+usageNo——usage_no 本身全表唯一（订单号+券id），
+     * 天然防重放；templateId 取自券（对账按模板维度聚合时依赖它，不能填占位值）。
+     */
+    public static CouponEvent locked(UserCoupon coupon, CouponUsage usage, LocalDateTime now) {
+        return new CouponEvent(null,
+                "LCK:" + usage.getUsageNo(), EventType.LOCKED,
+                coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
+                usage.getOrderNo(), null, now);
+    }
+
+    /** 核销事件：amount = 本单实际抵扣金额（财务对账的金额事实源） */
+    public static CouponEvent used(UserCoupon coupon, CouponUsage usage, long discountAmt, LocalDateTime now) {
+        return new CouponEvent(null,
+                "USE:" + usage.getUsageNo(), EventType.USED,
+                coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
+                usage.getOrderNo(), discountAmt, now);
+    }
+
+    /** 释放回退事件 */
+    public static CouponEvent released(UserCoupon coupon, CouponUsage usage, LocalDateTime now) {
+        return new CouponEvent(null,
+                "RLS:" + usage.getUsageNo(), EventType.RELEASED,
+                coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
+                usage.getOrderNo(), null, now);
+    }
+
     /** 从数据库复活 */
     public static CouponEvent reconstitute(Long id, String eventNo, EventType eventType, long templateId,
                                            long userCouponId, long userId, String orderNo,

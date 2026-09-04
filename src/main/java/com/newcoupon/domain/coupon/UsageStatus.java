@@ -25,4 +25,13 @@ public enum UsageStatus {
     public String getDesc() {
         return desc;
     }
+
+    public static UsageStatus of(int code) {
+        for (UsageStatus s : values()) {
+            if (s.code == code) {
+                return s;
+            }
+        }
+        throw new IllegalArgumentException("未知的占用单状态码: " + code);
+    }
 }
