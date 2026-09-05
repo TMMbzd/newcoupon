@@ -27,12 +27,6 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     }
 
     @Override
-    public Optional<UserCoupon> findByUserAndTemplate(long userId, long templateId) {
-        return Optional.ofNullable(mapper.selectByUserAndTemplate(userId, templateId))
-                .map(UserCouponPOConverter::toDomain);
-    }
-
-    @Override
     public Optional<UserCoupon> findById(long id) {
         return Optional.ofNullable(mapper.selectById(id))
                 .map(UserCouponPOConverter::toDomain);
@@ -48,7 +42,7 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     @Override
     public UserCoupon save(UserCoupon userCoupon) {
         UserCouponPO po = UserCouponPOConverter.toPO(userCoupon, userCoupon.getReceiveTime());
-        mapper.insert(po);   // 撞 uk_idem / uk_user_template → DuplicateKeyException 抛给上层
+        mapper.insert(po);   // 撞 uk_idem（幂等）/ uk_user_seq（限领N兜底）→ DuplicateKeyException 抛给上层
         return userCoupon.withId(po.getId());
     }
 

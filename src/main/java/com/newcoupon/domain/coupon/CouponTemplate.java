@@ -146,7 +146,7 @@ public final class CouponTemplate {
             }
         }
 
-        // 阶段0策略：创建即视为审批通过（省略审批流，ADR-0005），发布状态固定未发布
+        // 阶段策略：创建即视为审批通过（省略审批流，ADR-0005→M6 兑现），发布状态固定未发布
         return new CouponTemplate(c, ApproveStatus.APPROVED, PublishStatus.UNPUBLISHED);
     }
 
@@ -173,10 +173,11 @@ public final class CouponTemplate {
 
     /**
      * 可领取性校验：审批通过 + 已发布 + 在领取期内。
-     * 领取期规则（ADR-0004 增补2，阶段0口径）：
+     * 领取期规则（ADR-0004 增补2，M1 前口径）：
      * - FIXED 固定区间券：领取期 = 使用有效期区间 [validStart, validEnd]；
      * - AFTER_RECEIVE 相对有效期券：无领取窗口列（valid_start/valid_end 为 NULL），只校验状态——
-     *   "校验后一瞬过期仍领到"的时间窗竞态已登记容忍，阶段1补窗口列后消除。
+     *   "校验后一瞬过期仍领到"的时间窗竞态：原承诺"阶段1补窗口列"未兑现，
+     *   现登记为 STATUS L13，随 M1 过期全链路一并补列消除。
      * 状态竞态（校验后被下线）由扣库存 SQL 的 WHERE 守卫兜底（ADR-0004 增补1）。
      */
     public void assertReceivable(LocalDateTime now) {
@@ -320,7 +321,7 @@ public final class CouponTemplate {
             LocalDateTime validEnd,
             Integer validDays) {
 
-        /** 手写 Builder：13 个字段的长构造器可读性极差（"第 7 个参数是啥"），测试里只改一个字段的写法依赖它 */
+        /** 手写 Builder：15 个字段的长构造器可读性极差（"第 7 个参数是啥"），测试里只改一个字段的写法依赖它 */
         public static CreationBuilder builder() {
             return new CreationBuilder();
         }

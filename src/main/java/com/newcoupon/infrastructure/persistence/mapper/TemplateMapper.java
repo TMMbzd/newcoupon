@@ -30,7 +30,8 @@ public interface TemplateMapper extends BaseMapper<CouponTemplatePO> {
     /**
      * 条件扣库存（ADR-0004 增补1）：守卫=库存未售罄 + 已发布 + 已审批。
      * "检查+写入"在一条 SQL 内原子完成，check-then-act 竞态无从发生。
-     * 影响行数=0 → 调用方在同一事务内重读模板分类 STOCK_OUT / TEMPLATE_NOT_RECEIVABLE。
+     * 影响行数=0 → 调用方抛 StockDeductRejectedException 使事务回滚，由编排层在【事务外】
+     * 用新快照分类（RR 快照教训：事务内重读看到旧照片，会误报——见该异常类的完整注释）。
      */
     @Update("UPDATE coupon_template SET issued_count = issued_count + 1 "
             + "WHERE id = #{id} AND issued_count < total_count "

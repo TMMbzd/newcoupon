@@ -1,8 +1,6 @@
 package com.newcoupon.application.service;
 
 import com.newcoupon.application.dto.ReceiveRequest;
-import com.newcoupon.common.BizException;
-import com.newcoupon.common.ErrorCode;
 import com.newcoupon.domain.coupon.CouponEvent;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.UserCoupon;

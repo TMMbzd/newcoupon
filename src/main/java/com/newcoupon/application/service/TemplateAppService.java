@@ -22,13 +22,13 @@ import org.springframework.stereotype.Service;
  *
  * <p>职责边界（DDD 分工）：
  * <ul>
- *   <li>这里做：阶段策略校验（如阶段0限领1张）、业务编码生成、调用聚合与仓储、DTO 组装；</li>
+ *   <li>这里做：业务编码生成、调用聚合与仓储、DTO 组装、发布时初始化 Redis 库存额度；</li>
  *   <li>这里不做：业务规则判断（在聚合）、SQL/MyBatis 细节（在仓储适配器）、HTTP 语义（在 Controller）。</li>
  * </ul>
  *
- * <p>关于 @Transactional（初学者最常见的误解）：本类所有用例都只写一个聚合、一条 SQL——
- * 单条语句数据库自带原子性，无需显式事务。**事务注解只在"一个用例写多个聚合/多表"时才加**
- * （第2周领券用例会加，届时讲解传播行为与失效场景）。随处 @Transactional 不是稳健，是噪音+长事务风险。
+ * <p>关于 @Transactional：本类用例均为单条 SQL（数据库自带原子性），不加事务注解；
+ * 多写用例的事务收在独立的 TxService（见 application/package-info 的分层铁律）。
+ * 随处 @Transactional 不是稳健，是噪音+长事务风险。
  */
 @Service
 public class TemplateAppService {

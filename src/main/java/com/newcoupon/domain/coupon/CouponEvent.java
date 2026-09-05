@@ -6,7 +6,8 @@ import java.time.LocalDateTime;
  * 券事件（事实源的一条记录）：领取/锁定/核销/释放/过期/作废全部落事件，
  * 统计与对账从事件表回放（docs/01 第 4.1 节"事件明细是唯一事实源"）。
  *
- * <p>本弹只产生"发放"事件；其余事件类型随后续用例补齐。
+ * <p>已产生的事件：发放(issued)/锁定(locked)/核销(used,含金额)/释放(released)。
+ * 尚无产生点：过期(EXPIRED)/作废(INVALIDATED)——随 M1 过期全链路与 M6 作废功能补齐。
  */
 public final class CouponEvent {
 

@@ -20,7 +20,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -45,7 +44,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *
  * <p>验收清单（对应计划 v2 第六节）：
  * ① 1000 并发抢 100 张：成功=100、issued=100、事件=100（零超发 + 对账恒等式）
- * ② 同用户异 requestId 并发 10：恰 1 张（uk_user_template 路径）
+ * ② 同用户异 requestId 并发 10：恰 1 张（阶段1起由 Redis 闸门 -2 拦截；DB 侧 uk_user_seq 兜底见 RedisStockIntegrationTest②）
  * ③ 同用户同 requestId 并发 10：恰 1 张、全部返回同一券、败者 duplicated=true（uk_idem 路径）
  * ④ 读回字段级断言：快照/状态/valid_end 固化两种券型各验（防"状态污染"类 bug）
  * ⑤ 库存=1 顺序领：第二人 STOCK_OUT
@@ -154,7 +153,7 @@ class ReceiveIntegrationTest {
 
     @Test
     @Timeout(120)
-    @DisplayName("验收②：同用户异requestId并发10次 → 恰1张（uk_user_template 拦截）")
+    @DisplayName("验收②：同用户异requestId并发10次 → 恰1张（Redis闸门-2拦截，issued无虚扣）")
     void sameUserDifferentRequestIds() throws Exception {
         long templateId = createFixedTemplate(1000);
 
@@ -253,7 +252,7 @@ class ReceiveIntegrationTest {
 
     @Test
     @Timeout(60)
-    @DisplayName("验收⑥：超领失败后 issued_count 不变——事务回滚撤销了扣减（回滚=补偿的证明）")
+    @DisplayName("验收⑥：超领被拒后 issued_count 不变（阶段1：闸门在扣库存前拦截，DB不虚扣；Redis计数丢失的DB兜底另见RedisStock②）")
     void rollbackRestoresStock() {
         long templateId = createFixedTemplate(100);
         receiveAppService.receive(new ReceiveRequest("rb-c-1", 50_001L, templateId));   // 成功，issued=1

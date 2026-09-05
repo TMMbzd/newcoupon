@@ -36,11 +36,11 @@ public interface TemplateRepository {
     boolean casUpdatePublishStatus(long id, PublishStatus from, PublishStatus to);
 
     /**
-     * 条件扣库存（ADR-0004 增补1）：issued_count+1，守卫
+     * 条件扣库存（ADR-0006 双防线的 DB 侧）：issued_count+1，守卫
      * {@code issued_count < total_count AND publish_status=1 AND approve_status=1}。
-     * 检查与写入在一条 SQL 内原子完成——这是阶段 0 防超发的核心。
+     * 检查与写入一条 SQL 原子完成——即使 Redis 闸门额度异常偏大，这里仍保证零超发。
      *
-     * @return 影响行数：1=扣减成功；0=售罄或模板不可领（调用方须重读模板分类错误码）
+     * @return 影响行数：1=成功；0=售罄或状态竞态（调用方应抛信号，由编排层事务外新快照分类）
      */
     int casDeductStock(long templateId);
 }

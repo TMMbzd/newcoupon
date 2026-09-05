@@ -11,7 +11,7 @@ import jakarta.validation.constraints.Size;
  * <p>requestId 语义（study/01a Q10）：调用方（前端/上游服务）为"一次领取意图"生成的编号，
  * 网络超时重试时必须复用同一个——它配合服务端唯一索引保证"重试不重发"。
  *
- * <p>⚠️ 阶段 0 已登记简化：userId 由请求携带（无登录态）；阶段 3 接入登录态后
+ * <p>⚠️ 已登记简化（STATUS L12）：userId 由请求携带（无登录态）；ROADMAP M6 接入登录态后
  * 改为从 token 解析，**绝不信任参数里的身份**（现在是"没有登录态"而不是"身份可以伪造"）。
  */
 public record ReceiveRequest(

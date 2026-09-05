@@ -7,7 +7,7 @@ import java.time.LocalDateTime;
 
 /**
  * UserCoupon DO ↔ PO 转换。toDomain 走 reconstitute（复活），状态以 DB 为准——
- * 阶段 0 只有 USABLE 一种落库状态，后续用例扩展状态后此纪律更关键（防止 03a 讲过的"状态重置"bug）。
+ * 落库状态含 USABLE/LOCKED/USED/EXPIRED（用券三段经 CAS 写入），CouponStatus.of() 全量还原、遇脏值当场抛错。
  */
 public final class UserCouponPOConverter {
 

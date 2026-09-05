@@ -232,11 +232,8 @@ class ReceiveAppServiceTest {
         givenTemplateAndGate(1, new DeductResult(0, 1));
         when(issueTxService.issue(any(), any(), anyLong(), any()))
                 .thenThrow(new StockDeductRejectedException(1L));
-        when(templateRepository.findById(1L))
-                .thenReturn(Optional.of(template(1)))                    // 编排层读取
-                .thenReturn(Optional.of(template(1)));// 事务外重读（issued=10,total=100 未满→状态竞态）
-        // 让重读显示已满：改用第二个 stub 语义——这里直接用 issued>=total 的模板
-        when(templateRepository.findById(1L)).thenReturn(Optional.of(
+        // 事务外分类重读：issued(100) >= total(100) → 售罄
+        when(templateRepository.findById(anyLong())).thenReturn(Optional.of(
                 CouponTemplate.reconstitute(1L,
                         CouponTemplate.Creation.builder()
                                 .templateCode("T1").activityId(1L).name("满100减10")

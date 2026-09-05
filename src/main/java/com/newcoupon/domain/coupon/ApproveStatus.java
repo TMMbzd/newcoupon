@@ -3,7 +3,7 @@ package com.newcoupon.domain.coupon;
 /**
  * 模板审批状态（coupon_template.approve_status）。
  * 与发布状态正交（双状态机，docs/01 第 4.3 节）：审批管"内容对不对"，发布管"能不能领"。
- * 阶段0省略审批流（创建即视为审批通过），见 docs/adr/ADR-0005；交叉审核在阶段3补齐。
+ * 阶段省略审批流（创建即视为审批通过），见 docs/adr/ADR-0005；交叉审核 ROADMAP M6 补齐（STATUS L1）。
  */
 public enum ApproveStatus {
 

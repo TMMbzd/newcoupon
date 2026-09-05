@@ -23,13 +23,13 @@ import org.springframework.stereotype.Service;
  *
  * <p>⚠️ 本类【严禁】@Transactional（rollback-only 退化，study/04a 第 4 部分）。
  *
- * <p>领券全流程（每步失败都有明确去向）：
+ * <p>领券全流程（2026-09-05 起为 Redis 优先形态，每步失败都有明确去向）：
  * <pre>
- * ① DB 幂等快查（终审语义在 DB：跨模板的 requestId 一致性在这里判）
- * ② 读模板 + assertReceivable（内存快检；状态竞态由 DB CAS 兜底）
- * ③ Redis Lua 闸门：五重校验原子扣减（-7 未初始化→懒重建后重试一次）
- * ④ DB 事务（双防线扣账 + 落券(带seq) + 事件）——失败则 Lua 补偿，把 Redis 还原
- * ⑤ 各类冲突 → 回查 DB 分类成准确错误/幂等成功
+ * ① 读模板 + assertReceivable（内存快检；状态竞态由 DB CAS 兜底）
+ * ② Redis Lua 闸门：幂等检查内置于脚本首步（EXISTS→-8 回查 DB 确认），
+ *    五重校验原子扣减（-7 未初始化→懒重建后重试一次）
+ * ③ DB 事务（双防线扣账 + 落券(带seq) + 事件）——失败则 Lua 补偿，把 Redis 还原；
+ *    各类冲突在事务外回查 DB/新快照，分类成准确错误或幂等成功
  * </pre>
  */
 @Service
@@ -83,7 +83,7 @@ public class ReceiveAppService {
             return handleGateRejected(req, d);
         }
 
-        // ④ DB 事务；任何失败都要把 Redis 扣掉的还回去（补偿）
+        // ③ DB 事务；任何失败都要把 Redis 扣掉的还回去（补偿）
         try {
             UserCoupon issued = issueTxService.issue(req, template, d.seq(), LocalDateTime.now());
             return ReceiveResult.of(issued, false);
