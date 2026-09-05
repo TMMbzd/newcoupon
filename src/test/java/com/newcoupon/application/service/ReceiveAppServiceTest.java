@@ -74,27 +74,29 @@ class ReceiveAppServiceTest {
     }
 
     private void givenTemplateAndGate(int perUserLimit, DeductResult gate) {
-        when(templateRepository.findById(1L)).thenReturn(Optional.of(template(perUserLimit)));
+        when(templateRepository.findById(anyLong())).thenReturn(Optional.of(template(perUserLimit)));
         when(stockGateway.deduct(any())).thenReturn(gate);
     }
 
     // ---------- 快查与闸门前校验 ----------
 
     @Test
-    @DisplayName("DB快查命中同模板 → duplicated=true，不进闸门不进事务")
-    void fastPathSameTemplate() {
+    @DisplayName("Redis幂等命中(-8)同模板 → DB确认 → duplicated=true，不进事务")
+    void gateIdemHitSameTemplate() {
+        givenTemplateAndGate(1, new DeductResult(-8, 0));
         when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
                 .thenReturn(Optional.of(coupon(1L, 1)));
 
         ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
 
         assertThat(r.duplicated()).isTrue();
-        verifyNoInteractions(stockGateway, issueTxService);
+        verifyNoInteractions(issueTxService);
     }
 
     @Test
-    @DisplayName("DB快查命中换模板 → 1001 拒绝（requestId绑定领取意图）")
-    void fastPathDifferentTemplateRejected() {
+    @DisplayName("Redis幂等命中(-8)但换模板 → DB确认后 1001 拒绝（requestId绑定领取意图）")
+    void gateIdemHitDifferentTemplateRejected() {
+        givenTemplateAndGate(1, new DeductResult(-8, 0));
         when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
                 .thenReturn(Optional.of(coupon(1L, 1)));
 
@@ -104,9 +106,20 @@ class ReceiveAppServiceTest {
     }
 
     @Test
+    @DisplayName("入口不再打DB快查：首次领取路径零前置DB幂等查询（评审修正的回归）")
+    void noUpfrontDbIdempotentSelect() {
+        givenTemplateAndGate(1, new DeductResult(-3, 0));   // 直接售罄
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 1L)))
+                .isInstanceOf(BizException.class);
+        // 闸门拒绝后的陈旧重放检查只查一次；若入口还有快查，这里会是两次
+        verify(userCouponRepository, org.mockito.Mockito.times(1)).findByIdempotentKey(42L, "req-1");
+    }
+
+    @Test
     @DisplayName("模板不存在 → 2001（闸门前拦截）")
     void templateMissing() {
-        when(userCouponRepository.findByIdempotentKey(42L, "req-1")).thenReturn(Optional.empty());
         when(templateRepository.findById(1L)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 1L)))
@@ -131,9 +144,9 @@ class ReceiveAppServiceTest {
     @DisplayName("闸门-2超领，但DB幂等命中 → 陈旧重放（idem键TTL过期）→ duplicated=true")
     void gateLimitButStaleReplay() {
         givenTemplateAndGate(1, new DeductResult(-2, 0));
+        // 重排序后：入口无快查，闸门拒绝后的"陈旧重放检查"是唯一一次DB查询，直接命中
         when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
-                .thenReturn(Optional.empty())               // 快查未命中（TTL已过）
-                .thenReturn(Optional.of(coupon(1L, 1)));    // 拒绝后的陈旧重放检查命中
+                .thenReturn(Optional.of(coupon(1L, 1)));
 
         ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
 
@@ -141,16 +154,15 @@ class ReceiveAppServiceTest {
     }
 
     @Test
-    @DisplayName("闸门-8（Redis幂等命中）→ DB确认 → duplicated=true")
-    void gateIdemHit() {
+    @DisplayName("闸门-8但DB未查到（并发在途：赢家未提交）→ 1001 处理中提示")
+    void gateIdemHitButInFlight() {
         givenTemplateAndGate(1, new DeductResult(-8, 0));
         when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
-                .thenReturn(Optional.empty())
-                .thenReturn(Optional.of(coupon(1L, 1)));
+                .thenReturn(Optional.empty());
 
-        ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
-
-        assertThat(r.duplicated()).isTrue();
+        assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 1L)))
+                .extracting(e -> ((BizException) e).getErrorCode())
+                .isEqualTo(ErrorCode.REQUEST_DUPLICATED);
         verifyNoInteractions(issueTxService);
     }
 
@@ -190,8 +202,7 @@ class ReceiveAppServiceTest {
         when(issueTxService.issue(any(), any(), anyLong(), any()))
                 .thenThrow(new DuplicateKeyException("uk_idem"));
         when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
-                .thenReturn(Optional.empty())
-                .thenReturn(Optional.of(coupon(1L, 1)));
+                .thenReturn(Optional.of(coupon(1L, 1)));   // 分类时的唯一一次DB查询直接命中
 
         ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
 

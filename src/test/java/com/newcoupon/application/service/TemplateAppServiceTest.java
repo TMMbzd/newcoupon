@@ -74,8 +74,8 @@ class TemplateAppServiceTest {
         TemplateAppService.CreatedTemplate created = service.create(validRequest());
 
         assertThat(created.id()).isEqualTo(77L);
-        // 编码 = "T" + yyyyMMddHHmmss(14位) + 3位随机 = 18 字符
-        assertThat(created.templateCode()).startsWith("T").hasSize(18);
+        // 编码 = "T" + yyyyMMddHHmmss(14位) + 6位随机 = 21 字符（随机位从3扩到6：防同秒碰撞，见生成器注释）
+        assertThat(created.templateCode()).startsWith("T").hasSize(21);
     }
 
     @Test

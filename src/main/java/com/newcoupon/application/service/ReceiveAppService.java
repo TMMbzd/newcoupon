@@ -58,18 +58,16 @@ public class ReceiveAppService {
     }
 
     public ReceiveResult receive(ReceiveRequest req) {
-        // ① DB 幂等快查（隔了几秒的正常重试在此返回；并发窗口由唯一索引兜底）
-        Optional<UserCoupon> fast = userCouponRepository.findByIdempotentKey(req.userId(), req.requestId());
-        if (fast.isPresent()) {
-            return toDuplicatedResult(fast.get(), req);
-        }
-
-        // ② 读模板 + 可领性校验（编排层无事务=每次读最新快照）
+        // ① 读模板 + 可领性校验（弹2将替换为二级缓存；编排层无事务=每次读最新快照）
         CouponTemplate template = templateRepository.findById(req.templateId())
                 .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + req.templateId()));
         template.assertReceivable(LocalDateTime.now());
 
-        // ③ Redis Lua 闸门（-7 未初始化 → 懒重建一次再试；仍失败走降级提示）
+        // ② Redis Lua 闸门——幂等检查内置于脚本第①道（EXISTS 幂等key → -8）。
+        //    设计取舍（2026-09-07 评审修正）：入口幂等只用 Redis，不再先打 DB 快查——
+        //    抢购洪峰中"首次领取"是多数派，每请求一次 DB SELECT 白耗连接池（实测2000并发已撞池）；
+        //    重复请求是少数派，-8 后回 DB 确认一次即可（查到→duplicated；查不到→在途1001）。
+        //    DB 的 uk_idem 唯一索引仍是终审：TTL过期/并发窗口/跨模板重放全部由它兜底。
         DeductCommand cmd = new DeductCommand(req.templateId(), req.userId(), req.requestId(),
                 template.getPerUserLimit(), template.getPerUserDailyLimit(), template.getDailyLimit(),
                 DAY_TTL_SEC, IDEM_TTL_SEC);

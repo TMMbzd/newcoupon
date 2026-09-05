@@ -100,10 +100,14 @@ public class TemplateAppService {
         return TemplateResponse.from(t);
     }
 
-    /** 业务编码：T + 时间戳 + 3位随机。对外暴露编码而非自增id（防止被爬虫枚举出业务量级） */
+    /**
+     * 业务编码：T + 秒级时间戳 + 6位随机。对外暴露编码而非自增id（防爬虫枚举业务量级）。
+     * 随机从3位扩到6位：同秒创建两个模板的相撞概率从1/900（集成测试实测撞过）
+     * 降到1/90万——低频M端操作下可接受；若未来编码冲突成为问题，改用"实例序号+原子计数器"。
+     */
     private String generateCode() {
         return "T" + LocalDateTime.now().format(CODE_DATE)
-                + ThreadLocalRandom.current().nextInt(100, 1000);
+                + ThreadLocalRandom.current().nextInt(100_000, 1_000_000);
     }
 
     /** 建券结果 */
