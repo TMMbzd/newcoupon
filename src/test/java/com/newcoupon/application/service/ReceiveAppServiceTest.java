@@ -3,8 +3,11 @@ package com.newcoupon.application.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.newcoupon.application.dto.ReceiveRequest;
@@ -20,6 +23,8 @@ import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.coupon.ValidType;
 import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
+import com.newcoupon.infrastructure.redis.RedisStockGateway;
+import com.newcoupon.infrastructure.redis.RedisStockGateway.DeductResult;
 import java.time.LocalDateTime;
 import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
@@ -31,11 +36,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DuplicateKeyException;
 
 /**
- * 编排层全分支测试：幂等快查（同模板/换模板）、事务成功、DuplicateKey 四种分类。
- * 事务服务整被 mock——编排层的职责是"翻译冲突"，不依赖真事务。
+ * 领券编排层（阶段 1：Redis Lua 闸门）全分支测试。
  */
 @ExtendWith(MockitoExtension.class)
-@DisplayName("领券编排层")
+@DisplayName("领券编排层·Redis闸门")
 class ReceiveAppServiceTest {
 
     @Mock
@@ -44,83 +48,55 @@ class ReceiveAppServiceTest {
     private TemplateRepository templateRepository;
     @Mock
     private CouponIssueTxService issueTxService;
+    @Mock
+    private RedisStockGateway stockGateway;
+    @Mock
+    private StockReconcileService reconcileService;
 
     @InjectMocks
     private ReceiveAppService service;
 
-    private static UserCoupon coupon(long templateId) {
-        return UserCoupon.reconstitute(5L, 42L, templateId, "T1",
-                1000L, 10000L, null,
-                LocalDateTime.of(2026, 9, 12, 23, 59, 59), CouponStatus.USABLE,
-                LocalDateTime.of(2026, 9, 5, 10, 0), "req-1");
+    private static CouponTemplate template(int perUserLimit) {
+        return CouponTemplate.reconstitute(1L,
+                CouponTemplate.Creation.builder()
+                        .templateCode("T1").activityId(1L).name("满100减10")
+                        .couponType(CouponType.FULL_REDUCTION)
+                        .faceValue(1000L).threshold(10000L).totalCount(100L)
+                        .perUserLimit(perUserLimit)
+                        .validType(ValidType.AFTER_RECEIVE).validDays(7).build(),
+                10L, ApproveStatus.APPROVED, PublishStatus.PUBLISHED);
     }
 
-    // ---------- 幂等快查路径 ----------
+    private static UserCoupon coupon(long templateId, int seq) {
+        return UserCoupon.reconstitute(5L, 42L, templateId, "T1", 1000L, 10000L, null,
+                LocalDateTime.of(2026, 9, 14, 23, 59, 59), CouponStatus.USABLE,
+                LocalDateTime.now(), "req-1", seq);
+    }
+
+    private void givenTemplateAndGate(int perUserLimit, DeductResult gate) {
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(template(perUserLimit)));
+        when(stockGateway.deduct(any())).thenReturn(gate);
+    }
+
+    // ---------- 快查与闸门前校验 ----------
 
     @Test
-    @DisplayName("快查命中同模板 → duplicated=true 直接返回，不进事务")
+    @DisplayName("DB快查命中同模板 → duplicated=true，不进闸门不进事务")
     void fastPathSameTemplate() {
         when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
-                .thenReturn(Optional.of(coupon(1L)));
+                .thenReturn(Optional.of(coupon(1L, 1)));
 
         ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
 
         assertThat(r.duplicated()).isTrue();
-        assertThat(r.couponId()).isEqualTo(5L);
-        verify(issueTxService, never()).issue(any(), any());
+        verifyNoInteractions(stockGateway, issueTxService);
     }
 
     @Test
-    @DisplayName("快查命中但换模板（复用陈旧 requestId）→ REQUEST_DUPLICATED 拒绝，绝不当成功")
+    @DisplayName("DB快查命中换模板 → 1001 拒绝（requestId绑定领取意图）")
     void fastPathDifferentTemplateRejected() {
         when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
-                .thenReturn(Optional.of(coupon(1L)));       // 已领的是模板1
-
-        assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 2L)))  // 来领模板2
-                .isInstanceOf(BizException.class)
-                .extracting(e -> ((BizException) e).getErrorCode())
-                .isEqualTo(ErrorCode.REQUEST_DUPLICATED);
-    }
-
-    // ---------- 事务成功路径 ----------
-
-    @Test
-    @DisplayName("快查未命中 → 进事务领取成功，duplicated=false")
-    void issueSuccess() {
-        when(userCouponRepository.findByIdempotentKey(42L, "req-1")).thenReturn(Optional.empty());
-        when(issueTxService.issue(any(), any())).thenReturn(coupon(1L));
-
-        ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
-
-        assertThat(r.duplicated()).isFalse();
-        assertThat(r.couponId()).isEqualTo(5L);
-    }
-
-    // ---------- DuplicateKey 冲突分类（回滚后重查） ----------
-
-    @Test
-    @DisplayName("撞唯一索引→重查幂等键命中同模板 → duplicated=true（并发重放场景）")
-    void dupKeyClassifiedAsIdempotent() {
-        when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
-                .thenReturn(Optional.empty())                    // 快查时未命中（并发窗口）
-                .thenReturn(Optional.of(coupon(1L)));            // 回滚后重查命中（对手方已提交）
-        when(issueTxService.issue(any(), any()))
-                .thenThrow(new DuplicateKeyException("Duplicate entry for key 'uk_idem'"));
-
-        ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
-
-        assertThat(r.duplicated()).isTrue();
-        assertThat(r.couponId()).isEqualTo(5L);
-    }
-
-    @Test
-    @DisplayName("撞唯一索引→重查幂等键命中但换模板 → REQUEST_DUPLICATED")
-    void dupKeyClassifiedAsIdempotentConflict() {
-        when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
-                .thenReturn(Optional.empty())
-                .thenReturn(Optional.of(coupon(1L)));
-        when(issueTxService.issue(any(), any()))
-                .thenThrow(new DuplicateKeyException("dup"));
+                .thenReturn(Optional.of(coupon(1L, 1)));
 
         assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 2L)))
                 .extracting(e -> ((BizException) e).getErrorCode())
@@ -128,68 +104,139 @@ class ReceiveAppServiceTest {
     }
 
     @Test
-    @DisplayName("撞唯一索引→幂等键未命中+用户模板命中 → USER_LIMIT_EXCEEDED（并发超领场景）")
-    void dupKeyClassifiedAsUserLimit() {
-        when(userCouponRepository.findByIdempotentKey(42L, "req-2"))
-                .thenReturn(Optional.empty())
-                .thenReturn(Optional.empty());
-        when(userCouponRepository.findByUserAndTemplate(42L, 1L))
-                .thenReturn(Optional.of(coupon(1L)));            // 已领过这张券（别的 requestId）
-        when(issueTxService.issue(any(), any()))
-                .thenThrow(new DuplicateKeyException("Duplicate entry for key 'uk_user_template'"));
+    @DisplayName("模板不存在 → 2001（闸门前拦截）")
+    void templateMissing() {
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1")).thenReturn(Optional.empty());
+        when(templateRepository.findById(1L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-2", 42L, 1L)))
+        assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 1L)))
                 .extracting(e -> ((BizException) e).getErrorCode())
-                .isEqualTo(ErrorCode.USER_LIMIT_EXCEEDED);
+                .isEqualTo(ErrorCode.TEMPLATE_NOT_FOUND);
     }
+
+    // ---------- 闸门拒绝分支 ----------
 
     @Test
-    @DisplayName("撞唯一索引但两路重查都未命中 → 系统异常兜底（理论不可达，绝不静默）")
-    void dupKeyNoMatchFallsToSystemError() {
-        when(userCouponRepository.findByIdempotentKey(42L, "req-3"))
-                .thenReturn(Optional.empty())
-                .thenReturn(Optional.empty());
-        when(userCouponRepository.findByUserAndTemplate(42L, 1L)).thenReturn(Optional.empty());
-        when(issueTxService.issue(any(), any())).thenThrow(new DuplicateKeyException("dup"));
+    @DisplayName("闸门-3售罄（无陈旧重放）→ 3001")
+    void gateSoldOut() {
+        givenTemplateAndGate(1, new DeductResult(-3, 0));
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1")).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-3", 42L, 1L)))
-                .extracting(e -> ((BizException) e).getErrorCode())
-                .isEqualTo(ErrorCode.SYSTEM_ERROR);
-    }
-
-    // ---------- 扣减被拒分类（事务外新快照） ----------
-
-    private static CouponTemplate tpl(long issued, long total) {
-        return CouponTemplate.reconstitute(1L,
-                CouponTemplate.Creation.builder()
-                        .templateCode("T1").activityId(1L).name("n")
-                        .couponType(CouponType.NO_THRESHOLD).faceValue(500L).threshold(0L)
-                        .totalCount(total).perUserLimit(1)
-                        .validType(ValidType.AFTER_RECEIVE).validDays(7).build(),
-                issued, ApproveStatus.APPROVED, PublishStatus.PUBLISHED);
-    }
-
-    @Test
-    @DisplayName("扣减被拒+新快照已售罄 → STOCK_OUT")
-    void deductRejectedSoldOut() {
-        when(userCouponRepository.findByIdempotentKey(42L, "sd-1")).thenReturn(Optional.empty());
-        when(issueTxService.issue(any(), any())).thenThrow(new StockDeductRejectedException(1L));
-        when(templateRepository.findById(1L)).thenReturn(java.util.Optional.of(tpl(100, 100)));
-
-        assertThatThrownBy(() -> service.receive(new ReceiveRequest("sd-1", 42L, 1L)))
+        assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 1L)))
                 .extracting(e -> ((BizException) e).getErrorCode())
                 .isEqualTo(ErrorCode.STOCK_OUT);
     }
 
     @Test
-    @DisplayName("扣减被拒+新快照库存有余 → 模板状态竞态 → TEMPLATE_NOT_RECEIVABLE")
-    void deductRejectedStatusRace() {
-        when(userCouponRepository.findByIdempotentKey(42L, "sd-2")).thenReturn(Optional.empty());
-        when(issueTxService.issue(any(), any())).thenThrow(new StockDeductRejectedException(1L));
-        when(templateRepository.findById(1L)).thenReturn(java.util.Optional.of(tpl(10, 100)));
+    @DisplayName("闸门-2超领，但DB幂等命中 → 陈旧重放（idem键TTL过期）→ duplicated=true")
+    void gateLimitButStaleReplay() {
+        givenTemplateAndGate(1, new DeductResult(-2, 0));
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
+                .thenReturn(Optional.empty())               // 快查未命中（TTL已过）
+                .thenReturn(Optional.of(coupon(1L, 1)));    // 拒绝后的陈旧重放检查命中
 
-        assertThatThrownBy(() -> service.receive(new ReceiveRequest("sd-2", 42L, 1L)))
+        ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
+
+        assertThat(r.duplicated()).isTrue();
+    }
+
+    @Test
+    @DisplayName("闸门-8（Redis幂等命中）→ DB确认 → duplicated=true")
+    void gateIdemHit() {
+        givenTemplateAndGate(1, new DeductResult(-8, 0));
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(coupon(1L, 1)));
+
+        ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
+
+        assertThat(r.duplicated()).isTrue();
+        verifyNoInteractions(issueTxService);
+    }
+
+    @Test
+    @DisplayName("闸门-7未初始化 → 懒重建后重试成功")
+    void gateUninitializedRebuildsAndRetries() {
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(template(1)));
+        when(stockGateway.deduct(any()))
+                .thenReturn(new DeductResult(-7, 0))
+                .thenReturn(new DeductResult(0, 1));
+        when(issueTxService.issue(any(), any(), eq(1L), any())).thenReturn(coupon(1L, 1));
+
+        ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
+
+        assertThat(r.duplicated()).isFalse();
+        verify(reconcileService).rebuildStock(1L);
+    }
+
+    // ---------- 事务成功与失败补偿 ----------
+
+    @Test
+    @DisplayName("闸门过+事务成功 → duplicated=false，无补偿")
+    void happyPathNoCompensation() {
+        givenTemplateAndGate(3, new DeductResult(0, 2));
+        when(issueTxService.issue(any(), any(), eq(2L), any())).thenReturn(coupon(1L, 2));
+
+        ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
+
+        assertThat(r.duplicated()).isFalse();
+        verify(stockGateway, never()).compensate(any());
+    }
+
+    @Test
+    @DisplayName("事务DuplicateKey → 补偿被调用 + 分类为幂等成功（uk_idem）")
+    void duplicateKeyCompensatesAndClassifies() {
+        givenTemplateAndGate(1, new DeductResult(0, 1));
+        when(issueTxService.issue(any(), any(), anyLong(), any()))
+                .thenThrow(new DuplicateKeyException("uk_idem"));
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(coupon(1L, 1)));
+
+        ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
+
+        assertThat(r.duplicated()).isTrue();
+        verify(stockGateway).compensate(any());   // Redis 扣掉的必须还回去
+    }
+
+    @Test
+    @DisplayName("事务DuplicateKey 且非幂等键 → 3002（Redis计数丢失，DB序号索引兜底）")
+    void duplicateKeySeqConflictIsUserLimit() {
+        givenTemplateAndGate(1, new DeductResult(0, 1));
+        when(issueTxService.issue(any(), any(), anyLong(), any()))
+                .thenThrow(new DuplicateKeyException("uk_user_seq"));
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 1L)))
                 .extracting(e -> ((BizException) e).getErrorCode())
-                .isEqualTo(ErrorCode.TEMPLATE_NOT_RECEIVABLE);
+                .isEqualTo(ErrorCode.USER_LIMIT_EXCEEDED);
+        verify(stockGateway).compensate(any());
+    }
+
+    @Test
+    @DisplayName("事务StockDeductRejected → 补偿 + 新快照分类为售罄")
+    void stockRejectCompensatesAndClassifies() {
+        givenTemplateAndGate(1, new DeductResult(0, 1));
+        when(issueTxService.issue(any(), any(), anyLong(), any()))
+                .thenThrow(new StockDeductRejectedException(1L));
+        when(templateRepository.findById(1L))
+                .thenReturn(Optional.of(template(1)))                    // 编排层读取
+                .thenReturn(Optional.of(template(1)));// 事务外重读（issued=10,total=100 未满→状态竞态）
+        // 让重读显示已满：改用第二个 stub 语义——这里直接用 issued>=total 的模板
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(
+                CouponTemplate.reconstitute(1L,
+                        CouponTemplate.Creation.builder()
+                                .templateCode("T1").activityId(1L).name("满100减10")
+                                .couponType(CouponType.FULL_REDUCTION)
+                                .faceValue(1000L).threshold(10000L).totalCount(100L).perUserLimit(1)
+                                .validType(ValidType.AFTER_RECEIVE).validDays(7).build(),
+                        100L, ApproveStatus.APPROVED, PublishStatus.PUBLISHED)));
+
+        assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 1L)))
+                .extracting(e -> ((BizException) e).getErrorCode())
+                .isEqualTo(ErrorCode.STOCK_OUT);
+        verify(stockGateway).compensate(any());
     }
 }

@@ -29,11 +29,12 @@ public final class UserCoupon {
     private final CouponStatus status;
     private final LocalDateTime receiveTime;
     private final String idempotentKey;
+    private final int seq;   // 同用户同模板内的发放序号(1..N)，来自 Redis 计数——uk_user_seq 唯一索引的物理载体
 
     private UserCoupon(Long id, long userId, long templateId, String templateCode,
                        long faceValue, long threshold, Long discountCap,
                        LocalDateTime validEnd, CouponStatus status,
-                       LocalDateTime receiveTime, String idempotentKey) {
+                       LocalDateTime receiveTime, String idempotentKey, int seq) {
         this.id = id;
         this.userId = userId;
         this.templateId = templateId;
@@ -45,6 +46,7 @@ public final class UserCoupon {
         this.status = status;
         this.receiveTime = receiveTime;
         this.idempotentKey = idempotentKey;
+        this.seq = seq;
     }
 
     /**
@@ -52,13 +54,14 @@ public final class UserCoupon {
      * 初始状态固定为"待使用"。
      */
     public static UserCoupon issue(CouponTemplate template, long userId,
-                                   String idempotentKey, LocalDateTime now) {
+                                   String idempotentKey, int seq, LocalDateTime now) {
         template.assertReceivable(now);
         require(userId > 0, "userId 必须为正");
         require(idempotentKey != null && !idempotentKey.isBlank(), "幂等键(requestId)必填");
+        require(seq >= 1, "发放序号必须>=1（来自Redis用户计数）");
         return new UserCoupon(null, userId, template.getId(), template.getTemplateCode(),
                 template.getFaceValue(), template.getThreshold(), template.getDiscountCap(),
-                resolveValidEnd(template, now), CouponStatus.USABLE, now, idempotentKey);
+                resolveValidEnd(template, now), CouponStatus.USABLE, now, idempotentKey, seq);
     }
 
     /**
@@ -78,15 +81,15 @@ public final class UserCoupon {
     public static UserCoupon reconstitute(Long id, long userId, long templateId, String templateCode,
                                           long faceValue, long threshold, Long discountCap,
                                           LocalDateTime validEnd, CouponStatus status,
-                                          LocalDateTime receiveTime, String idempotentKey) {
+                                          LocalDateTime receiveTime, String idempotentKey, int seq) {
         return new UserCoupon(id, userId, templateId, templateCode, faceValue, threshold,
-                discountCap, validEnd, status, receiveTime, idempotentKey);
+                discountCap, validEnd, status, receiveTime, idempotentKey, seq);
     }
 
     /** insert 成功后回填主键 */
     public UserCoupon withId(long id) {
         return new UserCoupon(id, userId, templateId, templateCode, faceValue, threshold,
-                discountCap, validEnd, status, receiveTime, idempotentKey);
+                discountCap, validEnd, status, receiveTime, idempotentKey, seq);
     }
 
     private static void require(boolean condition, String message) {
@@ -106,4 +109,5 @@ public final class UserCoupon {
     public CouponStatus getStatus() { return status; }
     public LocalDateTime getReceiveTime() { return receiveTime; }
     public String getIdempotentKey() { return idempotentKey; }
+    public int getSeq() { return seq; }
 }

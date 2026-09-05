@@ -27,6 +27,7 @@ public final class UserCouponPOConverter {
         p.setStatus(d.getStatus().getCode());
         p.setReceiveTime(receiveTime);
         p.setIdempotentKey(d.getIdempotentKey());
+        p.setSeq(d.getSeq());
         return p;
     }
 
@@ -35,6 +36,6 @@ public final class UserCouponPOConverter {
                 p.getId(), p.getUserId(), p.getTemplateId(), p.getTemplateCode(),
                 p.getFaceValue(), p.getThreshold(), p.getDiscountCap(),
                 p.getValidEnd(), CouponStatus.of(p.getStatus()),
-                p.getReceiveTime(), p.getIdempotentKey());
+                p.getReceiveTime(), p.getIdempotentKey(), p.getSeq());
     }
 }

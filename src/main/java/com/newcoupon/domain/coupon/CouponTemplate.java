@@ -38,6 +38,8 @@ public final class CouponTemplate {
     private final long threshold;     // 使用门槛，分
     private final long totalCount;    // 审批总库存，只增不减
     private final int perUserLimit;
+    private final long dailyLimit;            // 批次每日发放上限，0=不限
+    private final int perUserDailyLimit;      // 每人每日限领，0=不限
     private final ValidType validType;
     private final LocalDateTime validStart;
     private final LocalDateTime validEnd;
@@ -57,6 +59,8 @@ public final class CouponTemplate {
         this.threshold = c.threshold();
         this.totalCount = c.totalCount();
         this.perUserLimit = c.perUserLimit();
+        this.dailyLimit = c.dailyLimit();
+        this.perUserDailyLimit = c.perUserDailyLimit();
         this.validType = c.validType();
         this.validStart = c.validStart();
         this.validEnd = c.validEnd();
@@ -82,6 +86,8 @@ public final class CouponTemplate {
         this.threshold = src.threshold;
         this.totalCount = src.totalCount;
         this.perUserLimit = src.perUserLimit;
+        this.dailyLimit = src.dailyLimit;
+        this.perUserDailyLimit = src.perUserDailyLimit;
         this.validType = src.validType;
         this.validStart = src.validStart;
         this.validEnd = src.validEnd;
@@ -102,7 +108,11 @@ public final class CouponTemplate {
         require(c.couponType() != null, "券类型必填");
         require(c.faceValue() > 0, "面额必须为正");
         require(c.totalCount() > 0, "总库存必须为正");
-        require(c.perUserLimit() >= 1, "每人限领至少 1 张");
+        require(c.perUserLimit() >= 1 && c.perUserLimit() <= 99, "每人限领 1~99 张");
+        require(c.dailyLimit() >= 0, "批次日限不能为负（0=不限）");
+        require(c.perUserDailyLimit() >= 0, "每人日限不能为负（0=不限）");
+        require(c.perUserDailyLimit() == 0 || c.perUserDailyLimit() <= c.perUserLimit(),
+                "每人日限不能超过每人总限领");
         require(c.validType() != null, "有效期类型必填");
 
         // —— 券类型相关不变量（资损防线）——
@@ -257,6 +267,14 @@ public final class CouponTemplate {
         return perUserLimit;
     }
 
+    public long getDailyLimit() {
+        return dailyLimit;
+    }
+
+    public int getPerUserDailyLimit() {
+        return perUserDailyLimit;
+    }
+
     public ValidType getValidType() {
         return validType;
     }
@@ -295,6 +313,8 @@ public final class CouponTemplate {
             long threshold,
             long totalCount,
             int perUserLimit,
+            long dailyLimit,
+            int perUserDailyLimit,
             ValidType validType,
             LocalDateTime validStart,
             LocalDateTime validEnd,
@@ -315,6 +335,8 @@ public final class CouponTemplate {
             private long threshold;
             private long totalCount;
             private int perUserLimit;
+            private long dailyLimit;
+            private int perUserDailyLimit;
             private ValidType validType;
             private LocalDateTime validStart;
             private LocalDateTime validEnd;
@@ -332,6 +354,8 @@ public final class CouponTemplate {
             public CreationBuilder threshold(long v) { this.threshold = v; return this; }
             public CreationBuilder totalCount(long v) { this.totalCount = v; return this; }
             public CreationBuilder perUserLimit(int v) { this.perUserLimit = v; return this; }
+            public CreationBuilder dailyLimit(long v) { this.dailyLimit = v; return this; }
+            public CreationBuilder perUserDailyLimit(int v) { this.perUserDailyLimit = v; return this; }
             public CreationBuilder validType(ValidType v) { this.validType = v; return this; }
             public CreationBuilder validStart(LocalDateTime v) { this.validStart = v; return this; }
             public CreationBuilder validEnd(LocalDateTime v) { this.validEnd = v; return this; }
@@ -339,8 +363,8 @@ public final class CouponTemplate {
 
             public Creation build() {
                 return new Creation(templateCode, activityId, name, couponType, faceValue,
-                        discountCap, threshold, totalCount, perUserLimit,
-                        validType, validStart, validEnd, validDays);
+                        discountCap, threshold, totalCount, perUserLimit, dailyLimit,
+                        perUserDailyLimit, validType, validStart, validEnd, validDays);
             }
         }
     }

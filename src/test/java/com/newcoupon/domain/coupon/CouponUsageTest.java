@@ -16,7 +16,7 @@ class CouponUsageTest {
 
     private static UserCoupon usableCoupon() {
         return UserCoupon.reconstitute(5L, 42L, 1L, "T1", 1000L, 10000L, null,
-                LocalDateTime.of(2026, 9, 12, 23, 59, 59), CouponStatus.USABLE, NOW, "req-1");
+                LocalDateTime.of(2026, 9, 12, 23, 59, 59), CouponStatus.USABLE, NOW, "req-1", 1);
     }
 
     @Test
@@ -36,7 +36,7 @@ class CouponUsageTest {
     void onlyUsableCanBeOccupied() {
         for (CouponStatus st : new CouponStatus[]{CouponStatus.LOCKED, CouponStatus.USED, CouponStatus.EXPIRED}) {
             UserCoupon locked = UserCoupon.reconstitute(5L, 42L, 1L, "T1", 1000L, 10000L, null,
-                    LocalDateTime.of(2026, 9, 12, 23, 59, 59), st, NOW, "req-1");
+                    LocalDateTime.of(2026, 9, 12, 23, 59, 59), st, NOW, "req-1", 1);
             assertThatThrownBy(() -> CouponUsage.occupy(locked, "ORD-1", "ORD-1:5", NOW))
                     .as("状态 %s 应被拒绝", st)
                     .hasMessageContaining("仅待使用");

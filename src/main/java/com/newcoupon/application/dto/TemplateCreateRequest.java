@@ -56,6 +56,12 @@ public record TemplateCreateRequest(
 
         LocalDateTime validStart,  // validType=1 必填（领域层校验）
         LocalDateTime validEnd,
-        Integer validDays          // validType=2 必填（领域层校验）
+        Integer validDays,         // validType=2 必填（领域层校验）
+
+        @Min(value = 0, message = "批次日限不能为负（0=不限）")
+        Long dailyLimit,           // null 视为 0
+
+        @Min(value = 0, message = "每人日限不能为负（0=不限）")
+        Integer perUserDailyLimit  // null 视为 0
 ) {
 }

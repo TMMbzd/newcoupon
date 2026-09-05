@@ -37,7 +37,7 @@ class UserCouponTest {
                 LocalDateTime.of(2026, 9, 1, 0, 0),
                 LocalDateTime.of(2026, 9, 10, 0, 0),   // ← 运营把结束时间配成 10 号 00:00:00
                 null);
-        UserCoupon uc = UserCoupon.issue(tpl, 42L, "req-001", NOW);
+        UserCoupon uc = UserCoupon.issue(tpl, 42L, "req-001", 1, NOW);
         assertThat(uc.getValidEnd()).isEqualTo(LocalDateTime.of(2026, 9, 10, 23, 59, 59));
     }
 
@@ -45,7 +45,7 @@ class UserCouponTest {
     @DisplayName("相对有效期券：validEnd = 领取日+validDays 的当日 23:59:59（不是领取时刻+7天）")
     void relativeValidEndNormalized() {
         CouponTemplate tpl = published(ValidType.AFTER_RECEIVE, null, null, 7);
-        UserCoupon uc = UserCoupon.issue(tpl, 42L, "req-001", NOW);   // 9-05 10:00 领取
+        UserCoupon uc = UserCoupon.issue(tpl, 42L, "req-001", 1, NOW);   // 9-05 10:00 领取
         assertThat(uc.getValidEnd()).isEqualTo(LocalDateTime.of(2026, 9, 12, 23, 59, 59));
     }
 
@@ -60,7 +60,7 @@ class UserCouponTest {
                         .totalCount(100L).perUserLimit(1)
                         .validType(ValidType.AFTER_RECEIVE).validDays(7).build(),
                 0L, ApproveStatus.APPROVED, PublishStatus.PUBLISHED);
-        UserCoupon uc = UserCoupon.issue(tpl, 42L, "req-002", NOW);
+        UserCoupon uc = UserCoupon.issue(tpl, 42L, "req-002", 1, NOW);
         assertThat(uc.getFaceValue()).isEqualTo(8500L);
         assertThat(uc.getThreshold()).isZero();
         assertThat(uc.getDiscountCap()).isEqualTo(5000L);
@@ -80,7 +80,7 @@ class UserCouponTest {
                         .totalCount(10L).perUserLimit(1)
                         .validType(ValidType.AFTER_RECEIVE).validDays(7).build(),
                 0L, ApproveStatus.APPROVED, PublishStatus.UNPUBLISHED);   // ← 未发布
-        assertThatThrownBy(() -> UserCoupon.issue(tpl, 42L, "req-003", NOW))
+        assertThatThrownBy(() -> UserCoupon.issue(tpl, 42L, "req-003", 1, NOW))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("仅已发布可领取");
     }
@@ -90,12 +90,12 @@ class UserCouponTest {
     void fixedWindowEnforced() {
         CouponTemplate notStarted = published(ValidType.FIXED,
                 LocalDateTime.of(2026, 9, 6, 0, 0), LocalDateTime.of(2026, 9, 10, 0, 0), null);
-        assertThatThrownBy(() -> UserCoupon.issue(notStarted, 42L, "req-004", NOW))
+        assertThatThrownBy(() -> UserCoupon.issue(notStarted, 42L, "req-004", 1, NOW))
                 .hasMessageContaining("未开始");
 
         CouponTemplate ended = published(ValidType.FIXED,
                 LocalDateTime.of(2026, 9, 1, 0, 0), LocalDateTime.of(2026, 9, 4, 0, 0), null);
-        assertThatThrownBy(() -> UserCoupon.issue(ended, 42L, "req-005", NOW))
+        assertThatThrownBy(() -> UserCoupon.issue(ended, 42L, "req-005", 1, NOW))
                 .hasMessageContaining("已结束");
     }
 
@@ -103,9 +103,9 @@ class UserCouponTest {
     @DisplayName("非法参数：userId<=0 / 空幂等键 拒绝")
     void illegalParamsRejected() {
         CouponTemplate tpl = published(ValidType.AFTER_RECEIVE, null, null, 7);
-        assertThatThrownBy(() -> UserCoupon.issue(tpl, 0L, "req-006", NOW))
+        assertThatThrownBy(() -> UserCoupon.issue(tpl, 0L, "req-006", 1, NOW))
                 .hasMessageContaining("userId");
-        assertThatThrownBy(() -> UserCoupon.issue(tpl, 42L, "  ", NOW))
+        assertThatThrownBy(() -> UserCoupon.issue(tpl, 42L, "  ", 1, NOW))
                 .hasMessageContaining("幂等键");
     }
 }

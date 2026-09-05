@@ -54,6 +54,12 @@ class TradeIntegrationTest {
 
     @Container
     @ServiceConnection
+    static final org.testcontainers.containers.GenericContainer<?> REDIS =
+            new org.testcontainers.containers.GenericContainer<>(
+                    org.testcontainers.utility.DockerImageName.parse("redis:7-alpine")).withExposedPorts(6379);
+
+    @Container
+    @ServiceConnection
     static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0");
 
     @Autowired
@@ -74,7 +80,7 @@ class TradeIntegrationTest {
         LocalDateTime start = LocalDateTime.now().minusDays(1);
         LocalDateTime end = LocalDateTime.now().plusDays(30);
         TemplateAppService.CreatedTemplate t = templateAppService.create(new TemplateCreateRequest(
-                "用券验收券", 1001L, 1, 1000L, null, 10000L, 1000L, 1, 1, start, end, null));
+                "用券验收券", 1001L, 1, 1000L, null, 10000L, 1000L, 1, 1, start, end, null, null, null));
         templateAppService.publish(t.id());
         long userId = USER_SEQ.incrementAndGet();
         ReceiveResult r = receiveAppService.receive(

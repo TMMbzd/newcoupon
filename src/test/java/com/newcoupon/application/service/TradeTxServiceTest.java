@@ -47,7 +47,7 @@ class TradeTxServiceTest {
 
     private static UserCoupon coupon(CouponStatus status) {
         return UserCoupon.reconstitute(5L, 42L, 1L, "T1", 1000L, 10000L, null,
-                LocalDateTime.of(2026, 9, 12, 23, 59, 59), status, NOW, "req-1");
+                LocalDateTime.of(2026, 9, 12, 23, 59, 59), status, NOW, "req-1", 1);
     }
 
     private static CouponUsage usage(UsageStatus status, Long amt) {

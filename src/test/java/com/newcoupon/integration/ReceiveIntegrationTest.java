@@ -56,6 +56,12 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 class ReceiveIntegrationTest {
 
     @Container
+    @ServiceConnection
+    static final org.testcontainers.containers.GenericContainer<?> REDIS =
+            new org.testcontainers.containers.GenericContainer<>(
+                    org.testcontainers.utility.DockerImageName.parse("redis:7-alpine")).withExposedPorts(6379);
+
+    @Container
     @ServiceConnection   // 容器连接信息自动注入数据源，覆盖 application-dev.yml 的 localhost
     static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0");
 
@@ -75,7 +81,7 @@ class ReceiveIntegrationTest {
         LocalDateTime start = LocalDateTime.now().minusDays(1);
         LocalDateTime end = LocalDateTime.now().plusDays(30);
         TemplateAppService.CreatedTemplate created = templateAppService.create(new TemplateCreateRequest(
-                "并发验收券", 1001L, 1, 1000L, null, 10000L, stock, 1, 1, start, end, null));
+                "并发验收券", 1001L, 1, 1000L, null, 10000L, stock, 1, 1, start, end, null, null, null));
         templateAppService.publish(created.id());
         return created.id();
     }
@@ -167,22 +173,27 @@ class ReceiveIntegrationTest {
 
     @Test
     @Timeout(120)
-    @DisplayName("验收③：同用户同requestId并发10次 → 恰1张、全部返回同一券、败者 duplicated=true")
+    @DisplayName("验收③：同requestId并发10次 → 恰1张+9个1001重试提示；串行重放 duplicated=true 同一张券")
     void sameUserSameRequestId() throws Exception {
         long templateId = createFixedTemplate(1000);
 
         List<Outcome> results = concurrentReceive(10, 10,
                 i -> new ReceiveRequest("dup-req", 20_001L, templateId));
 
+        // 阶段1语义（ADR-0006）：并发同 requestId——Redis 幂等键在赢家 DB 提交前就拦下其余请求，
+        // 此时 DB 无行可查 → 返回 1001"处理中，请用同一 requestId 重试"（而非纯DB方案的排队后全成功）
         List<Outcome> oks = results.stream().filter(o -> "OK".equals(o.code())).toList();
-        assertThat(oks).as("10 个响应全部成功（1 新领 + 9 幂等命中）").hasSize(10);
-        assertThat(oks.stream().map(Outcome::couponId).distinct().count())
-                .as("全部返回同一张券").isEqualTo(1);
-        assertThat(oks.stream().filter(o -> !o.duplicated()).count())
-                .as("恰 1 个是新领").isEqualTo(1);
-        assertThat(oks.stream().filter(Outcome::duplicated).count())
-                .as("其余 9 个是幂等命中").isEqualTo(9);
-        assertThat(templateRepository.findById(templateId).orElseThrow().getIssuedCount()).isEqualTo(1);
+        assertThat(oks).as("恰 1 个新领成功").hasSize(1);
+        long retryHint = results.stream().filter(o -> "1001".equals(o.code())).count();
+        assertThat(retryHint).as("其余 9 个收到'处理中请重试'(1001)").isEqualTo(9);
+        assertThat(templateRepository.findById(templateId).orElseThrow().getIssuedCount())
+                .as("只发了 1 张（闸门在扣库存前就拦下重放）").isEqualTo(1);
+
+        // 串行重放（赢家已提交）：同一 requestId 再来 → duplicated=true 且同一张券
+        ReceiveResult replay = receiveAppService.receive(
+                new ReceiveRequest("dup-req", 20_001L, templateId));
+        assertThat(replay.duplicated()).isTrue();
+        assertThat(replay.couponId()).isEqualTo(oks.get(0).couponId());
     }
 
     // ---------- ④ 读回字段级断言（防状态污染类 bug） ----------
@@ -205,7 +216,7 @@ class ReceiveIntegrationTest {
 
         // 相对有效期券：领取日+7天 的当日 23:59:59
         TemplateAppService.CreatedTemplate rel = templateAppService.create(new TemplateCreateRequest(
-                "相对有效期券", 1001L, 2, 8500L, 5000L, 0L, 100L, 1, 2, null, null, 7));
+                "相对有效期券", 1001L, 2, 8500L, 5000L, 0L, 100L, 1, 2, null, null, 7, null, null));
         templateAppService.publish(rel.id());
         receiveAppService.receive(new ReceiveRequest("rb-2", 30_002L, rel.id()));
         UserCoupon relative = userCouponRepository.findByIdempotentKey(30_002L, "rb-2").orElseThrow();
@@ -219,7 +230,8 @@ class ReceiveIntegrationTest {
                 "零点截止券", 1001L, 1, 1000L, null, 10000L, 100L, 1, 1,
                 LocalDateTime.now().minusDays(1),
                 LocalDateTime.now().plusDays(30).toLocalDate().atStartOfDay(),   // 00:00:00
-                null));                                                          // validDays（FIXED 不用）
+                null,                                                            // validDays（FIXED 不用）
+                null, null));                                                    // 日限（默认不限）
         templateAppService.publish(created.id());
         return created.id();
     }

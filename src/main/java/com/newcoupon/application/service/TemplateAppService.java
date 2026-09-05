@@ -9,6 +9,7 @@ import com.newcoupon.domain.coupon.ValidType;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.PublishStatus;
 import com.newcoupon.domain.repository.TemplateRepository;
+import com.newcoupon.infrastructure.redis.RedisStockGateway;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.ThreadLocalRandom;
@@ -36,20 +37,17 @@ public class TemplateAppService {
     private static final DateTimeFormatter CODE_DATE = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
 
     private final TemplateRepository templateRepository;
+    private final RedisStockGateway redisStockGateway;
 
     // 构造器注入（而非字段 @Autowired）：依赖显式、不可变、单测可直接 new——企业规范
-    public TemplateAppService(TemplateRepository templateRepository) {
+    public TemplateAppService(TemplateRepository templateRepository,
+                              RedisStockGateway redisStockGateway) {
         this.templateRepository = templateRepository;
+        this.redisStockGateway = redisStockGateway;
     }
 
-    /** 建券：阶段策略校验 → 生成业务编码 → 聚合工厂校验 → 落库 */
+    /** 建券：生成业务编码 → 聚合工厂校验 → 落库（通用限领 1~99 自 ADR-0006 开放） */
     public CreatedTemplate create(TemplateCreateRequest req) {
-        // 阶段0策略约束（ADR-0004）：通用限领在阶段1由 Redis 计数实现
-        if (req.perUserLimit() != 1) {
-            throw new BizException(ErrorCode.PARAM_ERROR,
-                    "阶段0仅支持每人限领 1 张（见 ADR-0004），阶段1开放通用限领");
-        }
-
         String templateCode = generateCode();
         CouponTemplate template = CouponTemplate.create(CouponTemplate.Creation.builder()
                 .templateCode(templateCode)
@@ -61,6 +59,8 @@ public class TemplateAppService {
                 .threshold(req.threshold() == null ? 0L : req.threshold())
                 .totalCount(req.totalCount())
                 .perUserLimit(req.perUserLimit())
+                .dailyLimit(req.dailyLimit() == null ? 0L : req.dailyLimit())
+                .perUserDailyLimit(req.perUserDailyLimit() == null ? 0 : req.perUserDailyLimit())
                 .validType(ValidType.of(req.validType()))
                 .validStart(req.validStart())
                 .validEnd(req.validEnd())
@@ -83,11 +83,14 @@ public class TemplateAppService {
         boolean updated = templateRepository.casUpdatePublishStatus(
                 id, PublishStatus.UNPUBLISHED, PublishStatus.PUBLISHED);
         if (!updated) {
-            // CAS 失败 = 读到检查之后、更新之前，状态被并发请求改了
             throw new BizException(ErrorCode.STATE_CONFLICT,
                     "发布失败：模板状态已被并发变更，请刷新后重试");
         }
-        log.info("template published: id={}", id);
+        // 发布即初始化 Redis 可扣额度 = 审批总量 - 已发放（ADR-0006：Redis是闸门，DB是账本）
+        CouponTemplate published = templateRepository.findById(id).orElseThrow();
+        redisStockGateway.initStock(id, published.getTotalCount() - published.getIssuedCount());
+        log.info("template published: id={}, redisStock={}",
+                id, published.getTotalCount() - published.getIssuedCount());
     }
 
     /** 查询模板详情 */

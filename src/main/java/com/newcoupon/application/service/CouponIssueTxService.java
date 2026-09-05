@@ -14,25 +14,19 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * 领券事务服务——项目第一个 @Transactional，三写同生共死：
+ * 领券事务服务（阶段 1 形态，ADR-0006）。
  *
+ * <p>职责收窄：模板读取与可领性校验已前移到编排层（Redis 闸门之前）；
+ * 本类只做"DB 侧双防线 + 落库 + 记事件"：
  * <pre>
- *   ① UPDATE coupon_template  扣库存（条件更新，守卫防超发）
- *   ② INSERT user_coupon      落券（快照固化）
- *   ③ INSERT coupon_event     发放事件（事实源）
+ *   ① UPDATE coupon_template 条件扣账（issued_count+1，守卫未售罄+已发布+已审批）——
+ *      即使 Redis 闸门初始化偏大，DB 仍保证零超发（双防线的第二道）
+ *   ② INSERT user_coupon（快照 + seq 序号——撞 uk_user_seq=超领兜底、撞 uk_idem=幂等终审）
+ *   ③ INSERT coupon_event 发放事件
  * </pre>
  *
- * <p>为什么必须加事务：不加时"①成功 ②失败"= 库存虚扣（少发），即 docs/03
- * "扣减成功落库失败"事故在纯 DB 版的形态。加了事务，任一步抛异常（含撞唯一索引的
- * DuplicateKeyException）→ 三步全部撤销，**回滚就是补偿**——这是纯 DB 方案的优雅之处，
- * 阶段 1 引入 Redis 后失去它（Redis 不参与 DB 事务），到时对比讲解手工补偿。
- *
- * <p>为什么放在独立的类（而不是塞进编排层）：Spring 事务靠代理实现，同类内
- * this.method() 自调用不走代理 → @Transactional 失效（Spring 事务三大坑之首）。
- * 编排层通过 Spring 注入的 Bean 调用本类，调用经过代理，事务才真正生效。
- *
- * <p>回滚规则：BizException 是 RuntimeException，@Transactional 默认对
- * RuntimeException 回滚——无需写 rollbackFor（若抛的是受检异常则必须显式声明，这是第二个坑）。
+ * <p>Redis 侧的扣减/补偿由编排层负责（Redis 不参与 DB 事务——阶段 0 "回滚即补偿"
+ * 的优雅就此消失，这是引入 Redis 的代价，ADR-0006 已认账）。
  */
 @Service
 public class CouponIssueTxService {
@@ -50,30 +44,21 @@ public class CouponIssueTxService {
     }
 
     /**
-     * 在一个事务内完成"扣库存 → 落券 → 记事件"。
-     * 任何一步失败，本方法抛出异常、事务整体回滚（库存扣减一并撤销）。
+     * @param template 编排层已读取并校验过的模板（避免事务内重复读——事务内是旧快照，读它反而误导）
+     * @param seq      Redis 用户计数给出的发放序号（1..N）
      */
     @Transactional
-    public UserCoupon issue(ReceiveRequest req, LocalDateTime now) {
-        // a. 读模板 + 可领性校验（审批通过/已发布/领取期内；状态竞态由下一步 SQL 守卫兜底）
-        CouponTemplate template = templateRepository.findById(req.templateId())
-                .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + req.templateId()));
-        template.assertReceivable(now);
-
-        // b. 条件扣库存：检查+写入一条 SQL 原子完成（check-then-act 竞态无从发生）
+    public UserCoupon issue(ReceiveRequest req, CouponTemplate template, long seq, LocalDateTime now) {
+        // ① DB 双防线：条件扣账（Redis 过了闸门，这里再以 DB 账本为准挡一次）
         int deducted = templateRepository.casDeductStock(req.templateId());
         if (deducted == 0) {
-            // 0 行=售罄或模板状态竞态。⚠️ 不能在本事务内重读分类：
-            // RR 隔离级别下事务内 SELECT 读旧快照（见 StockDeductRejectedException 的完整解释），
-            // 必须抛出异常让事务回滚，由编排层用新快照重查分类。
+            // 0行=真售罄或模板状态竞态；抛信号由编排层在事务外用新快照分类（study/04a 的 RR 教训）
             throw new StockDeductRejectedException(req.templateId());
         }
-
-        // c. 落券：领取工厂内完成快照固化与全部不变量校验；撞唯一索引时抛 DuplicateKeyException
+        // ② 落券（seq 写入；唯一索引兜底限领与幂等）
         UserCoupon saved = userCouponRepository.save(
-                UserCoupon.issue(template, req.userId(), req.requestId(), now));
-
-        // d. 发放事件（同事务；重放场景 event_no 撞唯一索引也会整体回滚）
+                UserCoupon.issue(template, req.userId(), req.requestId(), (int) seq, now));
+        // ③ 事实源
         couponEventRepository.append(CouponEvent.issued(saved, now));
         return saved;
     }

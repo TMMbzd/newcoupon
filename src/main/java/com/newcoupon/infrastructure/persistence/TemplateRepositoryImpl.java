@@ -45,4 +45,11 @@ public class TemplateRepositoryImpl implements TemplateRepository {
     public int casDeductStock(long templateId) {
         return mapper.casDeductStock(templateId);
     }
+
+    @Override
+    public java.util.List<CouponTemplate> findPublished() {
+        return mapper.selectPublished().stream()
+                .map(TemplatePOConverter::toDomain)
+                .toList();
+    }
 }

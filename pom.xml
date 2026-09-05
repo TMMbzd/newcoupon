@@ -73,6 +73,12 @@
       <scope>runtime</scope>
     </dependency>
 
+    <!-- Redis：阶段1库存闸门（Lua 五重校验）。默认连 localhost:6379（docker compose 已含） -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+
     <!-- 测试：单测必须秒级、相互独立、不依赖 Spring 容器与真实中间件（大厂单测基线） -->
     <dependency>
       <groupId>org.springframework.boot</groupId>

@@ -31,6 +31,8 @@ public final class TemplatePOConverter {
         p.setTotalCount(d.getTotalCount());
         p.setIssuedCount(0L);
         p.setPerUserLimit(d.getPerUserLimit());
+        p.setDailyLimit(d.getDailyLimit());
+        p.setPerUserDailyLimit(d.getPerUserDailyLimit());
         p.setValidType(d.getValidType().getCode());
         p.setValidStart(d.getValidStart());
         p.setValidEnd(d.getValidEnd());
@@ -59,6 +61,8 @@ public final class TemplatePOConverter {
                         .threshold(p.getThreshold())
                         .totalCount(p.getTotalCount())
                         .perUserLimit(p.getPerUserLimit())
+                        .dailyLimit(p.getDailyLimit() == null ? 0L : p.getDailyLimit())
+                        .perUserDailyLimit(p.getPerUserDailyLimit() == null ? 0 : p.getPerUserDailyLimit())
                         .validType(ValidType.of(p.getValidType()))
                         .validStart(p.getValidStart())
                         .validEnd(p.getValidEnd())

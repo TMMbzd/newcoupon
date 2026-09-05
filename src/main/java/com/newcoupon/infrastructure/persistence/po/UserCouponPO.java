@@ -25,6 +25,7 @@ public class UserCouponPO {
     private Integer status;
     private LocalDateTime receiveTime;
     private String idempotentKey;
+    private Integer seq;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 
@@ -50,6 +51,8 @@ public class UserCouponPO {
     public void setReceiveTime(LocalDateTime receiveTime) { this.receiveTime = receiveTime; }
     public String getIdempotentKey() { return idempotentKey; }
     public void setIdempotentKey(String idempotentKey) { this.idempotentKey = idempotentKey; }
+    public Integer getSeq() { return seq; }
+    public void setSeq(Integer seq) { this.seq = seq; }
     public LocalDateTime getCreateTime() { return createTime; }
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }
     public LocalDateTime getUpdateTime() { return updateTime; }

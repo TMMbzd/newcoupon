@@ -2,6 +2,7 @@ package com.newcoupon.domain.repository;
 
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.PublishStatus;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -22,6 +23,9 @@ public interface TemplateRepository {
 
     /** 按主键查询 */
     Optional<CouponTemplate> findById(long id);
+
+    /** 已发布模板清单：库存对账定时任务用 */
+    List<CouponTemplate> findPublished();
 
     /**
      * 条件更新发布状态（CAS）：UPDATE ... SET publish_status=to

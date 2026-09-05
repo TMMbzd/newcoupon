@@ -34,6 +34,8 @@ class TemplateAppServiceTest {
 
     @Mock
     private TemplateRepository repository;
+    @Mock
+    private com.newcoupon.infrastructure.redis.RedisStockGateway stockGateway;
 
     @InjectMocks
     private TemplateAppService service;
@@ -42,23 +44,23 @@ class TemplateAppServiceTest {
         return new TemplateCreateRequest(
                 "满100减10测试券", 1001L, 1, 1000L, null, 10000L, 10000L, 1,
                 1, LocalDateTime.of(2026, 9, 4, 0, 0),
-                LocalDateTime.of(2026, 9, 30, 23, 59, 59), null);
+                LocalDateTime.of(2026, 9, 30, 23, 59, 59), null, null, null);
     }
 
     @Test
-    @DisplayName("建券：阶段0拒绝 perUserLimit != 1（ADR-0004 策略），且不触碰仓储")
+    @DisplayName("建券：perUserLimit=0 被领域校验拒绝（1~99 合法，ADR-0006），且不触碰仓储")
     void createRejectsNonStage0Limit() {
         TemplateCreateRequest req = validRequest();
         TemplateCreateRequest bad = new TemplateCreateRequest(
                 req.name(), req.activityId(), req.couponType(), req.faceValue(), req.discountCap(),
-                req.threshold(), req.totalCount(), 5,   // ← 限领 5 张
-                req.validType(), req.validStart(), req.validEnd(), req.validDays());
+                req.threshold(), req.totalCount(), 0,   // ← 限领 0 张（1~99 合法）
+                req.validType(), req.validStart(), req.validEnd(), req.validDays(), null, null);
 
         assertThatThrownBy(() -> service.create(bad))
                 .isInstanceOf(BizException.class)
-                .hasMessageContaining("限领 1 张");
+                .hasMessageContaining("限领");
 
-        verify(repository, never()).save(any());   // 策略校验在仓储之前
+        verify(repository, never()).save(any());   // 领域校验在仓储之前
     }
 
     @Test

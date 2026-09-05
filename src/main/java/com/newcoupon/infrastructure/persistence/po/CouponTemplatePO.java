@@ -35,6 +35,8 @@ public class CouponTemplatePO {
     private Long totalCount;
     private Long issuedCount;
     private Integer perUserLimit;
+    private Long dailyLimit;
+    private Integer perUserDailyLimit;
     private Integer validType;
     private LocalDateTime validStart;
     private LocalDateTime validEnd;
@@ -75,6 +77,10 @@ public class CouponTemplatePO {
     public void setIssuedCount(Long issuedCount) { this.issuedCount = issuedCount; }
     public Integer getPerUserLimit() { return perUserLimit; }
     public void setPerUserLimit(Integer perUserLimit) { this.perUserLimit = perUserLimit; }
+    public Long getDailyLimit() { return dailyLimit; }
+    public void setDailyLimit(Long dailyLimit) { this.dailyLimit = dailyLimit; }
+    public Integer getPerUserDailyLimit() { return perUserDailyLimit; }
+    public void setPerUserDailyLimit(Integer perUserDailyLimit) { this.perUserDailyLimit = perUserDailyLimit; }
     public Integer getValidType() { return validType; }
     public void setValidType(Integer validType) { this.validType = validType; }
     public LocalDateTime getValidStart() { return validStart; }

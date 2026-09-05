@@ -11,6 +11,16 @@ spring:
       connection-timeout: 3000     # 3s 拿不到连接快速失败，宁可报错也不堆积线程
       max-lifetime: 1800000
 
+  data:
+    redis:
+      host: localhost      # docker compose 的 newcoupon-redis
+      port: 6379
+      timeout: 1s          # Redis 闸门超时快速失败：宁可走降级路径也不拖长领券RT
+      lettuce:
+        pool:
+          max-active: 50   # 与 MySQL 连接池同量级思考：池=并发上限，打满则请求排队
+          max-idle: 10
+
 # dev 环境 SQL 直打控制台：==> Preparing 是 SQL 模板，==> Parameters 是实参，<== Total 是返回行数——
 # 排障第一手资料。仅 dev 打开：生产环境的 SQL 观测走慢日志与审计（控制台全量打印量太大且有泄露风险）。
 mybatis-plus:

@@ -8,6 +8,9 @@ import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
+import com.newcoupon.infrastructure.redis.RedisStockGateway;
+import com.newcoupon.infrastructure.redis.RedisStockGateway.DeductCommand;
+import com.newcoupon.infrastructure.redis.RedisStockGateway.DeductResult;
 import java.time.LocalDateTime;
 import java.util.Optional;
 import org.slf4j.Logger;
@@ -16,98 +19,144 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 /**
- * 领券编排层。
+ * 领券编排层（阶段 1 形态，ADR-0006）。
  *
- * <p>⚠️ 本类【严禁】添加 @Transactional（含类级注解）——ADR-0004 增补5：
- * 若本类开启事务，内层 CouponIssueTxService 的事务会加入外层共享事务；
- * 撞唯一索引时 Spring 把共享事务标记 rollback-only，本类 catch 之后外层提交
- * 会抛 UnexpectedRollbackException——幂等重放从"当成功返回"退化成 500。
- * 正确结构：外层无事务做编排与冲突翻译，内层独立事务做三写。
+ * <p>⚠️ 本类【严禁】@Transactional（rollback-only 退化，study/04a 第 4 部分）。
  *
- * <p>职责：①幂等快查（性能优化，安全靠唯一索引——两层关系见 study 讲解）
- * ②调用事务服务 ③DuplicateKey 冲突分类（回滚后重查，不解析异常消息，ADR-0004 增补3）。
+ * <p>领券全流程（每步失败都有明确去向）：
+ * <pre>
+ * ① DB 幂等快查（终审语义在 DB：跨模板的 requestId 一致性在这里判）
+ * ② 读模板 + assertReceivable（内存快检；状态竞态由 DB CAS 兜底）
+ * ③ Redis Lua 闸门：五重校验原子扣减（-7 未初始化→懒重建后重试一次）
+ * ④ DB 事务（双防线扣账 + 落券(带seq) + 事件）——失败则 Lua 补偿，把 Redis 还原
+ * ⑤ 各类冲突 → 回查 DB 分类成准确错误/幂等成功
+ * </pre>
  */
 @Service
 public class ReceiveAppService {
 
     private static final Logger log = LoggerFactory.getLogger(ReceiveAppService.class);
+    private static final int IDEM_TTL_SEC = 600;
+    private static final int DAY_TTL_SEC = 172800;   // 48h：跨天滚动 key 的清理兜底
 
     private final UserCouponRepository userCouponRepository;
     private final TemplateRepository templateRepository;
     private final CouponIssueTxService issueTxService;
+    private final RedisStockGateway stockGateway;
+    private final StockReconcileService reconcileService;
 
     public ReceiveAppService(UserCouponRepository userCouponRepository,
                              TemplateRepository templateRepository,
-                             CouponIssueTxService issueTxService) {
+                             CouponIssueTxService issueTxService,
+                             RedisStockGateway stockGateway,
+                             StockReconcileService reconcileService) {
         this.userCouponRepository = userCouponRepository;
         this.templateRepository = templateRepository;
         this.issueTxService = issueTxService;
+        this.stockGateway = stockGateway;
+        this.reconcileService = reconcileService;
     }
 
     public ReceiveResult receive(ReceiveRequest req) {
-        // ① 幂等快查：90% 的重放在这里直接返回，不进事务不碰库存。
-        //    注意：这不是安全依赖——并发窗口内两个同 requestId 会同时穿过这里，
-        //    最后防线是 uk_idem 唯一索引（下方 catch 分支）。
-        Optional<UserCoupon> fast = userCouponRepository.findByIdempotentKey(
-                req.userId(), req.requestId());
+        // ① DB 幂等快查（隔了几秒的正常重试在此返回；并发窗口由唯一索引兜底）
+        Optional<UserCoupon> fast = userCouponRepository.findByIdempotentKey(req.userId(), req.requestId());
         if (fast.isPresent()) {
             return toDuplicatedResult(fast.get(), req);
         }
 
-        // ② 进事务：扣库存 → 落券 → 记事件
+        // ② 读模板 + 可领性校验（编排层无事务=每次读最新快照）
+        CouponTemplate template = templateRepository.findById(req.templateId())
+                .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + req.templateId()));
+        template.assertReceivable(LocalDateTime.now());
+
+        // ③ Redis Lua 闸门（-7 未初始化 → 懒重建一次再试；仍失败走降级提示）
+        DeductCommand cmd = new DeductCommand(req.templateId(), req.userId(), req.requestId(),
+                template.getPerUserLimit(), template.getPerUserDailyLimit(), template.getDailyLimit(),
+                DAY_TTL_SEC, IDEM_TTL_SEC);
+        DeductResult d = stockGateway.deduct(cmd);
+        if (d.code() == -7) {
+            reconcileService.rebuildStock(req.templateId());
+            d = stockGateway.deduct(cmd);
+            if (d.code() == -7) {
+                throw new BizException(ErrorCode.DEGRADED, "库存服务暂不可用，请稍后重试");
+            }
+        }
+        if (!d.success()) {
+            return handleGateRejected(req, d);
+        }
+
+        // ④ DB 事务；任何失败都要把 Redis 扣掉的还回去（补偿）
         try {
-            UserCoupon issued = issueTxService.issue(req, LocalDateTime.now());
+            UserCoupon issued = issueTxService.issue(req, template, d.seq(), LocalDateTime.now());
             return ReceiveResult.of(issued, false);
         } catch (DuplicateKeyException e) {
-            // ③ 内层事务已在代理处回滚（库存扣减一并撤销），此处做冲突分类
+            stockGateway.compensate(cmd);   // 计数/库存还原，幂等键删除让重试可再进
             return classifyAfterRollback(req, e);
         } catch (StockDeductRejectedException e) {
-            // ④ 扣减 0 行：事务已回滚，用事务外的新快照重读分类
-            // （事务内读旧快照会误判，见 StockDeductRejectedException 注释）
-            return classifyDeductReject(req, e);
+            stockGateway.compensate(cmd);
+            return classifyDeductReject(req);
+        } catch (RuntimeException e) {
+            stockGateway.compensate(cmd);   // 落库失败补偿：不还=库存泄漏（少发）
+            throw e;
         }
     }
 
-    /** 扣减被拒分类：新连接新快照读真实状态——真售罄 or 模板状态竞态 */
-    private ReceiveResult classifyDeductReject(ReceiveRequest req, StockDeductRejectedException e) {
-        log.warn("stock deduct rejected: userId={}, templateId={}", req.userId(), req.templateId());
+    // ---------- 闸门拒绝分类 ----------
+
+    /**
+     * Redis 闸门拒绝（-1/-2/-3/-6/-8）。注意：idem 键 TTL(10分钟) 过期后的"陈旧重放"
+     * 会走到限领/售罄分支——先查一次 DB 幂等键，命中则按重放处理（老请求的正确归宿）。
+     */
+    private ReceiveResult handleGateRejected(ReceiveRequest req, DeductResult d) {
+        if (d.code() == -8) {   // Redis 幂等命中
+            return duplicatedOrConflict(req);
+        }
+        // 陈旧重放检查
+        Optional<UserCoupon> old = userCouponRepository.findByIdempotentKey(req.userId(), req.requestId());
+        if (old.isPresent()) {
+            return toDuplicatedResult(old.get(), req);
+        }
+        throw switch (d.code()) {
+            case -3 -> new BizException(ErrorCode.STOCK_OUT);
+            case -2 -> new BizException(ErrorCode.USER_LIMIT_EXCEEDED);
+            case -6 -> new BizException(ErrorCode.USER_LIMIT_EXCEEDED, "已达每日限领上限");
+            case -1 -> new BizException(ErrorCode.DAILY_LIMIT_EXCEEDED);
+            default -> new BizException(ErrorCode.SYSTEM_ERROR, "库存闸门未知返回: " + d.code());
+        };
+    }
+
+    /** Redis 幂等命中：回 DB 确认（带 templateId 一致性校验） */
+    private ReceiveResult duplicatedOrConflict(ReceiveRequest req) {
+        return userCouponRepository.findByIdempotentKey(req.userId(), req.requestId())
+                .map(u -> toDuplicatedResult(u, req))
+                .orElseThrow(() -> new BizException(ErrorCode.REQUEST_DUPLICATED,
+                        "请求正在处理中，请勿重复提交"));
+    }
+
+    // ---------- DB 冲突分类（回滚+补偿后，事务外新快照） ----------
+
+    private ReceiveResult classifyAfterRollback(ReceiveRequest req, DuplicateKeyException e) {
+        log.warn("duplicate key on receive: userId={}, requestId={}, cause={}",
+                req.userId(), req.requestId(), e.getMessage());
+        Optional<UserCoupon> byIdem = userCouponRepository.findByIdempotentKey(req.userId(), req.requestId());
+        if (byIdem.isPresent()) {
+            return toDuplicatedResult(byIdem.get(), req);   // uk_idem：重放/并发命中
+        }
+        // uk_user_seq：Redis 计数丢失导致序号重复 → 该用户实际已达限领（DB 是最后防线）
+        throw new BizException(ErrorCode.USER_LIMIT_EXCEEDED);
+    }
+
+    /** DB 条件扣账 0 行（事务外新快照分类，study/04a RR 教训） */
+    private ReceiveResult classifyDeductReject(ReceiveRequest req) {
         CouponTemplate fresh = templateRepository.findById(req.templateId())
-                .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + req.templateId()));
+                .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND));
         if (fresh.getIssuedCount() >= fresh.getTotalCount()) {
             throw new BizException(ErrorCode.STOCK_OUT);
         }
         throw new BizException(ErrorCode.TEMPLATE_NOT_RECEIVABLE, "模板状态已变化（被下线/审批回退）");
     }
 
-    /**
-     * 冲突分类（ADR-0004 增补3）：不解析异常消息里的索引名——
-     * MySQL 方言依赖，且一次 INSERT 可能同时违反 uk_idem 与 uk_user_template 两个唯一索引
-     * （MySQL 只报其中一个名字）。改为按确定性顺序重查：
-     * 先幂等键（带 templateId 一致性校验），再用户+模板，都未命中按系统异常兜底。
-     */
-    private ReceiveResult classifyAfterRollback(ReceiveRequest req, DuplicateKeyException e) {
-        log.warn("duplicate key on receive, classify after rollback: userId={}, requestId={}, cause={}",
-                req.userId(), req.requestId(), e.getMessage());   // 索引名仅作日志辅助
-
-        Optional<UserCoupon> byIdem = userCouponRepository.findByIdempotentKey(
-                req.userId(), req.requestId());
-        if (byIdem.isPresent()) {
-            return toDuplicatedResult(byIdem.get(), req);
-        }
-        if (userCouponRepository.findByUserAndTemplate(req.userId(), req.templateId()).isPresent()) {
-            // 并发/重复用不同 requestId 领同一张券：第一次已成功，本次按限领拒绝
-            throw new BizException(ErrorCode.USER_LIMIT_EXCEEDED);
-        }
-        // 理论不可达（撞了唯一索引却查不到对应行）；防御性兜底，绝不静默吞掉
-        log.error("duplicate key but no matching row found: userId={}, requestId={}",
-                req.userId(), req.requestId());
-        throw new BizException(ErrorCode.SYSTEM_ERROR, "领券冲突分类失败，请联系管理员");
-    }
-
-    /**
-     * 幂等命中的统一出口：必须校验 templateId 一致——幂等键绑定的是"一次领取意图"，
-     * 同一 requestId 换个模板再来（如前端复用陈旧 requestId），不是重放而是冲突，拒绝。
-     */
+    /** 幂等命中出口：templateId 必须一致（requestId 绑定的是一次领取意图） */
     private ReceiveResult toDuplicatedResult(UserCoupon existing, ReceiveRequest req) {
         if (existing.getTemplateId() != req.templateId()) {
             throw new BizException(ErrorCode.REQUEST_DUPLICATED,

@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.newcoupon.infrastructure.persistence.po.CouponTemplatePO;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 /**
@@ -35,4 +36,8 @@ public interface TemplateMapper extends BaseMapper<CouponTemplatePO> {
             + "WHERE id = #{id} AND issued_count < total_count "
             + "AND publish_status = 1 AND approve_status = 1")
     int casDeductStock(@Param("id") long id);
+
+    /** 已发布模板清单：库存对账定时任务用 */
+    @Select("SELECT * FROM coupon_template WHERE publish_status = 1")
+    java.util.List<CouponTemplatePO> selectPublished();
 }

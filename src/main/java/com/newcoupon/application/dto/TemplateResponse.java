@@ -18,6 +18,8 @@ public record TemplateResponse(
         Long totalCount,
         Long issuedCount,
         Integer perUserLimit,
+        Long dailyLimit,
+        Integer perUserDailyLimit,
         String validType,
         LocalDateTime validStart,
         LocalDateTime validEnd,
@@ -31,6 +33,7 @@ public record TemplateResponse(
                 t.getId(), t.getTemplateCode(), t.getName(),
                 t.getCouponType().getDesc(), t.getFaceValue(), t.getDiscountCap(), t.getThreshold(),
                 t.getTotalCount(), t.getIssuedCount(), t.getPerUserLimit(),
+                t.getDailyLimit(), t.getPerUserDailyLimit(),
                 t.getValidType().getDesc(), t.getValidStart(), t.getValidEnd(), t.getValidDays(),
                 t.getApproveStatus().getDesc(), t.getPublishStatus().getDesc(),
                 null);   // createTime 由 DB 生成，查询场景需要时从 PO 侧带出

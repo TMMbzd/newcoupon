@@ -10,8 +10,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.newcoupon.application.dto.ReceiveRequest;
-import com.newcoupon.common.BizException;
-import com.newcoupon.common.ErrorCode;
 import com.newcoupon.domain.coupon.ApproveStatus;
 import com.newcoupon.domain.coupon.CouponType;
 import com.newcoupon.domain.coupon.CouponTemplate;
@@ -22,19 +20,19 @@ import com.newcoupon.domain.repository.CouponEventRepository;
 import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import java.time.LocalDateTime;
-import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DuplicateKeyException;
 
 @ExtendWith(MockitoExtension.class)
-@DisplayName("领券事务服务")
+@DisplayName("领券事务服务（阶段1形态：DB双防线+落库+事件）")
 class CouponIssueTxServiceTest {
 
-    private static final LocalDateTime NOW = LocalDateTime.of(2026, 9, 5, 10, 0);
+    private static final LocalDateTime NOW = LocalDateTime.of(2026, 9, 7, 10, 0);
 
     @Mock
     private TemplateRepository templateRepository;
@@ -46,14 +44,14 @@ class CouponIssueTxServiceTest {
     @InjectMocks
     private CouponIssueTxService service;
 
-    private static CouponTemplate template(PublishStatus publish, long issued, long total) {
+    private static CouponTemplate template() {
         return CouponTemplate.reconstitute(1L,
                 CouponTemplate.Creation.builder()
                         .templateCode("T1").activityId(1L).name("满100减10")
                         .couponType(CouponType.FULL_REDUCTION)
-                        .faceValue(1000L).threshold(10000L).totalCount(total).perUserLimit(1)
+                        .faceValue(1000L).threshold(10000L).totalCount(100L).perUserLimit(1)
                         .validType(ValidType.AFTER_RECEIVE).validDays(7).build(),
-                issued, ApproveStatus.APPROVED, publish);
+                10L, ApproveStatus.APPROVED, PublishStatus.PUBLISHED);
     }
 
     private static ReceiveRequest req() {
@@ -61,51 +59,39 @@ class CouponIssueTxServiceTest {
     }
 
     @Test
-    @DisplayName("成功路径：扣1 → 落券 → 记事件，三步顺序执行")
-    void successIssuesCouponAndEvent() {
-        when(templateRepository.findById(1L)).thenReturn(Optional.of(template(PublishStatus.PUBLISHED, 0, 100)));
+    @DisplayName("成功：DB扣账 → 落券(带seq) → 记事件")
+    void successPath() {
         when(templateRepository.casDeductStock(1L)).thenReturn(1);
-        when(userCouponRepository.save(any())).thenAnswer(inv -> inv.<UserCoupon>getArgument(0).withId(5L));
+        when(userCouponRepository.save(any())).thenAnswer(
+                inv -> inv.<UserCoupon>getArgument(0).withId(5L));
 
-        UserCoupon result = service.issue(req(), NOW);
+        UserCoupon result = service.issue(req(), template(), 1L, NOW);
 
         assertThat(result.getId()).isEqualTo(5L);
-        verify(userCouponRepository, times(1)).save(any());
-        verify(couponEventRepository, times(1)).append(any());   // 事件必写（事实源）
+        assertThat(result.getSeq()).isEqualTo(1);
+        verify(couponEventRepository, times(1)).append(any());
     }
 
     @Test
-    @DisplayName("扣减0行 → 抛 StockDeductRejectedException（不在事务内分类：RR 快照会误判），不落券不记事件")
+    @DisplayName("DB扣账 0 行 → 抛信号（分类在编排层，事务内不重读——RR 快照教训）")
     void zeroRowThrowsSignal() {
-        when(templateRepository.findById(1L))
-                .thenReturn(Optional.of(template(PublishStatus.PUBLISHED, 99, 100)));
         when(templateRepository.casDeductStock(1L)).thenReturn(0);
 
-        assertThatThrownBy(() -> service.issue(req(), NOW))
+        assertThatThrownBy(() -> service.issue(req(), template(), 1L, NOW))
                 .isInstanceOf(StockDeductRejectedException.class);
         verify(userCouponRepository, never()).save(any());
         verify(couponEventRepository, never()).append(any());
-        // 事务内不再做分类重读（findById 只被调用一次：步骤a 的模板读取）
-        verify(templateRepository, times(1)).findById(1L);
     }
 
     @Test
-    @DisplayName("模板不存在 → TEMPLATE_NOT_FOUND")
-    void templateMissing() {
-        when(templateRepository.findById(1L)).thenReturn(Optional.empty());
-        assertThatThrownBy(() -> service.issue(req(), NOW))
-                .extracting(e -> ((BizException) e).getErrorCode())
-                .isEqualTo(ErrorCode.TEMPLATE_NOT_FOUND);
-        verify(templateRepository, never()).casDeductStock(anyLong());
-    }
+    @DisplayName("落券撞唯一索引（幂等/序号）→ 异常透传给编排层做补偿+分类")
+    void duplicateKeyPropagates() {
+        when(templateRepository.casDeductStock(1L)).thenReturn(1);
+        when(userCouponRepository.save(any())).thenThrow(new DuplicateKeyException("dup"));
 
-    @Test
-    @DisplayName("模板未发布 → assertReceivable 拒绝，扣减根本不发生")
-    void unpublishedBlockedBeforeDeduct() {
-        when(templateRepository.findById(1L)).thenReturn(Optional.of(template(PublishStatus.UNPUBLISHED, 0, 100)));
-
-        assertThatThrownBy(() -> service.issue(req(), NOW))
-                .hasMessageContaining("仅已发布可领取");
-        verify(templateRepository, never()).casDeductStock(anyLong());   // 校验在扣减之前
+        assertThatThrownBy(() -> service.issue(req(), template(), 1L, NOW))
+                .isInstanceOf(DuplicateKeyException.class);
+        verify(couponEventRepository, never()).append(any());
+        verify(templateRepository, times(1)).casDeductStock(anyLong());   // 扣账确实发生了（待补偿）
     }
 }
