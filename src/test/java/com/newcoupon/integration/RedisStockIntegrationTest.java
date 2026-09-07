@@ -6,6 +6,7 @@ import com.newcoupon.application.dto.ReceiveRequest;
 import com.newcoupon.application.dto.ReceiveResult;
 import com.newcoupon.application.dto.TemplateCreateRequest;
 import com.newcoupon.application.service.ReceiveAppService;
+import com.newcoupon.application.service.ReceiveInFlightCounter;
 import com.newcoupon.application.service.StockReconcileService;
 import com.newcoupon.application.service.TemplateAppService;
 import com.newcoupon.common.BizException;
@@ -42,7 +43,7 @@ import org.testcontainers.utility.DockerImageName;
  * ⑥ 批次日限=1：第二个用户拒绝(3003)
  */
 @Testcontainers
-@SpringBootTest(properties = "spring.datasource.hikari.maximum-pool-size=50")
+@SpringBootTest(properties = {"spring.datasource.hikari.maximum-pool-size=50", "coupon.reconcile.recheck-ms=200"})
 class RedisStockIntegrationTest {
 
     @Container
@@ -64,6 +65,8 @@ class RedisStockIntegrationTest {
     private RedisStockGateway stockGateway;
     @Autowired
     private StockReconcileService reconcileService;
+    @Autowired
+    private ReceiveInFlightCounter inFlightCounter;
 
     private static final AtomicInteger USER = new AtomicInteger(80_000);
 
@@ -164,19 +167,60 @@ class RedisStockIntegrationTest {
 
     @Test
     @Timeout(120)
-    @DisplayName("验收④：库存漂移（模拟kill-9）→ 对账重建后恢复正确")
+    @DisplayName("验收④：真漂移（模拟kill-9，diff=49远超在途+余量，复核后仍在）→ 二次复核后重建恢复")
     void driftRebuild() {
         long tplId = createTemplate(100, 1, null, null);
         long uid = USER.incrementAndGet();
-        receive(uid, "d-1", tplId);   // issued=1, redis=99
+        receive(uid, "d-1", tplId);   // issued=1, redis=99, 在途=0（请求已终结）
+        assertThat(inFlightCounter.get()).as("请求完成后在途必须归零（否则计数器泄漏）").isZero();
 
-        stockGateway.initStock(tplId, 50);   // 人为污染：模拟扣减后进程被杀（漂移）
+        stockGateway.initStock(tplId, 50);   // 人为污染：模拟扣减后进程被杀（真漂移 diff=49）
 
         assertThat(stockGateway.remaining(tplId)).isEqualTo(50);
-        reconcileService.reconcileAll();     // 对账：以 DB 账本为准重建
+        int rebuilt = reconcileService.reconcileAll();   // 首量超界 → 复核(200ms)仍在 → 重建
 
         assertThat(stockGateway.remaining(tplId))
                 .as("重建后 Redis == total - issued").isEqualTo(99);
+        assertThat(rebuilt).as("真漂移应触发一次重建").isEqualTo(1);
+    }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("验收⑦【L21回归】：瞬态差异（首量超界、复核时已落定）→ 不重建不误报")
+    void recheckHealsTransientDiff() throws Exception {
+        long tplId = createTemplate(100, 1, null, null);
+        long uid = USER.incrementAndGet();
+        receive(uid, "rh-1", tplId);                 // issued=1, expected=99
+
+        stockGateway.initStock(tplId, 80);           // 模拟首量瞬间：Redis 偏低19（如在途未落定）
+        // 100ms 后模拟"在途落定"（Redis 回到与账本一致）——发生在复核窗口(200ms)内
+        var fixer = Executors.newSingleThreadScheduledExecutor();
+        fixer.schedule(() -> stockGateway.initStock(tplId, 99), 100, TimeUnit.MILLISECONDS);
+        int rebuilt;
+        try {
+            rebuilt = reconcileService.reconcileAll();   // 首量 diff=19>5 → 复核 → 已自愈
+        } finally {
+            fixer.shutdownNow();
+        }
+        assertThat(rebuilt).as("瞬态差异不得触发重建（L21：误重建会自己制造漂移）").isZero();
+        assertThat(stockGateway.remaining(tplId)).isEqualTo(99);
+    }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("验收⑧【L21回归】：在途窗口内（diff=在途数）对账不误报、不动 Redis")
+    void inFlightWindowNotDrift() {
+        long tplId = createTemplate(100, 1, null, null);
+        long uid = USER.incrementAndGet();
+        receive(uid, "if-1", tplId);                 // issued=1, expected=99, redis=99
+        stockGateway.initStock(tplId, 96);           // 模拟3个在途：Redis 已被扣3、DB 未落
+        inFlightCounter.set(3);
+
+        int rebuilt = reconcileService.reconcileAll();
+
+        assertThat(rebuilt).as("diff=3 ≤ 在途3+余量5 ⇒ 正常时序差，不得重建").isZero();
+        assertThat(stockGateway.remaining(tplId)).as("Redis 不被触碰").isEqualTo(96);
+        inFlightCounter.set(0);                      // 清理模拟状态
     }
 
     @Test

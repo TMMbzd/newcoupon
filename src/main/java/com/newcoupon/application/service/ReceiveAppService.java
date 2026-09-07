@@ -44,17 +44,20 @@ public class ReceiveAppService {
     private final CouponIssueTxService issueTxService;
     private final RedisStockGateway stockGateway;
     private final StockReconcileService reconcileService;
+    private final ReceiveInFlightCounter inFlight;
 
     public ReceiveAppService(UserCouponRepository userCouponRepository,
                              TemplateRepository templateRepository,
                              CouponIssueTxService issueTxService,
                              RedisStockGateway stockGateway,
-                             StockReconcileService reconcileService) {
+                             StockReconcileService reconcileService,
+                             ReceiveInFlightCounter inFlight) {
         this.userCouponRepository = userCouponRepository;
         this.templateRepository = templateRepository;
         this.issueTxService = issueTxService;
         this.stockGateway = stockGateway;
         this.reconcileService = reconcileService;
+        this.inFlight = inFlight;
     }
 
     public ReceiveResult receive(ReceiveRequest req) {
@@ -83,7 +86,11 @@ public class ReceiveAppService {
             return handleGateRejected(req, d);
         }
 
-        // ③ DB 事务；任何失败都要把 Redis 扣掉的还回去（补偿）
+        // ③ DB 事务；任何失败都要把 Redis 扣掉的还回去（补偿）。
+        //    在途计数（ADR-0007）：过闸即 inc——此刻 Redis 已扣、DB 未落，对账靠这个数
+        //    把"正常时序差"从漂移里扣除；finally 里 dec，成功（两边都算了）与
+        //    失败（两边都还了）都代表在途结束。
+        inFlight.inc();
         try {
             UserCoupon issued = issueTxService.issue(req, template, d.seq(), LocalDateTime.now());
             return ReceiveResult.of(issued, false);
@@ -96,6 +103,8 @@ public class ReceiveAppService {
         } catch (RuntimeException e) {
             stockGateway.compensate(cmd);   // 落库失败补偿：不还=库存泄漏（少发）
             throw e;
+        } finally {
+            inFlight.dec();
         }
     }
 

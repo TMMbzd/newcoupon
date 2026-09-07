@@ -52,6 +52,8 @@ class ReceiveAppServiceTest {
     private RedisStockGateway stockGateway;
     @Mock
     private StockReconcileService reconcileService;
+    @Mock
+    private ReceiveInFlightCounter inFlight;
 
     @InjectMocks
     private ReceiveAppService service;
