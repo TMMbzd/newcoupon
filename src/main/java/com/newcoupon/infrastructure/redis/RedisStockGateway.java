@@ -47,11 +47,24 @@ public class RedisStockGateway {
             return {0, ul0 + 1}
             """;
 
-    /** 补偿：DB 落库失败时反向撤销 deduct 的全部写入（幂等键 DEL 让重试可再进） */
+    /**
+     * 补偿：DB 落库失败时反向撤销 deduct 的全部写入。**幂等门控（ADR-0006 增补）**：
+     * 幂等键(KEYS[5])是在途扣减的"凭证"——deduct 成功时写入、补偿成功时删除；
+     * 只有持有凭证（键存在）的补偿才执行逆操作，重复/迟到补偿看到键已删 → 完全 no-op。
+     * 否则双重补偿会把库存 INCR 两次（Redis 偏高 → 过闸的多 → DB 拒绝），
+     * 日计数减成 -1（当天多领 1 张的口子，日限没有 DB 防线）。
+     * 三个计数的 <0 钉回 0 是第二道保险（防御纵深，门控失效时不让负数污染"第几张"判断）。
+     * 返回 1=执行了补偿，0=凭证不在（重复/迟到/已过期600s），未动任何数据。
+     */
     public static final String COMPENSATE_SCRIPT = """
+            if redis.call('EXISTS', KEYS[5]) == 0 then return 0 end
             if redis.call('DECR', KEYS[2]) < 0 then redis.call('SET', KEYS[2], 0) end
-            if tonumber(ARGV[2]) > 0 and redis.call('EXISTS', KEYS[3]) == 1 then redis.call('DECR', KEYS[3]) end
-            if tonumber(ARGV[3]) > 0 and redis.call('EXISTS', KEYS[4]) == 1 then redis.call('DECR', KEYS[4]) end
+            if tonumber(ARGV[2]) > 0 and redis.call('EXISTS', KEYS[3]) == 1 then
+              if redis.call('DECR', KEYS[3]) < 0 then redis.call('SET', KEYS[3], 0) end
+            end
+            if tonumber(ARGV[3]) > 0 and redis.call('EXISTS', KEYS[4]) == 1 then
+              if redis.call('DECR', KEYS[4]) < 0 then redis.call('SET', KEYS[4], 0) end
+            end
             redis.call('INCR', KEYS[1])
             redis.call('DEL', KEYS[5])
             return 1
@@ -119,6 +132,12 @@ public class RedisStockGateway {
     /** 清除某用户的累计计数（测试与运维用：模拟 Redis 计数丢失） */
     public void resetUserCount(long templateId, long userId) {
         redis.delete(ulKey(templateId, userId));
+    }
+
+    /** 读用户累计领取数（对账/测试观测用；key 不存在返回 null，视为 0 由调用方处理） */
+    public Long userCount(long templateId, long userId) {
+        String v = redis.opsForValue().get(ulKey(templateId, userId));
+        return v == null ? null : Long.parseLong(v);
     }
 
     private String stockKey(long t) { return "c:stk:{" + t + "}"; }

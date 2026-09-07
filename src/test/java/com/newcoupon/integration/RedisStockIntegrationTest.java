@@ -225,6 +225,33 @@ class RedisStockIntegrationTest {
 
     @Test
     @Timeout(120)
+    @DisplayName("验收⑨【补偿幂等】：补偿被执行两次 → 第二次完全no-op；补偿后同requestId可重新领取")
+    void compensationIsIdempotent() {
+        long tplId = createTemplate(100, 2, null, null);
+        long uid = USER.incrementAndGet();
+        var cmd = new RedisStockGateway.DeductCommand(tplId, uid, "cp-idem-1", 2, 0, 0, 172800, 600);
+
+        RedisStockGateway.DeductResult d = stockGateway.deduct(cmd);   // 过闸：stock 100→99, ul 0→1
+        assertThat(d.success()).isTrue();
+
+        stockGateway.compensate(cmd);   // 第一次：正常回滚 → stock=100, ul=0, 幂等键已删
+        stockGateway.compensate(cmd);   // 第二次：模拟迟到/重复补偿（超时重发、MQ重复投递）
+
+        assertThat(stockGateway.remaining(tplId))
+                .as("二次补偿不得把库存多加回去（否则Redis偏高→过闸的多→DB拒绝→体验退化）")
+                .isEqualTo(100);
+        assertThat(stockGateway.userCount(tplId, uid))
+                .as("用户计数不得被二次补偿减成负数")
+                .isEqualTo(0);
+
+        // 凭证删除后，同一 requestId 的真实重试必须能重新过闸（补偿幂等不能破坏重试语义）
+        RedisStockGateway.DeductResult retry = stockGateway.deduct(cmd);
+        assertThat(retry.success()).as("补偿后同requestId重试应重新领取").isTrue();
+        assertThat(stockGateway.remaining(tplId)).isEqualTo(99);
+    }
+
+    @Test
+    @Timeout(120)
     @DisplayName("验收⑤：每人日限=1——第二张被 3002 拒绝（提示每日）")
     void perUserDailyLimit() {
         long tplId = createTemplate(100, 5, null, 1);
