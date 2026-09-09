@@ -27,6 +27,10 @@ public interface UserCouponMapper extends BaseMapper<UserCouponPO> {
     java.util.List<UserCouponPO> selectByUser(@Param("userId") long userId,
                                               @Param("status") Integer status);
 
+    /** 按模板数券（ADR-0008 第二不变式）：issued_count ↔ COUNT(user_coupon) 互证，修复守卫用 */
+    @Select("SELECT COUNT(*) FROM user_coupon WHERE template_id = #{templateId}")
+    long countByTemplate(@Param("templateId") long templateId);
+
     // ---------- 状态迁移 CAS（每条 = 状态机一条合法边） ----------
 
     /** 锁券：待使用→已锁定；条件含未过期（过期的券锁了也用不了） */

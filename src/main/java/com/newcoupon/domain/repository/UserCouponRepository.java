@@ -14,6 +14,9 @@ public interface UserCouponRepository {
     /** 按幂等键查询（唯一索引 uk_idem 覆盖）：幂等快查与 DuplicateKey 冲突分类用 */
     Optional<UserCoupon> findByIdempotentKey(long userId, String idempotentKey);
 
+    /** 按模板数券（ADR-0008 第二不变式）：对账修复前的守卫互证 issued_count ↔ COUNT(user_coupon) */
+    long countByTemplate(long templateId);
+
     /** 按主键查询：用券三段与读回断言用 */
     Optional<UserCoupon> findById(long id);
 

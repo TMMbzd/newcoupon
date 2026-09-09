@@ -27,6 +27,11 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     }
 
     @Override
+    public long countByTemplate(long templateId) {
+        return mapper.countByTemplate(templateId);
+    }
+
+    @Override
     public Optional<UserCoupon> findById(long id) {
         return Optional.ofNullable(mapper.selectById(id))
                 .map(UserCouponPOConverter::toDomain);

@@ -6,12 +6,14 @@ import com.newcoupon.application.dto.ReceiveRequest;
 import com.newcoupon.application.dto.ReceiveResult;
 import com.newcoupon.application.dto.TemplateCreateRequest;
 import com.newcoupon.application.service.ReceiveAppService;
-import com.newcoupon.application.service.ReceiveInFlightCounter;
 import com.newcoupon.application.service.StockReconcileService;
 import com.newcoupon.application.service.TemplateAppService;
 import com.newcoupon.common.BizException;
 import com.newcoupon.domain.repository.TemplateRepository;
+import com.newcoupon.infrastructure.persistence.StockDriftLogGateway;
 import com.newcoupon.infrastructure.redis.RedisStockGateway;
+import com.newcoupon.infrastructure.redis.RedisStockGateway.CancelCause;
+import com.newcoupon.infrastructure.redis.RedisStockGateway.DeductCommand;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -34,16 +36,24 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * 阶段 1 验收（ADR-0006 / docs/00 阶段1清单）——Redis+MySQL 双容器：
+ * 阶段 1 验收（ADR-0006 + ADR-0008 恒等式记账）——Redis+MySQL 双容器：
  * ① 通用限领 N=3：同用户 5 次 → 3 成功 2 超领，seq=1/2/3 落库
  * ② Redis 计数丢失 → DB 序号唯一索引兜底（最后防线证明）
- * ③ 2000 并发抢 1000：零超发 + 对账恒等式 + 漂移重建后余量正确
- * ④ 库存漂移 → 对账重建（kill -9 残余的收口）
+ * ③ 2000 并发抢 1000：零超发 + 恒等式三本账归零（issued−dbi−pend≡0）
+ * ④ 崩溃残留（kill -9：扣了 Redis 没 confirm/cancel）→ 恒等式暴露 → 守卫修复 + 落漂移表
  * ⑤ 每人日限=1：第二张拒绝
  * ⑥ 批次日限=1：第二个用户拒绝(3003)
+ * ⑦ 在途窗口内（pend 持令牌）恒等式不误报；TTL 内 confirm 到达 → 差值从未出现
+ * ⑧ 取消记账幂等：二次 cancel 完全 no-op；cancel 后同 requestId 可重试
+ * ⑨ 售罄钉零+标志（A1'+B4）：DB 拒绝分类先行 → 钉零立标志 → 后续流量 Lua 首行短路
+ * ⑩ 清库风暴（A2'）：删 stock key 后 50 并发 → 条件 SET 只重建一次，零 DECR 覆盖
  */
 @Testcontainers
-@SpringBootTest(properties = {"spring.datasource.hikari.maximum-pool-size=50", "coupon.reconcile.recheck-ms=200"})
+@SpringBootTest(properties = {
+        "spring.datasource.hikari.maximum-pool-size=50",
+        "coupon.reconcile.inflight-ttl-ms=300",       // 测试压缩在途 TTL（生产 180s）
+        "coupon.reconcile.log-min-interval-ms=0"      // 测试不限频，便于断言漂移表
+})
 class RedisStockIntegrationTest {
 
     @Container
@@ -66,7 +76,9 @@ class RedisStockIntegrationTest {
     @Autowired
     private StockReconcileService reconcileService;
     @Autowired
-    private ReceiveInFlightCounter inFlightCounter;
+    private StockDriftLogGateway driftLogGateway;
+    @Autowired
+    private org.springframework.data.redis.core.StringRedisTemplate redis;
 
     private static final AtomicInteger USER = new AtomicInteger(80_000);
 
@@ -126,7 +138,7 @@ class RedisStockIntegrationTest {
 
     @Test
     @Timeout(300)
-    @DisplayName("验收③：2000并发抢1000 → 零超发 + 对账恒等式 + 无补偿残留")
+    @DisplayName("验收③：2000并发抢1000 → 零超发 + 恒等式三本账归零（issued−dbi−pend≡0）")
     void twoThousandConcurrent() throws Exception {
         long tplId = createTemplate(1000, 1, null, null);
         // 容量配平教训（实测踩坑）：在途并发必须 ≤ 连接池(50)——200线程打50连接池，
@@ -155,11 +167,17 @@ class RedisStockIntegrationTest {
             assertThat(failDist).as("失败只有售罄3001").containsOnlyKeys("3001");
             assertThat(failDist.get("3001")).isEqualTo(1000L);
 
-            // 对账恒等式：Redis余量 + DB已发 == 总量；DB issued == 成功数
-            CouponTemplateLike tpl = templateOf(tplId);
-            assertThat(tpl.issued()).isEqualTo(1000);
+            // 恒等式验账：每笔成功都完成了 confirm（dbi+1 与令牌出清原子配对），
+            // 每笔失败都在闸门被拒（从未进记账）→ 三本账精确归零，无容忍带
+            var tpl = templateRepository.findById(tplId).orElseThrow();
+            assertThat(tpl.getIssuedCount()).isEqualTo(1000);
             assertThat(stockGateway.remaining(tplId))
-                    .as("Redis余量=总量-已发（补偿无残留）").isEqualTo(tpl.total() - 1000);
+                    .as("Redis余量=总量-已发（取消记账无残留）").isEqualTo(tpl.getTotalCount() - 1000);
+            assertThat(stockGateway.issuedCount(tplId)).as("借方=1000").isEqualTo(1000);
+            assertThat(stockGateway.confirmedCount(tplId)).as("贷方=1000").isEqualTo(1000);
+            assertThat(stockGateway.pendingCount(tplId)).as("在途=0").isZero();
+            assertThat(stockGateway.identity(tplId, 300).delta())
+                    .as("issued − dbi − pend ≡ 0").isZero();
         } finally {
             pool.shutdownNow();
         }
@@ -167,87 +185,151 @@ class RedisStockIntegrationTest {
 
     @Test
     @Timeout(120)
-    @DisplayName("验收④：真漂移（模拟kill-9，diff=49远超在途+余量，复核后仍在）→ 二次复核后重建恢复")
-    void driftRebuild() {
-        long tplId = createTemplate(100, 1, null, null);
-        long uid = USER.incrementAndGet();
-        receive(uid, "d-1", tplId);   // issued=1, redis=99, 在途=0（请求已终结）
-        assertThat(inFlightCounter.get()).as("请求完成后在途必须归零（否则计数器泄漏）").isZero();
-
-        stockGateway.initStock(tplId, 50);   // 人为污染：模拟扣减后进程被杀（真漂移 diff=49）
-
-        assertThat(stockGateway.remaining(tplId)).isEqualTo(50);
-        int rebuilt = reconcileService.reconcileAll();   // 首量超界 → 复核(200ms)仍在 → 重建
-
-        assertThat(stockGateway.remaining(tplId))
-                .as("重建后 Redis == total - issued").isEqualTo(99);
-        assertThat(rebuilt).as("真漂移应触发一次重建").isEqualTo(1);
-    }
-
-    @Test
-    @Timeout(120)
-    @DisplayName("验收⑦【L21回归】：瞬态差异（首量超界、复核时已落定）→ 不重建不误报")
-    void recheckHealsTransientDiff() throws Exception {
-        long tplId = createTemplate(100, 1, null, null);
-        long uid = USER.incrementAndGet();
-        receive(uid, "rh-1", tplId);                 // issued=1, expected=99
-
-        stockGateway.initStock(tplId, 80);           // 模拟首量瞬间：Redis 偏低19（如在途未落定）
-        // 100ms 后模拟"在途落定"（Redis 回到与账本一致）——发生在复核窗口(200ms)内
-        var fixer = Executors.newSingleThreadScheduledExecutor();
-        fixer.schedule(() -> stockGateway.initStock(tplId, 99), 100, TimeUnit.MILLISECONDS);
-        int rebuilt;
-        try {
-            rebuilt = reconcileService.reconcileAll();   // 首量 diff=19>5 → 复核 → 已自愈
-        } finally {
-            fixer.shutdownNow();
-        }
-        assertThat(rebuilt).as("瞬态差异不得触发重建（L21：误重建会自己制造漂移）").isZero();
-        assertThat(stockGateway.remaining(tplId)).isEqualTo(99);
-    }
-
-    @Test
-    @Timeout(120)
-    @DisplayName("验收⑧【L21回归】：在途窗口内（diff=在途数）对账不误报、不动 Redis")
-    void inFlightWindowNotDrift() {
-        long tplId = createTemplate(100, 1, null, null);
-        long uid = USER.incrementAndGet();
-        receive(uid, "if-1", tplId);                 // issued=1, expected=99, redis=99
-        stockGateway.initStock(tplId, 96);           // 模拟3个在途：Redis 已被扣3、DB 未落
-        inFlightCounter.set(3);
-
-        int rebuilt = reconcileService.reconcileAll();
-
-        assertThat(rebuilt).as("diff=3 ≤ 在途3+余量5 ⇒ 正常时序差，不得重建").isZero();
-        assertThat(stockGateway.remaining(tplId)).as("Redis 不被触碰").isEqualTo(96);
-        inFlightCounter.set(0);                      // 清理模拟状态
-    }
-
-    @Test
-    @Timeout(120)
-    @DisplayName("验收⑨【补偿幂等】：补偿被执行两次 → 第二次完全no-op；补偿后同requestId可重新领取")
-    void compensationIsIdempotent() {
+    @DisplayName("验收④【恒等式核心】：崩溃残留（扣Redis后进程被杀）→ 两轮确认 → 守卫修复三本账 + 漂移落表")
+    void crashResidueDetectedAndRepaired() throws Exception {
         long tplId = createTemplate(100, 2, null, null);
         long uid = USER.incrementAndGet();
-        var cmd = new RedisStockGateway.DeductCommand(tplId, uid, "cp-idem-1", 2, 0, 0, 172800, 600);
+        // 模拟 kill -9：Lua 过闸（issued+1, pend+1, stock-1）后进程死在 confirm/cancel 之前
+        DeductCommand crashed = new DeductCommand(tplId, uid, "crash-1", 2, 0, 0, 172800, 600);
+        assertThat(stockGateway.deduct(crashed).success()).isTrue();
+        // —— 没有 confirm，没有 cancel ——
+        assertThat(stockGateway.remaining(tplId)).isEqualTo(99);
+        assertThat(stockGateway.pendingCount(tplId)).isEqualTo(1);
 
-        RedisStockGateway.DeductResult d = stockGateway.deduct(cmd);   // 过闸：stock 100→99, ul 0→1
-        assertThat(d.success()).isTrue();
+        // 在途 TTL(300ms) 内：恒等式仍成立（pend 持令牌）→ 首轮巡检不告警
+        assertThat(reconcileService.identityCheckAll()).as("在途期间不是漂移").isZero();
 
-        stockGateway.compensate(cmd);   // 第一次：正常回滚 → stock=100, ul=0, 幂等键已删
-        stockGateway.compensate(cmd);   // 第二次：模拟迟到/重复补偿（超时重发、MQ重复投递）
+        Thread.sleep(400);   // 令牌过期（生产=180s：DB锁等待50s的3倍）
+
+        // 第一轮：清理过期令牌 → delta=+1 → 只疑似（防一次性干扰）
+        assertThat(reconcileService.identityCheckAll()).isZero();
+        // 第二轮：仍在 → 确认 → 深对账：在途已清 + COUNT互证过 → 按 DB 口径重置三本账
+        assertThat(reconcileService.identityCheckAll()).isEqualTo(1);
 
         assertThat(stockGateway.remaining(tplId))
-                .as("二次补偿不得把库存多加回去（否则Redis偏高→过闸的多→DB拒绝→体验退化）")
-                .isEqualTo(100);
-        assertThat(stockGateway.userCount(tplId, uid))
-                .as("用户计数不得被二次补偿减成负数")
-                .isEqualTo(0);
+                .as("崩溃多扣的 1 个额度被找回（total-issued=100）").isEqualTo(100);
+        assertThat(stockGateway.issuedCount(tplId)).as("幽灵借方被抹掉").isZero();
+        assertThat(stockGateway.confirmedCount(tplId)).isZero();
+        assertThat(stockGateway.pendingCount(tplId)).isZero();
+        assertThat(stockGateway.identity(tplId, 300).delta()).isZero();
+        assertThat(driftLogGateway.countSince(tplId, LocalDateTime.now().minusMinutes(5)))
+                .as("漂移必须留痕（审计与升级依据）").isEqualTo(1);
+    }
 
-        // 凭证删除后，同一 requestId 的真实重试必须能重新过闸（补偿幂等不能破坏重试语义）
-        RedisStockGateway.DeductResult retry = stockGateway.deduct(cmd);
-        assertThat(retry.success()).as("补偿后同requestId重试应重新领取").isTrue();
+    @Test
+    @Timeout(120)
+    @DisplayName("验收⑦【在途语义】：TTL内完成（confirm到达）→ 差值从未出现，对账零打扰")
+    void inFlightWithinTtlNeverAlarms() {
+        long tplId = createTemplate(100, 2, null, null);
+        long uid = USER.incrementAndGet();
+        DeductCommand slow = new DeductCommand(tplId, uid, "slow-1", 2, 0, 0, 172800, 600);
+        assertThat(stockGateway.deduct(slow).success()).isTrue();   // 过闸
+
+        assertThat(reconcileService.identityCheckAll())
+                .as("在途期间 pend 持令牌，恒等式成立").isZero();
+
+        assertThat(stockGateway.confirm(slow)).as("TTL内 confirm：dbi+1 且令牌出清").isTrue();
+        assertThat(stockGateway.identity(tplId, 300).delta()).isZero();
+        assertThat(stockGateway.remaining(tplId)).isEqualTo(99);   // 正常扣减，未被触碰
+    }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("验收⑧【记账幂等】：cancel 两次 → 第二次完全no-op；cancel 后同 requestId 可重试；重复 confirm 不重复记账")
+    void cancelAndConfirmAreIdempotent() {
+        long tplId = createTemplate(100, 2, null, null);
+        long uid = USER.incrementAndGet();
+        DeductCommand cmd = new DeductCommand(tplId, uid, "cp-idem-1", 2, 0, 0, 172800, 600);
+
+        assertThat(stockGateway.deduct(cmd).success()).isTrue();   // stock 100→99, ul 0→1
+
+        assertThat(stockGateway.cancel(cmd, CancelCause.TRANSIENT)).isTrue();   // 正常回滚
+        assertThat(stockGateway.cancel(cmd, CancelCause.TRANSIENT))
+                .as("令牌已消费 → 第二次取消（迟到/重复投递）必须 no-op")
+                .isFalse();
+
+        assertThat(stockGateway.remaining(tplId))
+                .as("二次取消不得把库存多加回去（否则Redis偏高→过闸的多→DB拒绝循环）")
+                .isEqualTo(100);
+        assertThat(stockGateway.userCount(tplId, uid)).isEqualTo(0);
+        assertThat(stockGateway.issuedCount(tplId))
+                .as("借方被回滚一次（=0），不得减成负数或二次扣减").isZero();
+
+        // 凭证删除后，同一 requestId 的真实重试必须能重新过闸（幂等不能破坏重试语义）
+        assertThat(stockGateway.deduct(cmd).success()).isTrue();
+        assertThat(stockGateway.confirm(cmd)).isTrue();
+        assertThat(stockGateway.confirm(cmd)).as("重复 confirm 不得二次 dbi+1").isFalse();
+        assertThat(stockGateway.confirmedCount(tplId)).isEqualTo(1);
+        assertThat(stockGateway.issuedCount(tplId)).isEqualTo(1);
         assertThat(stockGateway.remaining(tplId)).isEqualTo(99);
+    }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("验收⑨【A1'+B4】：DB拒绝分类先行 → 售罄钉零+立标志 → 后续请求 Lua 首行短路（不再打DB）")
+    void soldoutPinZeroAndFlag() {
+        long tplId = createTemplate(1, 1, null, null);
+        long u1 = USER.incrementAndGet();
+        long u2 = USER.incrementAndGet();
+        long u3 = USER.incrementAndGet();
+
+        assertThat(receive(u1, "so-1", tplId).code()).isEqualTo("OK");   // 最后 1 张
+
+        // 人为污染：Redis 余量凭空多出 5（模拟漂移/主从切换丢写）
+        stockGateway.initStock(tplId, 5);
+
+        // u2 过闸（5>0）→ DB 条件扣账 0 行 → 分类先行：新快照 issued(1)>=total(1) → 售罄
+        Res second = receive(u2, "so-2", tplId);
+        assertThat(second.code()).isEqualTo("3001");
+
+        assertThat(stockGateway.remaining(tplId))
+                .as("售罄取消=钉零（SET 0），不是 INCR 回加——断 N1 自持环").isZero();
+        assertThat(stockGateway.isSoldout(tplId))
+                .as("B4：售罄标志已立（独立于 stock 值，抗误写）").isTrue();
+        assertThat(stockGateway.userCount(tplId, u2))
+                .as("u2 过闸时被加的限领计数必须回滚").isZero();
+        assertThat(stockGateway.identity(tplId, 300).delta())
+                .as("售罄取消后三本账仍归零（issued回滚1，dbi=1，pend=0）").isZero();
+
+        // u3 在 Lua 第一行被 soldout 标志短路：不过闸、不打 DB、无补偿
+        assertThat(receive(u3, "so-3", tplId).code()).isEqualTo("3001");
+        assertThat(templateRepository.findById(tplId).orElseThrow().getIssuedCount())
+                .as("标志短路后 DB 零压力").isEqualTo(1);
+    }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("验收⑩【A2'】：清库风暴——删stock key后50并发 → 条件SET只重建一次，扣减零丢失")
+    void lazyRebuildSurvivesFlushStorm() throws Exception {
+        long tplId = createTemplate(100, 1, null, null);
+        assertThat(stockGateway.remaining(tplId)).isEqualTo(100);
+
+        redisFlushStock(tplId);   // 模拟 Redis 清库/主从切换丢 key（N2 风暴起点）
+
+        ExecutorService pool = Executors.newFixedThreadPool(50);
+        try {
+            CountDownLatch gate = new CountDownLatch(1);
+            List<Future<Res>> futures = IntStream.range(0, 50)
+                    .mapToObj(i -> pool.submit(() -> {
+                        gate.await();
+                        return receive(70_000L + i, "storm-" + i, tplId);
+                    }))
+                    .toList();
+            gate.countDown();
+            List<Res> results = futures.stream()
+                    .map(f -> { try { return f.get(60, TimeUnit.SECONDS); }
+                                catch (Exception e) { throw new IllegalStateException(e); } })
+                    .toList();
+
+            long ok = results.stream().filter(r -> "OK".equals(r.code())).count();
+            assertThat(ok).as("退避+条件SET后全部恢复领取").isEqualTo(50);
+            // 风暴中若重建是"无条件 SET 到已扣减的 key 上"，余量会被错误抬高（DECR 被覆盖）
+            assertThat(stockGateway.remaining(tplId))
+                    .as("余量=100-50：每个成功扣减都被保留").isEqualTo(50);
+            assertThat(stockGateway.identity(tplId, 300).delta()).isZero();
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test
@@ -269,12 +351,8 @@ class RedisStockIntegrationTest {
         assertThat(receive(USER.incrementAndGet(), "bd-2", tplId).code()).isEqualTo("3003");
     }
 
-    // ---- 小工具：避免领域聚合直接依赖 ----
-    private record CouponTemplateLike(long total, long issued) {
-    }
-
-    private CouponTemplateLike templateOf(long id) {
-        var t = templateRepository.findById(id).orElseThrow();
-        return new CouponTemplateLike(t.getTotalCount(), t.getIssuedCount());
+    /** 只删 stock key（保留 issued/pend 等记账 key）——精确模拟"额度 key 丢失"（N2） */
+    private void redisFlushStock(long tplId) {
+        redis.delete("c:stk:{" + tplId + "}");   // key 规范属网关契约（docs/10 §10.2）
     }
 }
