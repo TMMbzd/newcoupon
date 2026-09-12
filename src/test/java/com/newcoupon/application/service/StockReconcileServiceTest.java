@@ -96,6 +96,7 @@ class StockReconcileServiceTest {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
         when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);         // 守卫②过
         when(stockGateway.remaining(1L)).thenReturn(89L);
+        when(stockGateway.repair(anyLong(), anyLong(), anyLong(), anyLong())).thenReturn(true);  // P0④：Lua 门放行
         when(driftLog.countSince(anyLong(), any())).thenReturn(0L);
 
         assertThat(service.identityCheckOne(1L)).isFalse();   // 第1轮：疑似
@@ -104,6 +105,22 @@ class StockReconcileServiceTest {
         verify(stockGateway, times(1)).repair(1L, 90L, 10L, 10L);   // stock=100-10, issued=dbi=10
         verify(stockGateway, times(1)).clearSoldout(1L);            // B4：恢复余量必须清标志
         verify(driftLog, times(1)).record(any());
+    }
+
+    @Test
+    @DisplayName("P0④回归：修复执行瞬间在途非空（Lua 门拦截）→ 推迟不修、不清售罄标志")
+    void repairDeferredByLuaGate() {
+        when(stockGateway.identity(1L, 1000L)).thenReturn(reading(11, 10, 0));
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
+        when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
+        when(stockGateway.remaining(1L)).thenReturn(89L);
+        when(stockGateway.repair(anyLong(), anyLong(), anyLong(), anyLong())).thenReturn(false); // 门拦截
+
+        service.identityCheckOne(1L);
+        assertThat(service.identityCheckOne(1L)).isTrue();
+
+        verify(driftLog, times(1)).record(any());                       // DEFERRED_PENDING 落表
+        verify(stockGateway, never()).clearSoldout(anyLong());          // 没修就不能动标志
     }
 
     @Test
@@ -155,6 +172,7 @@ class StockReconcileServiceTest {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(100L)));   // total=100 全发完
         when(userCouponRepository.countByTemplate(1L)).thenReturn(100L);
         when(stockGateway.remaining(1L)).thenReturn(0L);
+        when(stockGateway.repair(anyLong(), anyLong(), anyLong(), anyLong())).thenReturn(true);
         when(driftLog.countSince(anyLong(), any())).thenReturn(0L);
 
         service.identityCheckOne(1L);

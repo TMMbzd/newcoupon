@@ -14,7 +14,9 @@ import com.newcoupon.infrastructure.redis.RedisStockGateway;
 import com.newcoupon.infrastructure.redis.RedisStockGateway.CancelCause;
 import com.newcoupon.infrastructure.redis.RedisStockGateway.DeductCommand;
 import com.newcoupon.infrastructure.redis.RedisStockGateway.DeductResult;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import org.slf4j.Logger;
@@ -51,6 +53,8 @@ public class ReceiveAppService {
     private static final Logger log = LoggerFactory.getLogger(ReceiveAppService.class);
     private static final int IDEM_TTL_SEC = 600;
     private static final int DAY_TTL_SEC = 172800;   // 48h：跨天滚动 key 的清理兜底
+    /** P0 修复③：日限键的日期在编排层算一次、随命令固化——cancel 扣的必然是 deduct 加的那个键 */
+    private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("yyyyMMdd");
 
     private final UserCouponRepository userCouponRepository;
     private final TemplateRepository templateRepository;
@@ -82,7 +86,7 @@ public class ReceiveAppService {
         //    重复请求是少数派，-8 后回 DB 确认即可。DB uk_idem 唯一索引仍是终审。
         DeductCommand cmd = new DeductCommand(req.templateId(), req.userId(), req.requestId(),
                 template.getPerUserLimit(), template.getPerUserDailyLimit(), template.getDailyLimit(),
-                DAY_TTL_SEC, IDEM_TTL_SEC);
+                LocalDate.now().format(DAY), DAY_TTL_SEC, IDEM_TTL_SEC);
         DeductResult d = stockGateway.deduct(cmd);
         if (d.code() == -7) {
             // A2'：清库风暴中几十个请求同时撞 -7。随机退避把"同时再击"摊开；
@@ -99,25 +103,80 @@ public class ReceiveAppService {
         }
 
         // ③ DB 事务；任何失败都按分类取消记账（cancel 内部令牌门控保证幂等）。
+        //    P0 修复①②（2026-09-12）：confirm 单独兜底——它失败绝不回滚已提交事务的记账；
+        //    RuntimeException 分支先探 DB 定案再决定动作——"不确定提交"不得盲目补偿。
         try {
             UserCoupon issued = issueTxService.issue(req, template, d.seq(), LocalDateTime.now());
-            if (!stockGateway.confirm(cmd)) {
-                // 令牌已被消费（重复 confirm）或对账清理——正常幂等路径；
-                // 真正的 Redis 故障会抛异常进 RuntimeException 分支由对账兜底
-                log.debug("confirm no-op (token consumed): templateId={}, requestId={}",
-                        req.templateId(), req.requestId());
-            }
+            confirmQuietly(cmd);   // 修复①：DB 已提交，用户结果已定——confirm 失败只记日志放行
             return ReceiveResult.of(issued, false);
         } catch (DuplicateKeyException e) {
-            stockGateway.cancel(cmd, CancelCause.TRANSIENT);   // 计数还原+库存回加，令牌出清
+            cancelQuietly(cmd, CancelCause.TRANSIENT);   // 计数还原+库存回加，令牌出清
             return classifyAfterRollback(req, e);
         } catch (StockDeductRejectedException e) {
             // A1' 分类先行：先取新快照判断"DB 为什么拒"，再选取消形态——
             // 售罄要钉零（防 N1 过补偿自持环），瞬时异常要回加（库存没真耗尽）
             throw classifyDeductRejectAndCancel(req, cmd);
         } catch (RuntimeException e) {
-            stockGateway.cancel(cmd, CancelCause.TRANSIENT);   // 落库失败：不还=库存泄漏（少发）
-            throw e;
+            return recoverUncertainOutcome(req, cmd, e);   // 修复②：先探 DB，命中=已提交
+        }
+    }
+
+    /**
+     * P0 修复①（2026-09-12）：confirm 的 Redis 异常绝不触发 cancel。
+     * 旧代码 confirm 在 try 内，其异常落入 catch(RuntimeException) → cancel 会真回滚
+     * （令牌还在）——DB 已发券、Redis 记账退回"没发生"、恒等式仍平（cancel 是配对回滚）、
+     * 三层对账全盲：静默资损方向 + 用户收到 500 但券已发出，违反 ADR-0008 自身承诺。
+     * 现在两种失败变体都安全：命令未抵达→令牌留 pend，180s 清扫后对账按 confirm-lost 修复；
+     * 已抵达仅超时→状态本就一致，无需动作。
+     */
+    private void confirmQuietly(DeductCommand cmd) {
+        try {
+            if (!stockGateway.confirm(cmd)) {
+                log.debug("confirm no-op (token consumed): templateId={}, requestId={}",
+                        cmd.templateId(), cmd.requestId());
+            }
+        } catch (RuntimeException e) {
+            log.warn("confirm failed (DB committed, token left for reconcile to heal): "
+                    + "templateId={}, requestId={}", cmd.templateId(), cmd.requestId(), e);
+        }
+    }
+
+    /**
+     * P0 修复②（2026-09-12）：不确定提交（如 COMMIT 阶段断连——MySQL 可能已落盘）不得盲目 cancel。
+     * 探针=按幂等键查 DB：命中=事务其实成功了→记账确认+按幂等命中返回成功；
+     * 未命中=真失败→cancel 回滚；探针自身失败→不 cancel 抛原异常（令牌交 180s 清扫，对账兜底）。
+     * 残余窗口=「断连 且 COMMIT 落盘晚于探针一个 RTT」，IO 尖刺时秒级——有界、零超发、镜像自愈。
+     */
+    private ReceiveResult recoverUncertainOutcome(ReceiveRequest req, DeductCommand cmd,
+                                                  RuntimeException cause) {
+        Optional<UserCoupon> landed;
+        try {
+            landed = userCouponRepository.findByIdempotentKey(req.userId(), req.requestId());
+        } catch (RuntimeException probeFailure) {
+            log.error("uncertain commit AND probe failed — leave token to TTL sweep: "
+                    + "templateId={}, requestId={}", req.templateId(), req.requestId(), probeFailure);
+            throw cause;
+        }
+        if (landed.isPresent()) {
+            log.warn("uncertain commit RESOLVED as committed — confirm & return success: "
+                    + "templateId={}, requestId={}", req.templateId(), req.requestId());
+            confirmQuietly(cmd);
+            return toDuplicatedResult(landed.get(), req);
+        }
+        cancelQuietly(cmd, CancelCause.TRANSIENT);   // 真失败：不还=库存泄漏（少发）
+        throw cause;
+    }
+
+    /**
+     * 取消记账的二次故障防线（答辩 A3）：cancel 自身抛异常（Redis 同时故障）时不得吞掉
+     * 业务语义——记错误日志放行，令牌交 180s 清扫由对账修复（方向安全：少卖有界、不超发）。
+     */
+    private void cancelQuietly(DeductCommand cmd, CancelCause cause) {
+        try {
+            stockGateway.cancel(cmd, cause);
+        } catch (RuntimeException e) {
+            log.error("cancel failed (token left to TTL sweep, reconcile will heal): "
+                    + "templateId={}, requestId={}, cause={}", cmd.templateId(), cmd.requestId(), cause, e);
         }
     }
 
@@ -183,23 +242,23 @@ public class ReceiveAppService {
     private BizException classifyDeductRejectAndCancel(ReceiveRequest req, DeductCommand cmd) {
         CouponTemplate fresh = templateRepository.findById(req.templateId()).orElse(null);
         if (fresh == null) {
-            stockGateway.cancel(cmd, CancelCause.OFFLINE);
+            cancelQuietly(cmd, CancelCause.OFFLINE);
             return new BizException(ErrorCode.TEMPLATE_NOT_FOUND);
         }
         if (fresh.getIssuedCount() >= fresh.getTotalCount()) {
             // 售罄：钉零 + 立标志。Redis 余量已无意义——回加只会重启"过闸→被拒→回加"
             // 的自持环（N1）；标志让后续请求在 Lua 第一行就短路，DB 售罄 QPS 归 1。
-            stockGateway.cancel(cmd, CancelCause.SOLD_OUT);
+            cancelQuietly(cmd, CancelCause.SOLD_OUT);
             return new BizException(ErrorCode.STOCK_OUT);
         }
         if (fresh.getApproveStatus() != ApproveStatus.APPROVED
                 || fresh.getPublishStatus() != PublishStatus.PUBLISHED) {
             // 下线/审批回退：同样钉零（模板停了，余量不该再放行；重新上线走回补协议）
-            stockGateway.cancel(cmd, CancelCause.OFFLINE);
+            cancelQuietly(cmd, CancelCause.OFFLINE);
             return new BizException(ErrorCode.TEMPLATE_NOT_RECEIVABLE, "模板状态已变化（被下线/审批回退）");
         }
         // 瞬时（扣账竞态输给并发/锁等待后的重试）：库存没真耗尽，正常回加
-        stockGateway.cancel(cmd, CancelCause.TRANSIENT);
+        cancelQuietly(cmd, CancelCause.TRANSIENT);
         return new BizException(ErrorCode.DEGRADED, "库存扣账未成功，请稍后重试");
     }
 

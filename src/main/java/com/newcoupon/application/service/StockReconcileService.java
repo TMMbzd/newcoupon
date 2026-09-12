@@ -196,7 +196,18 @@ public class StockReconcileService {
 
         // 三守卫全过：按 DB 口径重置三本账（幂等动作，修错会在下轮恒等式重新暴露）
         long stock = dbTotal - dbIssued;
-        stockGateway.repair(templateId, stock, dbIssued, dbIssued);
+        boolean repaired = stockGateway.repair(templateId, stock, dbIssued, dbIssued);
+        if (!repaired) {
+            // P0 修复④（2026-09-12）：守卫①（Java 侧读 pending==0）与 REPAIR 执行之间隔着
+            // 守卫②的 MySQL COUNT（秒级窗口），期间新进的预占会被 SET 抹账（TOCTOU）。
+            // 在途门已下沉 Lua 原子拦截——这里处理拦截结果：推迟到下轮，绝不带着在途强修。
+            log.warn("repair deferred: in-flight reappeared before execution (Lua gate): templateId={}",
+                    templateId);
+            recordDrift(new DriftEvent(templateId, r.issued(), r.confirmed(), r.pending(),
+                    dbTotal, dbIssued, null, stockGateway.remaining(templateId), r.delta(),
+                    "DEFERRED_PENDING", "修复执行时在途非空（Lua 门原子拦截），下轮重试"));
+            return;
+        }
         if (stock > 0) {
             stockGateway.clearSoldout(templateId);  // B4 清除协议：修复恢复了余量必须清标志
         }

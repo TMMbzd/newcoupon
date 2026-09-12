@@ -48,6 +48,14 @@
 **被取代/废弃**：`uk_user_template` 唯一索引→`uk_user_seq`；ADR-0004"限领1张"条款→ADR-0006 通用限领；**"回滚即补偿"特性消失**（Redis 不参与 DB 事务，改为补偿脚本）。
 **语义变化（登记）**：并发同 requestId 从"排队后全成功"变为"-8+1001 提示重试"。
 
+### P0 四 Bug 热修（2026-09-12，独立提交，ADR-0009 §6）
+三场外部评审（讨论01七核查/答辩33问）从现行代码挖出的四个正确性 Bug，与范式无关、当天热修：
+①confirm 被自身 catch 抹账（DB 已提交却回滚记账，三层对账全盲+违反 ADR-0008 承诺）→ confirmQuietly 单独兜底；
+②不确定提交盲补偿（COMMIT 断连赌"没提交"）→ recoverUncertainOutcome 探针（uk_idem）定案三岔口+探针失败不动；
+③跨天失败取消扣错日键（日限无 DB 防线，超发方向）→ day 随 DeductCommand 固化；
+④对账修复 TOCTOU（守卫①检查与 REPAIR 执行隔着秒级 COUNT）→ 在途门下沉 REPAIR Lua 原子拦截，false=推迟。
+附带：cancel 二次故障防线（cancelQuietly——Redis 同挂时保业务语义，令牌交清扫）。99 测试全绿（+7 回归）。讲解：study/06f。
+
 ### 对账范式升级（外部方案评审综合，ADR-0008，2026-09-09）
 用户裁定五决策点（采纳 A4' 恒等式 / 采纳 A3' Redis 记账 / 保留窄域自动重建 / 采纳 B4 售罄标志 / 维持 M3 压测分桶）后实施。
 **改造了**：`RedisStockGateway`（六脚本：deduct 内联复式记账+售罄短路、confirm/cancel 令牌配对、identity 原子快照、条件 SET 懒重建、repair 三本账重置）；`ReceiveAppService`（分类先行+取消三变体+confirm 记账+-7 退避）；`StockReconcileService`（容忍带整体替换为恒等式两层检查+三守卫+T+1 审计）。

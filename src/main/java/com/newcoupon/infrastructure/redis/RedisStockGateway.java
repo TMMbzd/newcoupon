@@ -1,7 +1,5 @@
 package com.newcoupon.infrastructure.redis;
 
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -125,15 +123,20 @@ public class RedisStockGateway {
             return 1
             """;
 
-    /** 修复重建（对账确认漂移后）：三本账+库存一次重置为 DB 口径（仅 pending==0 时允许调用） */
+    /**
+     * 修复重建（对账确认漂移后）：三本账+库存一次重置为 DB 口径。
+     * P0 修复④（2026-09-12）：在途门下沉进 Lua——Java 侧"检查 pending==0"与"执行 SET"之间隔着
+     * 一次 MySQL COUNT（秒级窗口），期间新进的预占会被 SET 抹掉记账（TOCTOU）。门放进脚本后
+     * 检查与执行原子，窗口关闭。返回 -1=在途非空（调用方按下轮推迟处理），1=已修复。
+     */
     public static final String REPAIR_SCRIPT = """
+            -- KEYS: 1 stk  2 issued  3 dbi  4 pend(zset)
+            if redis.call('ZCARD', KEYS[4]) > 0 then return -1 end
             redis.call('SET', KEYS[1], ARGV[1])
             redis.call('SET', KEYS[2], ARGV[2])
             redis.call('SET', KEYS[3], ARGV[3])
             return 1
             """;
-
-    private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("yyyyMMdd");
 
     private final StringRedisTemplate redis;
 
@@ -151,10 +154,15 @@ public class RedisStockGateway {
     /** 取消原因（决定 stock 的修复语义） */
     public enum CancelCause { TRANSIENT, SOLD_OUT, OFFLINE }
 
-    /** 扣减参数（纯数据） */
+    /**
+     * 扣减参数（纯数据）。day=编排层算一次传入的日限键日期（yyyyMMdd）——
+     * P0 修复③（2026-09-12）：deduct/cancel 各自 LocalDate.now() 会在跨天失败场景扣错日键
+     * （23:59:59.900 预占、00:00:05 取消→扣的是新一天的键），日限无 DB 防线，属超发方向。
+     * 日期随命令固化后，cancel 扣的一定是 deduct 加的那个键。
+     */
     public record DeductCommand(long templateId, long userId, String requestId,
                                 int maxPerUser, int perUserDaily, long dailyLimit,
-                                int dayTtlSec, int idemTtlSec) {
+                                String day, int dayTtlSec, int idemTtlSec) {
     }
 
     /** 扣减结果：code 见脚本头；seq=成功时该用户第几张 */
@@ -168,7 +176,7 @@ public class RedisStockGateway {
     }
 
     public DeductResult deduct(DeductCommand cmd) {
-        String day = LocalDate.now().format(DAY);
+        String day = cmd.day();                                   // 日期随命令固化（P0 修复③）
         String member = pendMember(cmd.userId(), cmd.requestId());
         List<?> r = redis.execute(deductScript,
                 List.of(stockKey(cmd.templateId()), ulKey(cmd.templateId(), cmd.userId()),
@@ -189,9 +197,9 @@ public class RedisStockGateway {
         return r != null && r == 1;
     }
 
-    /** DB 失败后的记账取消（按分类决定 stock 修复语义）。令牌已消费则 no-op（幂等） */
+    /** DB 失败后的记账取消（按分类决定 stock 修复语义）。令牌已消费则 no-op（幂等）；日键用 cmd.day()（P0 修复③） */
     public boolean cancel(DeductCommand cmd, CancelCause cause) {
-        String day = LocalDate.now().format(DAY);
+        String day = cmd.day();
         Long r = redis.execute(cancelScript,
                 List.of(stockKey(cmd.templateId()), ulKey(cmd.templateId(), cmd.userId()),
                         uldKey(day, cmd.templateId(), cmd.userId()), dlyKey(day, cmd.templateId()),
@@ -222,11 +230,17 @@ public class RedisStockGateway {
         return r != null && r == 1;
     }
 
-    /** 修复重建：stock/issued/dbi 一次重置为 DB 口径（调用方保证 pending==0 且 COUNT 守卫通过） */
-    public void repair(long templateId, long stock, long issued, long confirmed) {
-        redis.execute(repairScript,
-                List.of(stockKey(templateId), issuedKey(templateId), dbiKey(templateId)),
+    /**
+     * 修复重建：stock/issued/dbi 一次重置为 DB 口径。Lua 内在途门原子拦截（P0 修复④）。
+     *
+     * @return true=已修复；false=执行瞬间在途非空（Lua 门拦截），调用方按下轮推迟处理
+     */
+    public boolean repair(long templateId, long stock, long issued, long confirmed) {
+        Long r = redis.execute(repairScript,
+                List.of(stockKey(templateId), issuedKey(templateId), dbiKey(templateId),
+                        pendKey(templateId)),
                 String.valueOf(stock), String.valueOf(issued), String.valueOf(confirmed));
+        return r != null && r == 1;
     }
 
     /** B4 清除协议：合法回补/修复使库存>0 时必须清标志，否则模板永久假死 */

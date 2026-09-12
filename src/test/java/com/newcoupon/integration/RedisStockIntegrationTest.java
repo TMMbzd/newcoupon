@@ -82,6 +82,10 @@ class RedisStockIntegrationTest {
 
     private static final AtomicInteger USER = new AtomicInteger(80_000);
 
+    /** P0③测试：day 由调用方固化传入——这里用"构造时刻的今天"（与生产编排层同语义） */
+    private static final java.util.function.Supplier<String> TODAY =
+            () -> java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"));
+
     private long createTemplate(long stock, Integer perUserLimit, Long dailyLimit, Integer perUserDaily) {
         TemplateAppService.CreatedTemplate t = templateAppService.create(new TemplateCreateRequest(
                 "阶段1验收券", 1001L, 1, 1000L, null, 10000L, stock,
@@ -190,7 +194,7 @@ class RedisStockIntegrationTest {
         long tplId = createTemplate(100, 2, null, null);
         long uid = USER.incrementAndGet();
         // 模拟 kill -9：Lua 过闸（issued+1, pend+1, stock-1）后进程死在 confirm/cancel 之前
-        DeductCommand crashed = new DeductCommand(tplId, uid, "crash-1", 2, 0, 0, 172800, 600);
+        DeductCommand crashed = new DeductCommand(tplId, uid, "crash-1", 2, 0, 0, TODAY.get(), 172800, 600);
         assertThat(stockGateway.deduct(crashed).success()).isTrue();
         // —— 没有 confirm，没有 cancel ——
         assertThat(stockGateway.remaining(tplId)).isEqualTo(99);
@@ -222,7 +226,7 @@ class RedisStockIntegrationTest {
     void inFlightWithinTtlNeverAlarms() {
         long tplId = createTemplate(100, 2, null, null);
         long uid = USER.incrementAndGet();
-        DeductCommand slow = new DeductCommand(tplId, uid, "slow-1", 2, 0, 0, 172800, 600);
+        DeductCommand slow = new DeductCommand(tplId, uid, "slow-1", 2, 0, 0, TODAY.get(), 172800, 600);
         assertThat(stockGateway.deduct(slow).success()).isTrue();   // 过闸
 
         assertThat(reconcileService.identityCheckAll())
@@ -239,7 +243,7 @@ class RedisStockIntegrationTest {
     void cancelAndConfirmAreIdempotent() {
         long tplId = createTemplate(100, 2, null, null);
         long uid = USER.incrementAndGet();
-        DeductCommand cmd = new DeductCommand(tplId, uid, "cp-idem-1", 2, 0, 0, 172800, 600);
+        DeductCommand cmd = new DeductCommand(tplId, uid, "cp-idem-1", 2, 0, 0, TODAY.get(), 172800, 600);
 
         assertThat(stockGateway.deduct(cmd).success()).isTrue();   // stock 100→99, ul 0→1
 
@@ -349,6 +353,50 @@ class RedisStockIntegrationTest {
         long tplId = createTemplate(100, 1, 1L, null);
         assertThat(receive(USER.incrementAndGet(), "bd-1", tplId).code()).isEqualTo("OK");
         assertThat(receive(USER.incrementAndGet(), "bd-2", tplId).code()).isEqualTo("3003");
+    }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("P0③回归·跨天失败取消：cancel 必须扣 deduct 用的那个日键（修复前会扣到新一天）")
+    void midnightCancelHitsOriginalDayKey() {
+        long tplId = createTemplate(100, 5, 10L, null);   // 批次日限=10（日限无DB防线，错扣=超发方向）
+        long uid = USER.incrementAndGet();
+        String fakeOldDay = "20990101";   // 固化为"昨天"——模拟 23:59:59.900 过闸
+        DeductCommand cmd = new DeductCommand(tplId, uid, "md-1", 5, 0, 10L, fakeOldDay, 172800, 600);
+
+        assertThat(stockGateway.deduct(cmd).success()).isTrue();
+        assertThat(redis.opsForValue().get("c:dly:20990101:{" + tplId + "}"))
+                .as("deduct 加的是命令里固化的那个日键").isEqualTo("1");
+
+        // "午夜过后"失败取消——修复前 cancel 用 LocalDate.now() 重算日键，扣的是今天（错键）
+        assertThat(stockGateway.cancel(cmd, CancelCause.TRANSIENT)).isTrue();
+
+        assertThat(redis.opsForValue().get("c:dly:20990101:{" + tplId + "}"))
+                .as("cancel 必须回扣原日键（否则次日日限被偷走=超发方向）").isEqualTo("0");
+    }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("P0④回归·修复 Lua 原子门：在途非空时 repair 被拦截不覆盖；令牌出清后放行")
+    void repairGatedWhileInFlight() {
+        long tplId = createTemplate(100, 2, null, null);
+        long uid = USER.incrementAndGet();
+        DeductCommand cmd = new DeductCommand(tplId, uid, "rg-1", 2, 0, 0, TODAY.get(), 172800, 600);
+
+        assertThat(stockGateway.deduct(cmd).success()).isTrue();   // 令牌在途挂着
+        assertThat(stockGateway.remaining(tplId)).isEqualTo(99);
+
+        // 守卫①（Java 侧）此刻读到 pending=0 是伪造的前提——真实场景是"检查后、执行前溜进新预占"。
+        // 这里直接构造"执行瞬间在途非空"：repair 必须原子拒绝，库存不被覆盖。
+        assertThat(stockGateway.repair(tplId, 999, 0, 0))
+                .as("在途非空，Lua 门必须原子拦截（TOCTOU 窗口关闭）").isFalse();
+        assertThat(stockGateway.remaining(tplId))
+                .as("被拦截的修复不得写任何值").isEqualTo(99);
+
+        // 令牌出清（取消）后，同一修复放行
+        assertThat(stockGateway.cancel(cmd, CancelCause.TRANSIENT)).isTrue();
+        assertThat(stockGateway.repair(tplId, 100, 0, 0)).isTrue();
+        assertThat(stockGateway.remaining(tplId)).isEqualTo(100);
     }
 
     /** 只删 stock key（保留 issued/pend 等记账 key）——精确模拟"额度 key 丢失"（N2） */

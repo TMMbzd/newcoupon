@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -294,14 +295,78 @@ class ReceiveAppServiceTest {
     }
 
     @Test
-    @DisplayName("事务RuntimeException → cancel(TRANSIENT)：不还=库存泄漏（少发）")
+    @DisplayName("事务RuntimeException → 探针未命中 → cancel(TRANSIENT)：不还=库存泄漏（少发）")
     void runtimeExceptionCancelsTransient() {
         givenTemplateAndGate(1, new DeductResult(0, 1));
         when(issueTxService.issue(any(), any(), anyLong(), any()))
                 .thenThrow(new IllegalStateException("db down"));
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
+                .thenReturn(Optional.empty());   // 探针：事务确实没提交
 
         assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 1L)))
                 .isInstanceOf(IllegalStateException.class);
         verify(stockGateway).cancel(any(), eq(CancelCause.TRANSIENT));
+    }
+
+    // ---------- P0 热修回归（2026-09-12，ADR-0009 §6） ----------
+
+    @Test
+    @DisplayName("P0①回归·confirm 抛 Redis 异常：绝不 cancel（不抹已提交账），返回成功")
+    void confirmFailureMustNotRollbackCommittedTx() {
+        givenTemplateAndGate(1, new DeductResult(0, 1));
+        when(issueTxService.issue(any(), any(), anyLong(), any())).thenReturn(coupon(1L, 1));
+        doThrow(new IllegalStateException("redis timeout before exec"))
+                .when(stockGateway).confirm(any());   // confirm 未抵达 Redis
+
+        ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
+
+        assertThat(r.duplicated()).isFalse();                        // DB 已提交：用户必须拿到成功
+        verify(stockGateway, never()).cancel(any(), any());          // Bug ①核心：绝不回滚
+    }
+
+    @Test
+    @DisplayName("P0②回归·不确定提交(commit断连)但探针命中：记账确认+返回成功，绝不 cancel")
+    void uncertainCommitLandedReturnsSuccess() {
+        givenTemplateAndGate(1, new DeductResult(0, 1));
+        when(issueTxService.issue(any(), any(), anyLong(), any()))
+                .thenThrow(new IllegalStateException("connection reset on commit"));
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
+                .thenReturn(Optional.of(coupon(1L, 1)));   // MySQL 其实已落盘
+
+        ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
+
+        assertThat(r.duplicated()).isTrue();                         // 按幂等命中返回成功
+        verify(stockGateway, never()).cancel(any(), any());          // Bug ②核心：不盲补偿
+        verify(stockGateway).confirm(any());                         // 记账确认（尽力而为）
+    }
+
+    @Test
+    @DisplayName("P0②回归·不确定提交且探针自身失败：不 cancel（令牌交180s清扫），原异常上抛")
+    void uncertainCommitProbeFailsLeavesToken() {
+        givenTemplateAndGate(1, new DeductResult(0, 1));
+        when(issueTxService.issue(any(), any(), anyLong(), any()))
+                .thenThrow(new IllegalStateException("connection reset"));
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
+                .thenThrow(new RuntimeException("db also down"));   // 断连风暴同时打断探针
+
+        assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 1L)))
+                .isInstanceOf(IllegalStateException.class);          // 原异常不被吞
+        verify(stockGateway, never()).cancel(any(), any());          // 结果未知→不动，交对账
+    }
+
+    @Test
+    @DisplayName("二次故障防线·cancel 自身抛异常：吞掉保业务语义（令牌交清扫），不误报 500 之外的错")
+    void cancelSecondaryFailureDoesNotMaskBusinessResult() {
+        givenTemplateAndGate(1, new DeductResult(0, 1));
+        when(issueTxService.issue(any(), any(), anyLong(), any()))
+                .thenThrow(new DuplicateKeyException("uk_idem"));
+        when(stockGateway.cancel(any(), eq(CancelCause.TRANSIENT)))
+                .thenThrow(new IllegalStateException("redis also down"));   // 补偿时 Redis 也挂
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
+                .thenReturn(Optional.of(coupon(1L, 1)));
+
+        ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
+
+        assertThat(r.duplicated()).isTrue();   // 幂等命中的业务结果不被二次故障吞掉
     }
 }
