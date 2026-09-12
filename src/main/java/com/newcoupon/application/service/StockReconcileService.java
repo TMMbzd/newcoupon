@@ -17,6 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import com.xxl.job.core.handler.annotation.XxlJob;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -111,6 +112,7 @@ public class StockReconcileService {
      * 第一层：恒等式巡检（每 60s）。返回本轮确认漂移（进入第二层）的模板数——
      * 测试与运维观测用：>0 即存在未被记账原子性覆盖的变更。
      */
+    @XxlJob("couponStockPatrolJob")   // XXL-JOB 通道（ADR-0010，路由=第一个，巡检本身单片）；@Scheduled 为降级通道
     @Scheduled(fixedDelay = 60_000, initialDelay = 60_000)
     public int identityCheckAll() {
         // 多实例互斥：没抢到轮次的实例让路（正确性由幂等 CAS+Lua 门保证，锁消重复扫描负载）
@@ -248,6 +250,7 @@ public class StockReconcileService {
      * COUNT(user_coupon) 互证。这是恒等式之外的独立防线——它校验的是 DB 账本本身，
      * 能抓住"Redis 三本账全对但 DB 少记/多记"的场景（如人工直接改库、未来 binlog 链路丢失）。
      */
+    @XxlJob("couponStockAuditJob")
     @Scheduled(cron = "${coupon.reconcile.audit-cron:0 47 3 * * ?}", zone = "Asia/Shanghai")
     public void dailyAudit() {
         String owner = "stock-audit-" + UUID.randomUUID();

@@ -1,4 +1,7 @@
-# 本地依赖环境：MySQL 8 + Redis 7
+# 本地依赖环境：MySQL 8 + Redis 7 + XXL-JOB 调度中心（ADR-0010 终局技术栈）
+# xxl_job 库的建表脚本只在 MySQL 卷首次初始化时自动执行；老卷补装：
+#   docker exec -i newcoupon-mysql mysql -uroot -proot123456 < docker/xxl-job/tables_xxl_job.sql
+# 控制台 http://127.0.0.1:8280/xxl-job-admin （admin/123456），任务定义见 ADR-0010 §3
 # 用法：docker compose up -d   （数据落在 named volume，可重复启停）
 # 注意：阶段0只依赖 MySQL；Redis 是阶段1（Lua 库存扣减）的预备，顺手起好。
 services:
@@ -17,6 +20,7 @@ services:
       - "3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
+      - ./docker/xxl-job/tables_xxl_job.sql:/docker-entrypoint-initdb.d/10-xxl-job.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot123456"]
       interval: 5s
@@ -32,6 +36,24 @@ services:
       - "6379:6379"
     volumes:
       - redis-data:/data
+
+  # XXL-JOB 调度中心（ADR-0010）：调度/控制台/执行留痕/分片广播。复用主 MySQL 的 xxl_job 库。
+  xxl-job-admin:
+    image: xuxueli/xxl-job-admin:2.4.1
+    container_name: newcoupon-xxljob
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      PARAMS: >-
+        --spring.datasource.url=jdbc:mysql://mysql:3306/xxl_job?useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&serverTimezone=Asia/Shanghai
+        --spring.datasource.username=root
+        --spring.datasource.password=root123456
+        --xxl.job.accessToken=default_token
+      TZ: Asia/Shanghai
+    ports:
+      - "8280:8080"
 
 volumes:
   mysql-data:

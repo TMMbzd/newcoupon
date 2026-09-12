@@ -104,7 +104,13 @@
       <artifactId>mysql</artifactId>
       <scope>test</scope>
     </dependency>
-  </dependencies>
+          <!-- XXL-JOB 执行器（ADR-0010 调度平台终局选型；条件装配，tests 默认关闭） -->
+        <dependency>
+            <groupId>com.xuxueli</groupId>
+            <artifactId>xxl-job-core</artifactId>
+            <version>2.4.1</version>
+        </dependency>
+</dependencies>
 
   <build>
     <plugins>

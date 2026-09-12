@@ -15,10 +15,17 @@ import org.apache.ibatis.annotations.Update;
 @Mapper
 public interface CouponExpireTaskMapper extends BaseMapper<CouponExpireTaskPO> {
 
-    /** 捞到期待办（走 idx_scan(status, next_scan_time)） */
+    /**
+     * 捞到期待办（分片版，走 idx_scan(status, next_scan_time)）：
+     * XXL-JOB 分片广播时每个实例只捞自己的分片（shard % total = index），
+     * 吞吐随实例数线性扩展；单通道（shardIndex=0, shardTotal=1）=全量。
+     */
     @Select("SELECT * FROM coupon_expire_task WHERE status = 0 AND next_scan_time <= NOW() "
+            + "AND shard % #{shardTotal} = #{shardIndex} "
             + "ORDER BY next_scan_time LIMIT #{limit}")
-    List<CouponExpireTaskPO> scanDue(@Param("limit") int limit);
+    List<CouponExpireTaskPO> scanDueShard(@Param("shardIndex") int shardIndex,
+                                          @Param("shardTotal") int shardTotal,
+                                          @Param("limit") int limit);
 
     /** 终结任务（幂等：已终结再执行影响 0 行） */
     @Update("UPDATE coupon_expire_task SET status = 1 WHERE coupon_id = #{couponId} AND status = 0")

@@ -47,3 +47,14 @@ logging:
   level:
     root: INFO
     com.newcoupon: DEBUG         # 开发期自己的包开 DEBUG，生产改 INFO
+
+# XXL-JOB（ADR-0010 调度平台）：默认关闭——测试与无调度中心环境走 @Scheduled 降级通道；
+# 生产/compose 启动置 XXL_JOB_ENABLED=true（accessToken 必须与调度中心一致）
+xxl:
+  job:
+    enabled: ${XXL_JOB_ENABLED:false}
+    adminAddresses: ${XXL_JOB_ADMIN:http://127.0.0.1:8280/xxl-job-admin}
+    appname: newcoupon-executor
+    port: 9999
+    accessToken: default_token
+    logPath: /tmp/xxl-job/log

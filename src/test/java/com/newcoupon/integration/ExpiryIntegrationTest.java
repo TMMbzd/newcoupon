@@ -148,7 +148,7 @@ class ExpiryIntegrationTest {
         expireNow(a[0]);
         expireNow(b[0]);
 
-        int processed = couponExpireService.scanOnce();
+        int processed = couponExpireService.scanOnce(0, 1);
 
         assertThat(processed).as("两张到期任务被处理").isGreaterThanOrEqualTo(2);
         assertThat(userCouponRepository.findById(a[0]).orElseThrow().getStatus())
@@ -158,7 +158,7 @@ class ExpiryIntegrationTest {
                 "SELECT status FROM coupon_expire_task WHERE coupon_id = ?", Integer.class, a[0]))
                 .as("任务已终结").isEqualTo(1);
 
-        couponExpireService.scanOnce();   // 重跑：任务已终结，捞不到；即使重复触发 CAS 也影响 0 行
+        couponExpireService.scanOnce(0, 1);   // 重跑：任务已终结，捞不到；即使重复触发 CAS 也影响 0 行
 
         assertThat(expiredEventCount(a[0])).as("幂等：无重复事件").isEqualTo(1);
     }
@@ -208,7 +208,7 @@ class ExpiryIntegrationTest {
         LockResult lock = tradeAppService.lock(new LockRequest("ORD-EXP-SL", ids[1], ids[0]));
         expireNow(ids[0]);
 
-        couponExpireService.scanOnce();
+        couponExpireService.scanOnce(0, 1);
 
         assertThat(userCouponRepository.findById(ids[0]).orElseThrow().getStatus())
                 .isEqualTo(CouponStatus.EXPIRED);
@@ -235,7 +235,7 @@ class ExpiryIntegrationTest {
     void physicalStateConsistentAfterScan() {
         long[] ids = freshCoupon("after");
         expireNow(ids[0]);
-        couponExpireService.scanOnce();
+        couponExpireService.scanOnce(0, 1);
 
         UserCoupon coupon = userCouponRepository.findById(ids[0]).orElseThrow();
         MyCoupon viewed = tradeAppService.myCoupons(ids[1], null).coupons().stream()

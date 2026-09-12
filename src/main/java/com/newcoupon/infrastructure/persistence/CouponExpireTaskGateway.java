@@ -35,8 +35,8 @@ public class CouponExpireTaskGateway {
         mapper.insert(po);
     }
 
-    public List<CouponExpireTaskPO> scanDue(int limit) {
-        return mapper.scanDue(limit);
+    public List<CouponExpireTaskPO> scanDueShard(int shardIndex, int shardTotal, int limit) {
+        return mapper.scanDueShard(shardIndex, shardTotal, limit);
     }
 
     public void finish(long couponId) {

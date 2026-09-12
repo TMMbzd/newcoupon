@@ -13,6 +13,8 @@ import java.time.LocalDateTime;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.xxl.job.core.context.XxlJobHelper;
+import com.xxl.job.core.handler.annotation.XxlJob;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -56,6 +58,7 @@ public class CouponExpireService {
     /** 兜底扫描：每分钟捞到期待办小批量处理。异常只记日志下一轮重试（调度不中断）。
      *  多实例互斥：Redis 锁抢轮次——没抢到的实例本轮直接让路（正确性本由幂等 CAS 保证，
      *  锁消的是重复扫描的 DB 负载；TTL 90s > 最坏轮时长，持锁崩溃后锁自动过期自愈）。 */
+    @XxlJob("couponExpireScanJob")   // XXL-JOB 通道（ADR-0010，路由策略=分片广播）；@Scheduled 为降级通道，锁仲裁
     @Scheduled(fixedDelay = 60_000, initialDelay = 120_000)
     public int scan() {
         String owner = "expire-scan-" + java.util.UUID.randomUUID();
@@ -64,7 +67,8 @@ public class CouponExpireService {
             return 0;
         }
         try {
-            int processed = scanOnce();
+            int[] shard = shardParams();   // 分片广播：每个实例只扫自己的分片（XxlJobHelper；降级通道=单片全扫）
+            int processed = scanOnce(shard[0], shard[1]);
             if (processed > 0) {
                 log.info("expire scan: {} tasks processed", processed);
             }
@@ -77,15 +81,29 @@ public class CouponExpireService {
         }
     }
 
+    /** 分片参数：XXL-JOB 分片广播时取触发上下文的分片号/总数；@Scheduled 降级通道=0/1 全扫 */
+    private int[] shardParams() {
+        try {
+            int total = XxlJobHelper.getShardTotal();
+            int index = XxlJobHelper.getShardIndex();
+            if (total > 0 && index >= 0 && index < total) {
+                return new int[]{index, total};
+            }
+        } catch (Exception ignore) {
+            // 非 XXL-JOB 触发线程（@Scheduled/测试/手动）：上下文不存在——单片全扫
+        }
+        return new int[]{0, 1};
+    }
+
     /**
      * 单轮扫描（测试与人工触发可直接调）：最多 20 批 × 每批 500 条。
      *
      * @return 本轮处理的任务数
      */
-    public int scanOnce() {
+    public int scanOnce(int shardIndex, int shardTotal) {
         int processed = 0;
         for (int round = 0; round < 20; round++) {
-            List<CouponExpireTaskPO> batch = taskGateway.scanDue(500);
+            List<CouponExpireTaskPO> batch = taskGateway.scanDueShard(shardIndex, shardTotal, 500);
             if (batch.isEmpty()) {
                 break;
             }
@@ -132,6 +150,7 @@ public class CouponExpireService {
      * T+1 审计（L2）：仍为"待使用"但过期超 10 分钟的券 = 有券无任务（旁路漏注册）——
      * 自动补注册，下一轮扫描收走。差异超阈值说明注册口被绕过，告警。
      */
+    @XxlJob("couponExpireAuditJob")   // 单实例路由（锁内幂等），cron 由调度中心管理
     @Scheduled(cron = "${coupon.expire.audit-cron:0 23 4 * * ?}", zone = "Asia/Shanghai")
     public void dailyAudit() {
         String owner = "expire-audit-" + java.util.UUID.randomUUID();
