@@ -5,8 +5,11 @@ import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.infrastructure.persistence.StockDriftLogGateway;
 import com.newcoupon.infrastructure.persistence.StockDriftLogGateway.DriftEvent;
+import com.newcoupon.infrastructure.redis.RedisScanLock;
 import com.newcoupon.infrastructure.redis.RedisStockGateway;
 import com.newcoupon.infrastructure.redis.RedisStockGateway.IdentityReading;
+import java.time.Duration;
+import java.util.UUID;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -56,11 +59,14 @@ import org.springframework.stereotype.Service;
 public class StockReconcileService {
 
     private static final Logger log = LoggerFactory.getLogger(StockReconcileService.class);
+    private static final String PATROL_LOCK_KEY = "c:lock:stock-patrol";   // 多实例互斥（L16 重复执行半边）
+    private static final String AUDIT_LOCK_KEY = "c:lock:stock-audit";
 
     private final TemplateRepository templateRepository;
     private final UserCouponRepository userCouponRepository;
     private final RedisStockGateway stockGateway;
     private final StockDriftLogGateway driftLog;
+    private final RedisScanLock scanLock;
 
     private final long inflightTtlMs;
     private final long logMinIntervalMs;
@@ -74,12 +80,14 @@ public class StockReconcileService {
                                 UserCouponRepository userCouponRepository,
                                 RedisStockGateway stockGateway,
                                 StockDriftLogGateway driftLog,
+                                RedisScanLock scanLock,
                                 @Value("${coupon.reconcile.inflight-ttl-ms:180000}") long inflightTtlMs,
                                 @Value("${coupon.reconcile.log-min-interval-ms:3600000}") long logMinIntervalMs) {
         this.templateRepository = templateRepository;
         this.userCouponRepository = userCouponRepository;
         this.stockGateway = stockGateway;
         this.driftLog = driftLog;
+        this.scanLock = scanLock;
         this.inflightTtlMs = inflightTtlMs;
         this.logMinIntervalMs = logMinIntervalMs;
     }
@@ -105,6 +113,13 @@ public class StockReconcileService {
      */
     @Scheduled(fixedDelay = 60_000, initialDelay = 60_000)
     public int identityCheckAll() {
+        // 多实例互斥：没抢到轮次的实例让路（正确性由幂等 CAS+Lua 门保证，锁消重复扫描负载）
+        String owner = "stock-patrol-" + UUID.randomUUID();
+        if (!scanLock.tryLock(PATROL_LOCK_KEY, owner, Duration.ofMinutes(10))) {
+            log.debug("stock patrol skipped: another instance holds the lock");
+            return 0;
+        }
+        try {
         List<CouponTemplate> published = templateRepository.findPublished();
         int confirmed = 0;
         for (CouponTemplate t : published) {
@@ -121,6 +136,9 @@ public class StockReconcileService {
                     published.size());
         }
         return confirmed;
+        } finally {
+            scanLock.unlock(PATROL_LOCK_KEY, owner);
+        }
     }
 
     /**
@@ -232,6 +250,12 @@ public class StockReconcileService {
      */
     @Scheduled(cron = "${coupon.reconcile.audit-cron:0 47 3 * * ?}", zone = "Asia/Shanghai")
     public void dailyAudit() {
+        String owner = "stock-audit-" + UUID.randomUUID();
+        if (!scanLock.tryLock(AUDIT_LOCK_KEY, owner, Duration.ofMinutes(30))) {
+            log.info("stock audit skipped: another instance holds the lock");
+            return;
+        }
+        try {
         for (CouponTemplate t : templateRepository.findPublished()) {
             try {
                 long count = userCouponRepository.countByTemplate(t.getId());
@@ -248,6 +272,9 @@ public class StockReconcileService {
             }
         }
         log.info("daily audit done");
+        } finally {
+            scanLock.unlock(AUDIT_LOCK_KEY, owner);
+        }
     }
 
     /** 落漂移日志（限频：同模板 logMinIntervalMs 内只记一条，防每分钟巡检刷爆表） */

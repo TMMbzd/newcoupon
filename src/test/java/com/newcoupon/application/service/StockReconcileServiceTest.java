@@ -16,6 +16,7 @@ import com.newcoupon.domain.coupon.ValidType;
 import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.infrastructure.persistence.StockDriftLogGateway;
+import com.newcoupon.infrastructure.redis.RedisScanLock;
 import com.newcoupon.infrastructure.redis.RedisStockGateway;
 import com.newcoupon.infrastructure.redis.RedisStockGateway.IdentityReading;
 import java.util.Optional;
@@ -43,13 +44,15 @@ class StockReconcileServiceTest {
     private RedisStockGateway stockGateway;
     @Mock
     private StockDriftLogGateway driftLog;
+    @Mock
+    private RedisScanLock scanLock;
 
     private StockReconcileService service;
 
     @BeforeEach
     void setUp() {
         service = new StockReconcileService(templateRepository, userCouponRepository,
-                stockGateway, driftLog, 1000L, 0L);   // 日志限频 0：每条都落表，便于断言
+                stockGateway, driftLog, scanLock, 1000L, 0L);   // 日志限频 0：每条都落表，便于断言
     }
 
     /** 模板：total=100，issued 由参数定 */

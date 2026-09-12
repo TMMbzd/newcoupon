@@ -7,6 +7,7 @@ import com.newcoupon.domain.repository.CouponEventRepository;
 import com.newcoupon.domain.repository.CouponUsageRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.infrastructure.persistence.CouponExpireTaskGateway;
+import com.newcoupon.infrastructure.redis.RedisScanLock;
 import com.newcoupon.infrastructure.persistence.po.CouponExpireTaskPO;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -31,32 +32,48 @@ import org.springframework.stereotype.Service;
 public class CouponExpireService {
 
     private static final Logger log = LoggerFactory.getLogger(CouponExpireService.class);
+    private static final String SCAN_LOCK_KEY = "c:exp:scanlock:0";   // 0=当前单分片，M2 分片广播时按 shard 扩键
+    private static final String AUDIT_LOCK_KEY = "c:exp:auditlock";
 
     private final UserCouponRepository userCouponRepository;
     private final CouponUsageRepository couponUsageRepository;
     private final CouponEventRepository couponEventRepository;
     private final CouponExpireTaskGateway taskGateway;
+    private final RedisScanLock scanLock;
 
     public CouponExpireService(UserCouponRepository userCouponRepository,
                                CouponUsageRepository couponUsageRepository,
                                CouponEventRepository couponEventRepository,
-                               CouponExpireTaskGateway taskGateway) {
+                               CouponExpireTaskGateway taskGateway,
+                               RedisScanLock scanLock) {
         this.userCouponRepository = userCouponRepository;
         this.couponUsageRepository = couponUsageRepository;
         this.couponEventRepository = couponEventRepository;
         this.taskGateway = taskGateway;
+        this.scanLock = scanLock;
     }
 
-    /** 兜底扫描：每分钟捞到期待办小批量处理。异常只记日志下一轮重试（调度不中断） */
+    /** 兜底扫描：每分钟捞到期待办小批量处理。异常只记日志下一轮重试（调度不中断）。
+     *  多实例互斥：Redis 锁抢轮次——没抢到的实例本轮直接让路（正确性本由幂等 CAS 保证，
+     *  锁消的是重复扫描的 DB 负载；TTL 90s > 最坏轮时长，持锁崩溃后锁自动过期自愈）。 */
     @Scheduled(fixedDelay = 60_000, initialDelay = 120_000)
-    public void scan() {
+    public int scan() {
+        String owner = "expire-scan-" + java.util.UUID.randomUUID();
+        if (!scanLock.tryLock(SCAN_LOCK_KEY, owner, java.time.Duration.ofSeconds(90))) {
+            log.debug("expire scan skipped: another instance holds the lock");
+            return 0;
+        }
         try {
             int processed = scanOnce();
             if (processed > 0) {
                 log.info("expire scan: {} tasks processed", processed);
             }
+            return processed;
         } catch (Exception e) {
             log.error("expire scan round failed (next round retries)", e);
+            return -1;
+        } finally {
+            scanLock.unlock(SCAN_LOCK_KEY, owner);
         }
     }
 
@@ -117,6 +134,11 @@ public class CouponExpireService {
      */
     @Scheduled(cron = "${coupon.expire.audit-cron:0 23 4 * * ?}", zone = "Asia/Shanghai")
     public void dailyAudit() {
+        String owner = "expire-audit-" + java.util.UUID.randomUUID();
+        if (!scanLock.tryLock(AUDIT_LOCK_KEY, owner, java.time.Duration.ofMinutes(30))) {
+            log.info("expire audit skipped: another instance holds the lock");
+            return;
+        }
         try {
             List<Long> leaked = userCouponRepository.selectExpiredUsableIds(1000);
             for (Long couponId : leaked) {
@@ -131,6 +153,8 @@ public class CouponExpireService {
             log.info("expire daily audit done");
         } catch (Exception e) {
             log.error("expire daily audit failed", e);
+        } finally {
+            scanLock.unlock(AUDIT_LOCK_KEY, owner);
         }
     }
 }
