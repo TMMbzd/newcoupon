@@ -22,7 +22,7 @@
 | 库存对账/重建 | ✅ | **恒等式验账（ADR-0008）**：`issued − dbi − pend ≡ 0` 一条 Lua 原子快照，60s 巡检两轮确认 + 守卫修复（pending清空/COUNT互证/幂等重置）+ 漂移落表 T+1 审计；-7 条件 SET 懒重建 | L4,L16 |
 | 用券三段（锁/核销/释放） | ✅ | 占用单 usage_no 幂等锚点；已核销不可释放（资损红线）；释放幂等 | — |
 | 券包查询 | ✅ | 按用户+状态 | — |
-| **券过期处理** | ❌ | **设计有（docs/06 整章）、实现无：无任务表、无定时任务、无惰性判断。券过期后永远显示"待使用"** | **L2** |
+| 券过期处理 | ✅ | **L2 已实施（2026-09-12）**：核销/锁定 SQL 谓词防线（零窗口）+ V5 过期任务表小批量扫描（分钟级状态收敛，退避无失败态+死信）+ 券包惰性判断（不写库）+ EXPIRE_ON_LOCK 收场（占用单第三终态"过期关闭"）+ T+1 漏注册审计；实时触发层留 M5 | — |
 | **锁定超时兜底** | ❌ | **锁券后订单取消消息丢失 → 券永久 LOCKED。设计有"扫占用中超时单强制释放"，实现无** | **L5** |
 | 模板缓存 | ❌ | 每次领券 1 次 DB 主键查询（无本地缓存） | L6 |
 | 监控/告警/metrics | ❌ | 仅日志（traceId+错误分级），无 metrics、无告警通道 | L7 |
@@ -47,6 +47,12 @@
 **没动+为什么不用动**：`TradeTxService`/`TradeAppService`（用券三段）——不涉及库存闸门，usage_no 幂等锚点与 Redis 无关；建券/发布 Controller。
 **被取代/废弃**：`uk_user_template` 唯一索引→`uk_user_seq`；ADR-0004"限领1张"条款→ADR-0006 通用限领；**"回滚即补偿"特性消失**（Redis 不参与 DB 事务，改为补偿脚本）。
 **语义变化（登记）**：并发同 requestId 从"排队后全成功"变为"-8+1001 提示重试"。
+
+### L2 券过期全链路（2026-09-12 实施）
+技术方案：docs/L2-券过期全链路-复现与技术方案-2026-09-12.md（docs/06 v3 的 M1 裁剪：三层取二，谓词+任务表扫描，实时触发留 M5）。
+**新增了**：V5 coupon_expire_task（窄表待办队列，失败=退避不设失败态，8 次死信）、CouponExpireService（扫描器+T+1 审计）、CouponExpireTaskGateway/Mapper/PO、CouponEvent.expired、UsageStatus.EXPIRED(3,"过期关闭")第三终结态、ErrorCode 4005、调度池 2→3。
+**改造了**：UserCouponMapper.casConfirm 补 `valid_end > NOW()` 谓词（资损防线，复现③根因）；TradeAppService.confirm 分类（锁定期间过期→TradeTxService.expireOnLock 收场→4005）；myCoupons 惰性判断（不写库）；CouponIssueTxService.issue 同事务注册任务。
+**测试**：ExpiryBugReproductionTest 断言翻转+扩充为 ExpiryIntegrationTest 8 场景（含幂等重跑/控制组）。107 全绿。讲解：study/07a（重写版，围绕真实代码）。
 
 ### P0 四 Bug 热修（2026-09-12，独立提交，ADR-0009 §6）
 三场外部评审（讨论01七核查/答辩33问）从现行代码挖出的四个正确性 Bug，与范式无关、当天热修：

@@ -11,6 +11,7 @@ import com.newcoupon.application.dto.TradeDtos.ReleaseResult;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.domain.coupon.CouponStatus;
+import com.newcoupon.domain.coupon.CouponUsage;
 import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.repository.CouponUsageRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
@@ -93,6 +94,21 @@ public class TradeAppService {
         try {
             return tradeTxService.confirm(req, LocalDateTime.now());
         } catch (TradeCasRejectedException e) {
+            // L2（2026-09-12）：券状态 CAS 拒绝且原因是"锁定期间过期"——
+            // 先做收场（占用单过期关闭+券转已过期+事件），再按明确错误码拒绝。
+            // 核销的守卫在 SQL 谓词里（valid_end > NOW()），这里的分类只是给准确的错误信息。
+            if ("coupon-confirm".equals(e.getAction())) {
+                CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo()).orElse(null);
+                if (usage != null) {
+                    UserCoupon fresh = userCouponRepository.findById(usage.getUserCouponId()).orElse(null);
+                    if (fresh != null && fresh.getStatus() == CouponStatus.LOCKED
+                            && fresh.getValidEnd() != null && !fresh.getValidEnd().isAfter(LocalDateTime.now())) {
+                        tradeTxService.expireOnLock(req.usageNo(), fresh.getId(), LocalDateTime.now());
+                        throw new BizException(ErrorCode.COUPON_EXPIRED,
+                                "锁定期间券已过期（订单号=" + usage.getOrderNo() + "），核销拒绝，占用单已过期关闭");
+                    }
+                }
+            }
             throw freshStateConflict("核销", e);
         }
     }
@@ -108,11 +124,25 @@ public class TradeAppService {
 
     /** 券包列表（status 可选过滤） */
     public MyCouponList myCoupons(long userId, CouponStatus status) {
+        LocalDateTime now = LocalDateTime.now();
         return new MyCouponList(userCouponRepository.findByUser(userId, status).stream()
                 .map(c -> new MyCoupon(c.getId(), c.getTemplateCode(), c.getFaceValue(),
                         c.getThreshold(), c.getDiscountCap(), c.getValidEnd(),
-                        c.getStatus().getDesc()))
+                        effectiveStatusDesc(c, now)))
                 .toList());
+    }
+
+    /**
+     * L2 惰性判断（2026-09-12）：状态列还是"待使用"但时间已过期的券，展示为"已过期"。
+     * 只改显示不写库——查询是最高频操作，带写副作用会把读写的责任搅在一起；
+     * 物理状态由过期任务扫描收敛（CouponExpireService），账本只由那一个入口改。
+     */
+    private String effectiveStatusDesc(UserCoupon c, LocalDateTime now) {
+        if (c.getStatus() == CouponStatus.USABLE && c.getValidEnd() != null
+                && !c.getValidEnd().isAfter(now)) {
+            return CouponStatus.EXPIRED.getDesc();
+        }
+        return c.getStatus().getDesc();
     }
 
     // ---------- 内部 ----------

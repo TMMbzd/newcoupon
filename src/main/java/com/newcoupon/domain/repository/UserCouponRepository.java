@@ -39,4 +39,15 @@ public interface UserCouponRepository {
      * 不能退回"待使用"（否则出现"能用的过期券"）。返回是否成功
      */
     boolean casRelease(long userCouponId);
+
+    // ---------- L2 过期流转（2026-09-12） ----------
+
+    /** 到期未使用（CAS）：待使用→已过期（终态）。重复触发影响 0 行 */
+    boolean casExpireUsable(long userCouponId);
+
+    /** 锁定中过期（CAS）：已锁定→已过期（终态），守卫"确已到期" */
+    boolean casExpireOnLock(long userCouponId);
+
+    /** T+1 审计：仍待使用但过期超 10 分钟的券 id（漏注册任务兜底，走 idx_expire） */
+    java.util.List<Long> selectExpiredUsableIds(int limit);
 }

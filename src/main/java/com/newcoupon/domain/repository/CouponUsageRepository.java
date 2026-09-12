@@ -22,4 +22,10 @@ public interface CouponUsageRepository {
 
     /** 占用单释放（CAS）：占用中→已释放。返回是否成功 */
     boolean casRelease(String usageNo, LocalDateTime releaseTime);
+
+    /** L2 过期关闭（CAS）：占用中→过期关闭（第三种终结：非核销非释放）。按占用单号 */
+    boolean casExpireByUsageNo(String usageNo);
+
+    /** L2 过期关闭（CAS）：按券id——扫描器路径（券锁定中过期，占用单同步收尾） */
+    boolean casExpireByCouponId(long userCouponId);
 }

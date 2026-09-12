@@ -90,6 +90,32 @@ public class TradeTxService {
         return new ConfirmResult(req.usageNo(), CouponStatus.USED.getDesc(), req.discountAmt(), false);
     }
 
+    /**
+     * 锁定中过期的收场（L2，2026-09-12）：核销因"锁定期间券到期"被拒后，由编排层调用。
+     * 三件事一个事务：占用单 占用中→过期关闭（第三种终结，非核销非释放）、
+     * 券 已锁定→已过期（终态）、落 EXPIRED 事件（含订单号，供对账归因）。
+     * 补贴不承担——过期券不付钱。
+     */
+    @Transactional
+    public void expireOnLock(String usageNo, long couponId, LocalDateTime now) {
+        CouponUsage usage = couponUsageRepository.findByUsageNo(usageNo)
+                .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, usageNo));
+        if (usage.getStatus() != UsageStatus.OCCUPYING) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
+                    "占用单状态=" + usage.getStatus().getDesc() + "，仅占用中可过期关闭");
+        }
+        UserCoupon coupon = userCouponRepository.findById(couponId)
+                .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND, "id=" + couponId));
+        CouponStateMachine.transit(coupon.getStatus(), CouponTransition.EXPIRE_ON_LOCK);  // 快检：LOCKED→EXPIRED
+        if (!couponUsageRepository.casExpireByUsageNo(usageNo)) {
+            throw new TradeCasRejectedException("usage-expire", usageNo);
+        }
+        if (!userCouponRepository.casExpireOnLock(couponId)) {
+            throw new TradeCasRejectedException("coupon-expire-on-lock", couponId);
+        }
+        couponEventRepository.append(CouponEvent.expired(coupon, usage, now));
+    }
+
     @Transactional
     public ReleaseResult release(ReleaseRequest req, LocalDateTime now) {
         CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo())

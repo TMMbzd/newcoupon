@@ -41,4 +41,16 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
     public boolean casRelease(String usageNo, LocalDateTime releaseTime) {
         return mapper.casRelease(usageNo, releaseTime) == 1;
     }
+
+    // ---------- L2 过期关闭（2026-09-12） ----------
+
+    @Override
+    public boolean casExpireByUsageNo(String usageNo) {
+        return mapper.casExpireByUsageNo(usageNo) == 1;
+    }
+
+    @Override
+    public boolean casExpireByCouponId(long userCouponId) {
+        return mapper.casExpireByCouponId(userCouponId) == 1;
+    }
 }

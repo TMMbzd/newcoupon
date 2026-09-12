@@ -65,4 +65,21 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     public boolean casRelease(long userCouponId) {
         return mapper.casRelease(userCouponId) == 1;
     }
+
+    // ---------- L2 过期流转（2026-09-12） ----------
+
+    @Override
+    public boolean casExpireUsable(long userCouponId) {
+        return mapper.casExpireUsable(userCouponId) == 1;
+    }
+
+    @Override
+    public boolean casExpireOnLock(long userCouponId) {
+        return mapper.casExpireOnLock(userCouponId) == 1;
+    }
+
+    @Override
+    public java.util.List<Long> selectExpiredUsableIds(int limit) {
+        return mapper.selectExpiredUsableIds(limit);
+    }
 }

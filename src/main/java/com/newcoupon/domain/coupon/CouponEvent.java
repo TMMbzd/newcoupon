@@ -53,6 +53,18 @@ public final class CouponEvent {
     }
 
     /**
+     * 过期事件（L2，2026-09-12）。event_no = "EXP:"+券id——券只会过期一次（EXPIRED 是终态），
+     * 天然防重放。usage 可空：自然到期（任务表扫描）没有占用单；锁定期间过期（核销被拒的
+     * 收场路径）带占用单，order_no 记订单号供对账归因。
+     */
+    public static CouponEvent expired(UserCoupon coupon, CouponUsage usage, LocalDateTime now) {
+        return new CouponEvent(null,
+                "EXP:" + coupon.getId(),
+                EventType.EXPIRED, coupon.getTemplateId(), coupon.getId(), coupon.getUserId(),
+                usage == null ? null : usage.getOrderNo(), null, now);
+    }
+
+    /**
      * 锁定事件。event_no 用 "LCK:"+usageNo——usage_no 本身全表唯一（订单号+券id），
      * 天然防重放；templateId 取自券（对账按模板维度聚合时依赖它，不能填占位值）。
      */

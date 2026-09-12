@@ -37,9 +37,23 @@ public interface UserCouponMapper extends BaseMapper<UserCouponPO> {
     @Update("UPDATE user_coupon SET status = 1 WHERE id = #{id} AND status = 0 AND valid_end > NOW()")
     int casLock(@Param("id") long id);
 
-    /** 核销：已锁定→已核销（终态） */
-    @Update("UPDATE user_coupon SET status = 2 WHERE id = #{id} AND status = 1")
+    /** 核销：已锁定→已核销（终态）。L2 补有效期谓词——锁定期间过期的券核销被拒（资损防线，0行→编排层分类收场） */
+    @Update("UPDATE user_coupon SET status = 2 WHERE id = #{id} AND status = 1 AND valid_end > NOW()")
     int casConfirm(@Param("id") long id);
+
+    // ---------- L2 过期流转（2026-09-12） ----------
+
+    /** 到期未使用（CAS）：待使用→已过期，守卫"确已到期"——重复触发影响 0 行（幂等） */
+    @Update("UPDATE user_coupon SET status = 3 WHERE id = #{id} AND status = 0 AND valid_end <= NOW()")
+    int casExpireUsable(@Param("id") long id);
+
+    /** 锁定中过期（CAS）：已锁定→已过期，守卫"确已到期" */
+    @Update("UPDATE user_coupon SET status = 3 WHERE id = #{id} AND status = 1 AND valid_end <= NOW()")
+    int casExpireOnLock(@Param("id") long id);
+
+    /** T+1 审计：仍待使用但过期超 10 分钟的券（漏注册任务的兜底，走 idx_expire） */
+    @Select("SELECT id FROM user_coupon WHERE status = 0 AND valid_end < NOW() - INTERVAL 10 MINUTE LIMIT #{limit}")
+    java.util.List<Long> selectExpiredUsableIds(@Param("limit") int limit);
 
     /** 释放：已锁定→未过期?待使用:已过期（过期券不能退回可用态） */
     @Update("UPDATE user_coupon SET status = IF(valid_end > NOW(), 0, 3) WHERE id = #{id} AND status = 1")

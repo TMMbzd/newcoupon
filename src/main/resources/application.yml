@@ -15,11 +15,11 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 30s
 
-  # R7（ADR-0008）：@Scheduled 默认单线程调度池——恒等式巡检(60s)与 T+1 审计互相会排队饿死，扩到 2
+  # R7（ADR-0008）：@Scheduled 默认单线程调度池——恒等式巡检/T+1审计/过期扫描三个任务互相会排队饿死，扩到 3
   task:
     scheduling:
       pool:
-        size: 2
+        size: 3
 
 server:
   port: 8080

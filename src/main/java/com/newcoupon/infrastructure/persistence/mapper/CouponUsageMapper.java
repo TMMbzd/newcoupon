@@ -28,4 +28,14 @@ public interface CouponUsageMapper extends BaseMapper<CouponUsagePO> {
             + "WHERE usage_no = #{usageNo} AND status = 0")
     int casRelease(@Param("usageNo") String usageNo,
                    @Param("releaseTime") LocalDateTime releaseTime);
+
+    // ---------- L2 过期关闭（2026-09-12）：占用单的第三种终结方式 ----------
+
+    /** 按占用单号过期关闭（CAS）：占用中→过期关闭（核销被拒的收场路径） */
+    @Update("UPDATE coupon_usage SET status = 3 WHERE usage_no = #{usageNo} AND status = 0")
+    int casExpireByUsageNo(@Param("usageNo") String usageNo);
+
+    /** 按券id过期关闭（CAS）：扫描器路径——券锁定中过期，占用单同步收尾 */
+    @Update("UPDATE coupon_usage SET status = 3 WHERE user_coupon_id = #{couponId} AND status = 0")
+    int casExpireByCouponId(@Param("couponId") long couponId);
 }

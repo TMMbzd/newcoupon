@@ -7,6 +7,7 @@ import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.repository.CouponEventRepository;
 import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
+import com.newcoupon.infrastructure.persistence.CouponExpireTaskGateway;
 import java.time.LocalDateTime;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,13 +33,16 @@ public class CouponIssueTxService {
     private final TemplateRepository templateRepository;
     private final UserCouponRepository userCouponRepository;
     private final CouponEventRepository couponEventRepository;
+    private final CouponExpireTaskGateway expireTaskGateway;
 
     public CouponIssueTxService(TemplateRepository templateRepository,
                                 UserCouponRepository userCouponRepository,
-                                CouponEventRepository couponEventRepository) {
+                                CouponEventRepository couponEventRepository,
+                                CouponExpireTaskGateway expireTaskGateway) {
         this.templateRepository = templateRepository;
         this.userCouponRepository = userCouponRepository;
         this.couponEventRepository = couponEventRepository;
+        this.expireTaskGateway = expireTaskGateway;
     }
 
     /**
@@ -58,6 +62,9 @@ public class CouponIssueTxService {
                 UserCoupon.issue(template, req.userId(), req.requestId(), (int) seq, now));
         // ③ 事实源
         couponEventRepository.append(CouponEvent.issued(saved, now));
+        // ④ L2：注册过期任务（同一事务——券和"它的死亡时间表"要么都在要么都没有；
+        //    任何未来产生券的新路径必须复用本方法，禁止旁路直插）
+        expireTaskGateway.register(saved.getId(), req.userId(), saved.getValidEnd());
         return saved;
     }
 }

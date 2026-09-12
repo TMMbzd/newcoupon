@@ -40,6 +40,8 @@ class CouponIssueTxServiceTest {
     private UserCouponRepository userCouponRepository;
     @Mock
     private CouponEventRepository couponEventRepository;
+    @Mock
+    private com.newcoupon.infrastructure.persistence.CouponExpireTaskGateway expireTaskGateway;
 
     @InjectMocks
     private CouponIssueTxService service;
