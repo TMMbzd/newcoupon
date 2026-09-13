@@ -81,6 +81,22 @@ class ShardingRoutingIntegrationTest extends ShardedIntegrationTestSupport {
 
         assertThat(foundTable).as("券必须落在路由公式算出的分表").isEqualTo("user_coupon_" + expectedShard);
 
+        // 教学证据：把这张券的完整行打出来（列名+值），让人看见"数据库里存了什么"
+        try (java.sql.Connection raw = java.sql.DriverManager.getConnection(
+                MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword());
+             java.sql.Statement st = raw.createStatement();
+             java.sql.ResultSet rs = st.executeQuery(
+                     "SELECT * FROM " + foundTable + " WHERE id = " + couponId)) {
+            if (rs.next()) {
+                java.sql.ResultSetMetaData md = rs.getMetaData();
+                StringBuilder row = new StringBuilder();
+                for (int c = 1; c <= md.getColumnCount(); c++) {
+                    row.append(md.getColumnName(c)).append("=").append(rs.getString(c)).append(" | ");
+                }
+                System.out.println("[分片验收] 完整行（" + foundTable + "）: " + row);
+            }
+        }
+
         // ② 物理分表数量（同样走裸连接直查 information_schema）
         Integer uc = 0;
         Integer cu = 0;
