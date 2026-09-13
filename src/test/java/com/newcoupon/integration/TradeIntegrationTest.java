@@ -31,11 +31,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.testcontainers.containers.MySQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * 用券三段集成验收——交付阶段 0 验收③（docs/00 第 4 节：同一取消消息重放只回退一次）。
@@ -48,19 +43,16 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * ⑥ 并发锁券：两个订单同时锁同一张券 → 恰一个成功
  * ⑦ 读回字段断言：usage_no 格式、discount_amt、时间字段
  */
-@Testcontainers
-@SpringBootTest(properties = "spring.datasource.hikari.maximum-pool-size=50")
-class TradeIntegrationTest {
+class TradeIntegrationTest extends ShardedIntegrationTestSupport {
 
-    @Container
-    @ServiceConnection
-    static final org.testcontainers.containers.GenericContainer<?> REDIS =
-            new org.testcontainers.containers.GenericContainer<>(
-                    org.testcontainers.utility.DockerImageName.parse("redis:7-alpine")).withExposedPorts(6379);
+    @org.springframework.test.context.DynamicPropertySource
+    static void shardingProperties(org.springframework.test.context.DynamicPropertyRegistry registry) {
+        registry.add("coupon.sharding.url", () -> MYSQL.getJdbcUrl()
+                + "?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai");
+        registry.add("coupon.sharding.username", MYSQL::getUsername);
+        registry.add("coupon.sharding.password", MYSQL::getPassword);
+    }
 
-    @Container
-    @ServiceConnection
-    static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0");
 
     @Autowired
     private TemplateAppService templateAppService;

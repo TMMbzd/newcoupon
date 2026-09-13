@@ -5,12 +5,11 @@ spring:
   profiles:
     active: dev          # 本地开发默认 dev；生产用启动参数 --spring.profiles.active=prod 覆盖
 
-  # SQL 版本化：应用启动时自动执行未跑过的迁移脚本（docs/adr/ADR-0002）
+  # SQL 版本化（ADR-0002）由 ShardingDataSourceConfig **手工触发**（不用 Boot 自动装配）：
+  # 分片数据源构造前必须先跑完 V1-V6（192 张物理分表），Boot 的 Flyway 自动装配
+  # 与自定义 DataSource 存在循环依赖——实测踩坑，改为代码内显式时序
   flyway:
-    enabled: true
-    locations: classpath:db/migration
-    # baseline-on-migrate 已移除：它会让非空 schema 静默跳过迁移（生产事故源）；
-    # 存量库迁移走显式 baseline 版本管理（M4 迁移演练时建立规程）
+    enabled: false
 
   lifecycle:
     timeout-per-shutdown-phase: 30s
@@ -26,6 +25,17 @@ server:
   # 优雅停机：收到 SIGTERM 后先停止接新请求，等在途请求完成（最多30s）再退出。
   # 没有它，每次发版都会切断在途领券/核销请求，制造出一批"扣了库存没落库"的不一致。
   shutdown: graceful
+
+# ShardingSphere 真实库连接（dev 默认本机 compose；测试容器由 DynamicPropertySource 注入；
+# 生产用环境变量覆盖）。业务数据源=ShardingSphere 驱动（分片路由见 ShardingDataSourceConfig）
+coupon:
+  sharding:
+    url: jdbc:mysql://127.0.0.1:3306/newcoupon?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:root123456}
+    sql-show: false
+  id:
+    worker-id: ${WORKER_ID:1}
 
 mybatis-plus:
   configuration:

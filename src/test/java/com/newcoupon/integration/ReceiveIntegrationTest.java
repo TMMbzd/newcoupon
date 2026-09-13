@@ -25,12 +25,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.context.TestPropertySource;
-import org.testcontainers.containers.MySQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * 领券用例集成验收——阶段 0 验收标准 ①② 的自动执行（docs/00 第 4 节）。
@@ -50,19 +45,16 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * ⑤ 库存=1 顺序领：第二人 STOCK_OUT
  * ⑥ 超领回滚即补偿：超领失败后 issued_count 不变（事务回滚撤销了扣减）
  */
-@Testcontainers
-@SpringBootTest(properties = "spring.datasource.hikari.maximum-pool-size=50")
-class ReceiveIntegrationTest {
+class ReceiveIntegrationTest extends ShardedIntegrationTestSupport {
 
-    @Container
-    @ServiceConnection
-    static final org.testcontainers.containers.GenericContainer<?> REDIS =
-            new org.testcontainers.containers.GenericContainer<>(
-                    org.testcontainers.utility.DockerImageName.parse("redis:7-alpine")).withExposedPorts(6379);
+    @org.springframework.test.context.DynamicPropertySource
+    static void shardingProperties(org.springframework.test.context.DynamicPropertyRegistry registry) {
+        registry.add("coupon.sharding.url", () -> MYSQL.getJdbcUrl()
+                + "?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai");
+        registry.add("coupon.sharding.username", MYSQL::getUsername);
+        registry.add("coupon.sharding.password", MYSQL::getPassword);
+    }
 
-    @Container
-    @ServiceConnection   // 容器连接信息自动注入数据源，覆盖 application-dev.yml 的 localhost
-    static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0");
 
     @Autowired
     private TemplateAppService templateAppService;

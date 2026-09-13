@@ -55,7 +55,9 @@ public class RedisStockGateway {
             if dl > 0 then redis.call('INCR', KEYS[4]); redis.call('EXPIRE', KEYS[4], tonumber(ARGV[4])) end
             redis.call('DECR', KEYS[1])
             redis.call('INCR', KEYS[6])                                             -- 复式记账：借方
-            redis.call('ZADD', KEYS[7], tonumber(ARGV[7]), ARGV[6])                 -- 在途令牌（score=进入时刻）
+            local t = redis.call('TIME')                                            -- 服务端时钟：多实例时钟漂移归零（ADR-0009）
+            local nowms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+            redis.call('ZADD', KEYS[7], nowms, ARGV[6])                             -- 在途令牌（score=Redis服务端时刻）
             redis.call('SET', KEYS[5], '1', 'EX', tonumber(ARGV[5]))
             return {0, ul0 + 1}
             """;
@@ -109,8 +111,10 @@ public class RedisStockGateway {
      * 原子返回三本账。调用方计算 issued − dbi − pending，期望恒 0。
      */
     public static final String IDENTITY_SCRIPT = """
-            -- KEYS: 1 issued  2 dbi  3 pend(zset)   ARGV: 1 nowMs  2 inflightTtlMs
-            redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', tonumber(ARGV[1]) - tonumber(ARGV[2]))
+            -- KEYS: 1 issued  2 dbi  3 pend(zset)   ARGV: 1 inflightTtlMs（阈值；时刻取 Redis 服务端 TIME）
+            local t = redis.call('TIME')
+            local nowms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+            redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', nowms - tonumber(ARGV[1]))
             return {tonumber(redis.call('GET', KEYS[1]) or '0'),
                     tonumber(redis.call('GET', KEYS[2]) or '0'),
                     redis.call('ZCARD', KEYS[3])}
@@ -214,7 +218,7 @@ public class RedisStockGateway {
     public IdentityReading identity(long templateId, long inflightTtlMs) {
         List<?> r = redis.execute(identityScript,
                 List.of(issuedKey(templateId), dbiKey(templateId), pendKey(templateId)),
-                String.valueOf(System.currentTimeMillis()), String.valueOf(inflightTtlMs));
+                String.valueOf(inflightTtlMs));
         return new IdentityReading(((Number) r.get(0)).longValue(),
                 ((Number) r.get(1)).longValue(), ((Number) r.get(2)).longValue());
     }

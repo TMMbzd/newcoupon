@@ -3,6 +3,7 @@ package com.newcoupon.infrastructure.persistence;
 import com.newcoupon.domain.coupon.CouponUsage;
 import com.newcoupon.domain.repository.CouponUsageRepository;
 import com.newcoupon.infrastructure.persistence.converter.CouponUsagePOConverter;
+import com.newcoupon.infrastructure.id.SnowflakeIdGenerator;
 import com.newcoupon.infrastructure.persistence.mapper.CouponUsageMapper;
 import com.newcoupon.infrastructure.persistence.po.CouponUsagePO;
 import java.time.LocalDateTime;
@@ -14,9 +15,11 @@ import org.springframework.stereotype.Repository;
 public class CouponUsageRepositoryImpl implements CouponUsageRepository {
 
     private final CouponUsageMapper mapper;
+    private final SnowflakeIdGenerator idGenerator;
 
-    public CouponUsageRepositoryImpl(CouponUsageMapper mapper) {
+    public CouponUsageRepositoryImpl(CouponUsageMapper mapper, SnowflakeIdGenerator idGenerator) {
         this.mapper = mapper;
+        this.idGenerator = idGenerator;
     }
 
     @Override
@@ -28,6 +31,7 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
     @Override
     public CouponUsage save(CouponUsage usage) {
         CouponUsagePO po = CouponUsagePOConverter.toPO(usage);
+        po.setId(idGenerator.next());   // 雪花ID（批次二）
         mapper.insert(po);   // 撞 uk_usage_no → DuplicateKeyException（同一订单重复锁同一券）
         return usage.withId(po.getId());
     }

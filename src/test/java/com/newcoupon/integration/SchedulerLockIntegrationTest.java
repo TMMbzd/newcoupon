@@ -10,14 +10,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.MySQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 /**
  * 多实例调度互斥回归（2026-09-12）：Redis SET NX PX 抢锁 + 比对释放。
@@ -26,18 +19,18 @@ import org.testcontainers.utility.DockerImageName;
  * 正确性本由幂等 CAS 保证（重复执行不改错数据），锁消的是重复扫描的负载——
  * 这条测试钉住的是"让路行为"本身。
  */
-@Testcontainers
-@SpringBootTest(properties = "spring.datasource.hikari.maximum-pool-size=50")
-class SchedulerLockIntegrationTest {
+class SchedulerLockIntegrationTest extends ShardedIntegrationTestSupport {
 
-    @Container
-    @ServiceConnection
-    static final GenericContainer<?> REDIS =
-            new GenericContainer<>(DockerImageName.parse("redis:7-alpine")).withExposedPorts(6379);
+    @org.springframework.test.context.DynamicPropertySource
+    static void shardingProperties(org.springframework.test.context.DynamicPropertyRegistry registry) {
+        registry.add("coupon.sharding.url", () -> MYSQL.getJdbcUrl()
+                + "?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai");
+        registry.add("coupon.sharding.username", MYSQL::getUsername);
+        registry.add("coupon.sharding.password", MYSQL::getPassword);
+    }
 
-    @Container
-    @ServiceConnection
-    static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0");
+
+    
 
     @Autowired
     private RedisScanLock scanLock;

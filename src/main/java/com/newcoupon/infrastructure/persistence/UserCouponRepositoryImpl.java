@@ -4,6 +4,7 @@ import com.newcoupon.domain.coupon.CouponStatus;
 import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.infrastructure.persistence.converter.UserCouponPOConverter;
+import com.newcoupon.infrastructure.id.SnowflakeIdGenerator;
 import com.newcoupon.infrastructure.persistence.mapper.UserCouponMapper;
 import com.newcoupon.infrastructure.persistence.po.UserCouponPO;
 import java.util.List;
@@ -15,9 +16,11 @@ import org.springframework.stereotype.Repository;
 public class UserCouponRepositoryImpl implements UserCouponRepository {
 
     private final UserCouponMapper mapper;
+    private final SnowflakeIdGenerator idGenerator;
 
-    public UserCouponRepositoryImpl(UserCouponMapper mapper) {
+    public UserCouponRepositoryImpl(UserCouponMapper mapper, SnowflakeIdGenerator idGenerator) {
         this.mapper = mapper;
+        this.idGenerator = idGenerator;
     }
 
     @Override
@@ -47,6 +50,7 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     @Override
     public UserCoupon save(UserCoupon userCoupon) {
         UserCouponPO po = UserCouponPOConverter.toPO(userCoupon, userCoupon.getReceiveTime());
+        po.setId(idGenerator.next());   // 雪花ID（批次二）：分库后自增跨库重复，趋势递增保B+树
         mapper.insert(po);   // 撞 uk_idem（幂等）/ uk_user_seq（限领N兜底）→ DuplicateKeyException 抛给上层
         return userCoupon.withId(po.getId());
     }

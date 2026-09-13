@@ -27,13 +27,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.MySQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 /**
  * 阶段 1 验收（ADR-0006 + ADR-0008 恒等式记账）——Redis+MySQL 双容器：
@@ -48,22 +41,23 @@ import org.testcontainers.utility.DockerImageName;
  * ⑨ 售罄钉零+标志（A1'+B4）：DB 拒绝分类先行 → 钉零立标志 → 后续流量 Lua 首行短路
  * ⑩ 清库风暴（A2'）：删 stock key 后 50 并发 → 条件 SET 只重建一次，零 DECR 覆盖
  */
-@Testcontainers
-@SpringBootTest(properties = {
+@org.springframework.boot.test.context.SpringBootTest(properties = {
         "spring.datasource.hikari.maximum-pool-size=50",
         "coupon.reconcile.inflight-ttl-ms=300",       // 测试压缩在途 TTL（生产 180s）
         "coupon.reconcile.log-min-interval-ms=0"      // 测试不限频，便于断言漂移表
 })
-class RedisStockIntegrationTest {
+class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
 
-    @Container
-    @ServiceConnection
-    static final GenericContainer<?> REDIS =
-            new GenericContainer<>(DockerImageName.parse("redis:7-alpine")).withExposedPorts(6379);
+    @org.springframework.test.context.DynamicPropertySource
+    static void shardingProperties(org.springframework.test.context.DynamicPropertyRegistry registry) {
+        registry.add("coupon.sharding.url", () -> MYSQL.getJdbcUrl()
+                + "?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai");
+        registry.add("coupon.sharding.username", MYSQL::getUsername);
+        registry.add("coupon.sharding.password", MYSQL::getPassword);
+    }
 
-    @Container
-    @ServiceConnection
-    static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0");
+
+    
 
     @Autowired
     private TemplateAppService templateAppService;

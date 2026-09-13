@@ -13,6 +13,8 @@
 | 能力 | 状态 | 现状一句话 | 债编号 |
 |---|---|---|---|
 | 建券（模板/审批/发布） | ✅ | 双状态机+13条不变量+CAS发布；审批流省略（单人环境，ADR-0005） | L1 |
+| 分布式 ID | ✅ | **雪花（ADR-0010 批次二）**：64位/时钟回拨借未来策略/workerId 配置；四个插入路径全换（券/占用单/事件/任务表），模板表保留自增（小配置表不分片） | — |
+| 分库分表 | ✅ | **路由先行（ADR-0010 批次二）**：V6 迁移三表×64 物理分表（user_id%64，索引随迁）；ShardingSphere 5.5 驱动模式（YAML 代码内模板动态生成；绑定表；!SINGLE 单表规则——5.5 必须，实测踩坑）；Flyway 手工时序（先建表后建分片数据源，Boot 自动装配有循环依赖）；扩物理库=改配置搬数据，SQL 零改动 | — |
 | 领券-库存闸门 | ✅ | Redis Lua 五重校验（幂等/售罄/批次日限/用户总限/用户日限），check-all-then-commit | — |
 | 领券-DB 双防线 | ✅ | Redis 额度 + DB issued_count 条件更新同步配对，DB 保证零超发 | — |
 | 领券-通用限领 N | ✅ | seq 序号 + uk_user_seq 唯一索引（Redis 失忆由 DB 兜底） | L3 |
@@ -48,6 +50,13 @@
 **没动+为什么不用动**：`TradeTxService`/`TradeAppService`（用券三段）——不涉及库存闸门，usage_no 幂等锚点与 Redis 无关；建券/发布 Controller。
 **被取代/废弃**：`uk_user_template` 唯一索引→`uk_user_seq`；ADR-0004"限领1张"条款→ADR-0006 通用限领；**"回滚即补偿"特性消失**（Redis 不参与 DB 事务，改为补偿脚本）。
 **语义变化（登记）**：并发同 requestId 从"排队后全成功"变为"-8+1001 提示重试"。
+
+### 批次二：雪花 ID + 分片路由先行（2026-09-13，ADR-0010）
+**新增了**：SnowflakeIdGenerator（借未来时钟策略——WSL2 实测时钟回拨 4.3s 逼出来的设计：唯一/单调优先于时钟真实性，ERROR 留痕；Leaf 号段 M6 升级路径）、ShardingDataSourceConfig（YAML 模板动态生成：databaseName 从 URL 解析——5.5 用它定位单表元数据；!SINGLE 规则必须显式声明——5.5 行为变更，不写则所有无规则表"不存在"）、V6 迁移（192 张物理分表+数据搬迁+原表删除）、ShardedIntegrationTestSupport 基座（MySQL 容器不走 ServiceConnection——分片驱动不认 spring.datasource；每类自带 DynamicPropertySource——本 Spring 版本不从父类发现，6.2 才支持）。
+**改造了**：四个 PO 主键 AUTO→INPUT+雪花；令牌时间权威改 Redis 服务端 TIME（deduct 打分与清扫阈值同源——WSL2 时钟漂移的第二处根治）；Flyway 改代码内手工触发（自动装配与自定义数据源循环依赖）。
+**依赖新增**：shardingsphere-jdbc 5.5.0（排除 test-util——5.5.0 发布缺陷，Central 404）、jaxb-runtime 2.3.9（javax 版，JDK11+ 无内置 JAXB 且 4.x 是 jakarta 不兼容——两级踩坑）。
+**认账**：测试容器 URL 时区须 Asia/Shanghai（UTC 时 DATETIME 读回 +8h）；外层 DriverManagerDataSource 无池（真实池在 yaml ds0 的 Hikari）。
+115 测试全绿（+5 雪花单测）。
 
 ### 终局技术栈定版（ADR-0010，2026-09-12，用户指令"一开始定好技术"）
 两类决策两刀切：**不可逆类（数据层：ID/分片路由/schema）立即全部定死**——雪花 ID+ShardingSphere 16库×64表逻辑分片（1物理库路由先行）为批次二下一工作项；**部署形态类终局定死+批次表写死**（XXL-JOB✅/RocketMQ M5/Redis Cluster M4/K8s M7/微服务 M8 触发条件§3 写死/监控 M2）。批次一 XXL-JOB 同日落地：compose 起 xxl-job-admin、xxl-job-core 执行器条件装配、四任务双通道+锁仲裁、过期扫描分片感知（scanDueShard）。110 测试全绿。

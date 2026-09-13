@@ -12,7 +12,7 @@ import java.time.LocalDateTime;
 @TableName("coupon_expire_task")
 public class CouponExpireTaskPO {
 
-    @TableId(type = IdType.AUTO)
+    @TableId(type = IdType.INPUT)   // 雪花ID显式赋值（ADR-0010批次二）
     private Long id;
     private Long couponId;
     private Long userId;

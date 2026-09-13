@@ -26,14 +26,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.MySQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 /**
  * L2 券过期全链路回归（2026-09-12 实施后；前身 ExpiryBugReproductionTest 的断言已全部翻转——
@@ -43,18 +36,18 @@ import org.testcontainers.utility.DockerImageName;
  * <p>验收对应技术方案 §1：A1 过期券任何入口不可用；A2 券包不显示过期券为待使用；
  * A3 EXPIRED 事件落表；A4/A5 任务表小批量+幂等（重跑零重复流转）。
  */
-@Testcontainers
-@SpringBootTest(properties = "spring.datasource.hikari.maximum-pool-size=50")
-class ExpiryIntegrationTest {
+class ExpiryIntegrationTest extends ShardedIntegrationTestSupport {
 
-    @Container
-    @ServiceConnection
-    static final GenericContainer<?> REDIS =
-            new GenericContainer<>(DockerImageName.parse("redis:7-alpine")).withExposedPorts(6379);
+    @org.springframework.test.context.DynamicPropertySource
+    static void shardingProperties(org.springframework.test.context.DynamicPropertyRegistry registry) {
+        registry.add("coupon.sharding.url", () -> MYSQL.getJdbcUrl()
+                + "?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai");
+        registry.add("coupon.sharding.username", MYSQL::getUsername);
+        registry.add("coupon.sharding.password", MYSQL::getPassword);
+    }
 
-    @Container
-    @ServiceConnection
-    static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0");
+
+    
 
     @Autowired
     private TemplateAppService templateAppService;

@@ -1,5 +1,6 @@
 package com.newcoupon.infrastructure.persistence;
 
+import com.newcoupon.infrastructure.id.SnowflakeIdGenerator;
 import com.newcoupon.infrastructure.persistence.mapper.CouponExpireTaskMapper;
 import com.newcoupon.infrastructure.persistence.po.CouponExpireTaskPO;
 import java.time.LocalDateTime;
@@ -18,14 +19,17 @@ public class CouponExpireTaskGateway {
     private static final DateTimeFormatter SQL_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final CouponExpireTaskMapper mapper;
+    private final SnowflakeIdGenerator idGenerator;
 
-    public CouponExpireTaskGateway(CouponExpireTaskMapper mapper) {
+    public CouponExpireTaskGateway(CouponExpireTaskMapper mapper, SnowflakeIdGenerator idGenerator) {
         this.mapper = mapper;
+        this.idGenerator = idGenerator;
     }
 
     /** 领券事务内注册过期任务：下次扫描时间=券有效期终点（到点该处理） */
     public void register(long couponId, long userId, LocalDateTime validEnd) {
         CouponExpireTaskPO po = new CouponExpireTaskPO();
+        po.setId(idGenerator.next());   // 雪花ID（批次二）：任务表将分片，自增跨物理表重复
         po.setCouponId(couponId);
         po.setUserId(userId);
         po.setShard((int) (couponId % 16));

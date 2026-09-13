@@ -13,7 +13,7 @@ import java.time.LocalDateTime;
 @TableName("user_coupon")
 public class UserCouponPO {
 
-    @TableId(type = IdType.AUTO)
+    @TableId(type = IdType.INPUT)   // 雪花ID显式赋值（ADR-0010批次二）
     private Long id;
 
     private Long userId;

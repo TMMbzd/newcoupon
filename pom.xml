@@ -104,7 +104,28 @@
       <artifactId>mysql</artifactId>
       <scope>test</scope>
     </dependency>
-          <!-- XXL-JOB 执行器（ADR-0010 调度平台终局选型；条件装配，tests 默认关闭） -->
+          <!-- ShardingSphere JDBC（ADR-0010 批次二：user_id%64 分表路由先行，驱动模式兼容 Boot3） -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-jdbc</artifactId>
+            <version>5.5.0</version>
+            <exclusions>
+                <!-- 5.5.0 发布缺陷：传递依赖了未发布的 test-util（Central 亦 404，5.5.x 全系如此），
+                     运行时用不到，排除后可用（实测验证） -->
+                <exclusion>
+                    <groupId>org.apache.shardingsphere</groupId>
+                    <artifactId>shardingsphere-test-util</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- JAXB 运行时（javax 命名空间版）：JDK11+ 移除内置 JAXB；ShardingSphere 5.4 用的是
+             旧 javax API，glassfish 4.x 是 jakarta 实现不兼容（实测踩坑），必须 2.3.x -->
+        <dependency>
+            <groupId>org.glassfish.jaxb</groupId>
+            <artifactId>jaxb-runtime</artifactId>
+            <version>2.3.9</version>
+        </dependency>
+        <!-- XXL-JOB 执行器（ADR-0010 调度平台终局选型；条件装配，tests 默认关闭） -->
         <dependency>
             <groupId>com.xuxueli</groupId>
             <artifactId>xxl-job-core</artifactId>
