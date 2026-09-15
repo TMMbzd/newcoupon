@@ -25,10 +25,10 @@
 | 用券三段（锁/核销/释放） | ✅ | 占用单 usage_no 幂等锚点；已核销不可释放（资损红线）；释放幂等 | — |
 | 券包查询 | ✅ | 按用户+状态 | — |
 | 券过期处理 | ✅ | **L2 已实施（2026-09-12）**：核销/锁定 SQL 谓词防线（零窗口）+ V5 过期任务表小批量扫描（分钟级状态收敛，退避无失败态+死信）+ 券包惰性判断（不写库）+ EXPIRE_ON_LOCK 收场（占用单第三终态"过期关闭"）+ T+1 漏注册审计；实时触发层留 M5 | — |
-| **锁定超时兜底** | ❌ | **锁券后订单取消消息丢失 → 券永久 LOCKED。设计有"扫占用中超时单强制释放"，实现无** | **L5** |
+| **锁定超时兜底** | ✅ | **L5 已实施（2026-09-15）**：锁券同事务注册超时任务（deadline=占用时间+窗口，默认30min可配置）→ 到窗订单仍沉默则收场：占用单→第四终态"超时关闭(4)"、券→(未过期?待使用:已过期)、LOCK_TIMEOUT(7)事件含订单号；迟到核销 4006 拒绝、迟到释放幂等返回真实状态；双通道扫描+Redis锁；两道守卫（时间不可见+CAS状态裁决）；T+1锁龄审计（idx_occupy） | — |
 | 模板缓存 | ❌ | 每次领券 1 次 DB 主键查询（无本地缓存） | L6 |
 | 监控/告警/metrics | ❌ | 仅日志（traceId+错误分级），无 metrics、无告警通道 | L7 |
-| **调度平台** | ✅ | **XXL-JOB 2.4（ADR-0010 批次一，2026-09-12）**：四个任务双通道（@XxlJob 生产通道+@Scheduled 降级通道，RedisScanLock 仲裁）；过期扫描分片广播就绪（shard%16）；执行器条件装配（xxl.job.enabled，测试默认关） | — |
+| **调度平台** | ✅ | **XXL-JOB 2.4（ADR-0010 批次一，2026-09-12）**：六个任务双通道（@XxlJob 生产通道+@Scheduled 降级通道，RedisScanLock 仲裁）——库存巡检/库存日审/过期扫描/过期日审/超时扫描/超时审计；扫描类分片广播就绪（shard%16）；执行器条件装配（xxl.job.enabled，测试默认关） | — |
 | CI/CD | ❌ | 无流水线、无质量门禁、无制品管理 | L8 |
 | 部署形态 | ❌ | 仅 dev compose（MySQL+Redis+应用本机起）；无生产形态 | L8 |
 | 压测/QPS 验证 | ❌ | 集成测试有并发正确性验证，无吞吐量测量；5000 QPS 目标未验证 | L9 |
@@ -50,6 +50,12 @@
 **没动+为什么不用动**：`TradeTxService`/`TradeAppService`（用券三段）——不涉及库存闸门，usage_no 幂等锚点与 Redis 无关；建券/发布 Controller。
 **被取代/废弃**：`uk_user_template` 唯一索引→`uk_user_seq`；ADR-0004"限领1张"条款→ADR-0006 通用限领；**"回滚即补偿"特性消失**（Redis 不参与 DB 事务，改为补偿脚本）。
 **语义变化（登记）**：并发同 requestId 从"排队后全成功"变为"-8+1001 提示重试"。
+
+### L5 锁定超时兜底（2026-09-15 实施，docs/L5 技术方案）
+静态穷举证明的 Bug（方案 §2）：券 LOCKED 三出口——核销/释放要"有人来调"、锁定中过期要"时间到"——订单沉默+券未过期=三出口同关=永久悬挂。工序 v2 首案（Bug检出→文档先行→批准→实施）。
+**新增了**：V7 coupon_release_task（64 分表；**评审修正：唯一键 uk_usage_no 而非 uk_coupon——一张券一生可签多份合同**，任务主体=合同）、CouponReleaseTaskPO/Mapper/Gateway、CouponReleaseService（扫描器+T+1锁龄审计，审计直查 usage 侧配 V7 idx_occupy 索引——方案 D6 原走券表的简化修正）、UsageStatus.TIMEOUT_CLOSED(4)、EventType.LOCK_TIMEOUT(7)、CouponTransition.LOCK_TIMEOUT、CouponEvent.lockTimeout（event_no=LKT:usageNo）、casTimeoutClose（券 IF 分流同 casRelease）/casTimeoutByUsageNo、ErrorCode 4006、coupon.trade.lock-timeout-minutes（默认30）、调度池 3→4。
+**改造了**：TradeTxService（lock 同事务注册任务；+timeoutClose 事务方法——收场三件事一个事务，对照 F1 教训）、TradeAppService（lock 快检只认占用中=F2；release 终态幂等+真实状态=L15）、CouponExpireService（F1 补刀分支：券已终态但占用单仍0→幂等补关+补事件）、ShardingDataSourceConfig（第四张绑定表）。
+**测试**：LockTimeoutIntegrationTest T1-T10 + T11（T1 打桩跑红后转绿；两道守卫/竞态两向/迟到核销释放/退避死信/F1/F2）。测试基座容器补 TZ=Asia/Shanghai（NOW() 与 JVM 对齐——"到点即扫"断言免疫 8h 错位）。**实施后红队评审**：核心收场事务交错推演无错账；外围 3 项当场修复——死信审计复活断裂（INSERT IGNORE→ON DUPLICATE 复活，回归 T11）、valid_end 边界抢跑误 finish（CAS 输家重读券分流）、退避 off-by-one（SET 左到右求值，第 7 次就死信→改 >=8）。128 测试全绿。运维步骤：XXL 控制台注册 couponReleaseScanJob（分片广播）/couponReleaseAuditJob。
 
 ### 批次二：雪花 ID + 分片路由先行（2026-09-13，ADR-0010）
 **新增了**：SnowflakeIdGenerator（借未来时钟策略——WSL2 实测时钟回拨 4.3s 逼出来的设计：唯一/单调优先于时钟真实性，ERROR 留痕；Leaf 号段 M6 升级路径）、ShardingDataSourceConfig（YAML 模板动态生成：databaseName 从 URL 解析——5.5 用它定位单表元数据；!SINGLE 规则必须显式声明——5.5 行为变更，不写则所有无规则表"不存在"）、V6 迁移（192 张物理分表+数据搬迁+原表删除）、ShardedIntegrationTestSupport 基座（MySQL 容器不走 ServiceConnection——分片驱动不认 spring.datasource；每类自带 DynamicPropertySource——本 Spring 版本不从父类发现，6.2 才支持）。
@@ -90,7 +96,7 @@
 | L2 | ~~券过期未实现~~ **已实施（2026-09-12）**：谓词防线+任务表扫描+EXPIRE_ON_LOCK+惰性判断+T+1审计；实时触发层留 M5 | 已清 | — |
 | L3 | 用户计数（ul）无自愈 | 少领（不资损），撞索引时用户体验差 | M1（撞 uk_user_seq 时重置为 DB 行数） | M1 |
 | L4 | 对账仅库存维度 | 低（计数漂移=少领） | M1 顺带 | M1 |
-| L5 | **锁定超时兜底未实现** | 券永久 LOCKED（用户资产悬挂） | **M1 立即** | 无条件 |
+| L5 | ~~锁定超时兜底未实现~~ **已实施（2026-09-15）**：超时任务表+双通道扫描+第四终态+4006/幂等释放+T+1审计；F1（expire扫描半收场）、F2（lock快检对终态谎报）随本项修复 | 已清 | — |
 | L6 | 模板无缓存 | 性能（每请求1次DB读） | **M3**（压测确认瓶颈后实施，与 ROADMAP M3-② 一致） | M3 压测 |
 | L7 | 无 metrics/告警 | 运维盲飞 | M2 | 无条件 |
 | L8 | 无 CI/CD、无生产部署形态 | 工程化缺口 | M2 | 无条件 |
@@ -100,7 +106,7 @@
 | L12 | 无登录态/鉴权 | 安全（阶段简化，登记于 ADR） | M6 | M6 |
 | L13 | ~~领取窗口竞态~~ **被 L2 吸收（2026-09-12 技术方案 D8 裁决）**：竞态产物"出生即死券"由过期任务表下一轮扫描自动收尾，不为它增列；产品要求领取时刻严格性再立项 | 已清 | — |
 | L14 | Redis key 结构偏离 docs/10 §10.2 裁决（实现=String 分 key；规范=Hash+field） | 规范矛盾 | 已裁决：**实现为准**，docs/10 §10.2 更新为 String 方案（每 key 职责单一/分桶友好，Hash 备选） | 本次审计 |
-| L15 | release 幂等分支硬编码返回"待使用"，未读券真实状态（释放时已过期的券，重放显示错状态） | 展示级错误 | M1（读真实状态返回） | M1 |
+| L15 | ~~release 幂等分支硬编码返回"待使用"~~ **已清偿（2026-09-15 随 L5）**：终态合同（已释放/过期关闭/超时关闭）幂等成功且返回券**真实状态**（fresh 快照） | 已清 | — |
 | L16 | ~~多实例无分布式锁~~ **重复执行半边已修（2026-09-12）**：四个调度入口（库存巡检/库存日审/过期扫描/过期日审）接入 RedisScanLock（SET NX PX 抢锁+Lua 比对释放，TTL 兜底崩溃自愈）——正确性本由幂等 CAS 保证，锁消重复扫描负载。**剩余**：全量扫描无分页（M4）、driftRounds 仍 JVM 本地（仅影响确认节奏不影响正确性） | 单实例无害；多实例已互斥 | M4（分页） | M4 |
 | L17 | 运营闭环缺口：模板追加库存 appendStock（需同步回补 Redis **并 DEL 售罄标志——B4 清除协议，漏则模板永久假死**）、模板下线 OFFLINE 均未实现 | 运营功能缺口 | M6（运营工具域） | M6 |
 | L18 | 接入层无限流/风控前置（设计于 docs/01/02/09，实现为零且此前未登记） | 大流量下核心链路裸奔 | M6（配额限流）；M3 压测前做最小限流 | M3/M6 |

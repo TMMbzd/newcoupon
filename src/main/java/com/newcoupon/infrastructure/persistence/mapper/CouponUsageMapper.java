@@ -38,4 +38,15 @@ public interface CouponUsageMapper extends BaseMapper<CouponUsagePO> {
     /** 按券id过期关闭（CAS）：扫描器路径——券锁定中过期，占用单同步收尾 */
     @Update("UPDATE coupon_usage SET status = 3 WHERE user_coupon_id = #{couponId} AND status = 0")
     int casExpireByCouponId(@Param("couponId") long couponId);
+
+    // ---------- L5 锁定超时收场（2026-09-15） ----------
+
+    /** 按占用单号超时关闭（CAS）：占用中→超时关闭（第四种终结：订单沉默，系统收场） */
+    @Update("UPDATE coupon_usage SET status = 4 WHERE usage_no = #{usageNo} AND status = 0")
+    int casTimeoutByUsageNo(@Param("usageNo") String usageNo);
+
+    /** T+1 锁龄审计：仍占用中且锁龄超阈值的合同（漏注册任务的兜底，V7 idx_occupy 精确命中） */
+    @Select("SELECT * FROM coupon_usage WHERE status = 0 AND occupy_time < #{threshold} LIMIT #{limit}")
+    java.util.List<CouponUsagePO> selectOverdueOccupying(@Param("threshold") LocalDateTime threshold,
+                                                         @Param("limit") int limit);
 }

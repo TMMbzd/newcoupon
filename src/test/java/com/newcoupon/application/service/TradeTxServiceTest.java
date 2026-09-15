@@ -20,12 +20,13 @@ import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.repository.CouponEventRepository;
 import com.newcoupon.domain.repository.CouponUsageRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
+import com.newcoupon.infrastructure.persistence.CouponReleaseTaskGateway;
 import java.time.LocalDateTime;
 import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -41,9 +42,18 @@ class TradeTxServiceTest {
     private CouponUsageRepository couponUsageRepository;
     @Mock
     private CouponEventRepository couponEventRepository;
+    @Mock
+    private CouponReleaseTaskGateway releaseTaskGateway;
 
-    @InjectMocks
     private TradeTxService service;
+
+    @BeforeEach
+    void constructService() {
+        // L5 后构造器多了锁定超时网关与窗口参数（long 基本类型 Mockito 注入不了，
+        // @InjectMocks 在扩展的 beforeEach 里先炸）——去注解、手工组装
+        service = new TradeTxService(userCouponRepository, couponUsageRepository,
+                couponEventRepository, releaseTaskGateway, 30L);
+    }
 
     private static UserCoupon coupon(CouponStatus status) {
         return UserCoupon.reconstitute(5L, 42L, 1L, "T1", 1000L, 10000L, null,

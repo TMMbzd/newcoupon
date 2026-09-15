@@ -40,6 +40,7 @@ public enum ErrorCode {
     USAGE_NOT_FOUND(4003, "占用单不存在"),
     USAGE_STATE_CONFLICT(4004, "占用单状态冲突"),
     COUPON_EXPIRED(4005, "券已过期（核销被拒，占用单已过期关闭）"),
+    USAGE_TIMEOUT_CLOSED(4006, "占用单已超时关闭（券已回收/过期），核销拒绝——订单侧按无券价处理"),
 
     // ---- 5xxx 系统与依赖 ----
     SYSTEM_ERROR(5000, "系统繁忙，请稍后重试"),

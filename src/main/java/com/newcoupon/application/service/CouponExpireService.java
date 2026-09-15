@@ -133,6 +133,26 @@ public class CouponExpireService {
                 transitioned = userCouponRepository.casExpireOnLock(couponId);
                 if (transitioned) {
                     couponUsageRepository.casExpireByCouponId(couponId);
+                } else {
+                    // 抢跑裁决（红队评审#2）：release/超时收场恰在 valid_end 边界把券回池
+                    // （CAS 的 IF 走了"未过期"分支），本任务 0 行——若就此划掉任务，
+                    // 这张"已过期但回池"的券要等次日审计才收敛、EXPIRED 事件缺位一天。
+                    // 重读券：确已回池且仍到期 → 改走"待使用过期"分支当场收掉。
+                    UserCoupon fresh = userCouponRepository.findById(couponId).orElse(null);
+                    if (fresh != null && fresh.getStatus() == CouponStatus.USABLE) {
+                        transitioned = userCouponRepository.casExpireUsable(couponId);
+                    }
+                }
+            } else if (expired && coupon.getStatus() == CouponStatus.EXPIRED) {
+                // F1 补刀（2026-09-15 随 L5 修复）：券已被收场为终态、占用单可能仍停占用中——
+                // 旧版收场两条 UPDATE 未捆事务，中途崩溃留下的半截残局；重扫时券已非 LOCKED
+                // 会直接 finish、占用单永久悬挂。此处幂等补关（CAS 0行=no-op），事件缺失则补
+                //（撞 uk_event_no 被弹回=崩溃前已落，无重复）。
+                couponUsageRepository.casExpireByCouponId(couponId);
+                try {
+                    couponEventRepository.append(CouponEvent.expired(coupon, null, LocalDateTime.now()));
+                } catch (org.springframework.dao.DuplicateKeyException ignore) {
+                    // 事件已存在（崩溃发生在事件落库之后）——幂等跳过
                 }
             }
             if (transitioned) {

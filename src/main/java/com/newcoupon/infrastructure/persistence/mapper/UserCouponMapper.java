@@ -58,4 +58,11 @@ public interface UserCouponMapper extends BaseMapper<UserCouponPO> {
     /** 释放：已锁定→未过期?待使用:已过期（过期券不能退回可用态） */
     @Update("UPDATE user_coupon SET status = IF(valid_end > NOW(), 0, 3) WHERE id = #{id} AND status = 1")
     int casRelease(@Param("id") long id);
+
+    // ---------- L5 锁定超时收场（2026-09-15） ----------
+
+    /** 锁定超时收场（CAS）：已锁定→(未过期?待使用:已过期)——与 casRelease 同款 IF 分流；
+     *  对券与用户资产而言，订单取消与订单超时死亡结果一致，差异在占用单终态(4)与事件类型。 */
+    @Update("UPDATE user_coupon SET status = IF(valid_end > NOW(), 0, 3) WHERE id = #{id} AND status = 1")
+    int casTimeoutClose(@Param("id") long id);
 }

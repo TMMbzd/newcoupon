@@ -24,6 +24,9 @@ public abstract class ShardedIntegrationTestSupport {
             new GenericContainer<>(DockerImageName.parse("redis:7-alpine")).withExposedPorts(6379);
 
     @Container
-    protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0");
+    protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0")
+            // 与 dev compose 对齐：不设 TZ 时容器 UTC，NOW() 比 JVM(+08) 慢 8 小时——
+            // "到点即扫"类断言（如 L5 的 next_scan_time<=NOW()）要等 8 小时才成立
+            .withEnv("TZ", "Asia/Shanghai");
 
 }

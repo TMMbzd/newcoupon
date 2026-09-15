@@ -86,4 +86,9 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     public java.util.List<Long> selectExpiredUsableIds(int limit) {
         return mapper.selectExpiredUsableIds(limit);
     }
+
+    @Override
+    public boolean casTimeoutClose(long userCouponId) {
+        return mapper.casTimeoutClose(userCouponId) == 1;
+    }
 }

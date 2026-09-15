@@ -14,11 +14,12 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 30s
 
-  # R7（ADR-0008）：@Scheduled 默认单线程调度池——恒等式巡检/T+1审计/过期扫描三个任务互相会排队饿死，扩到 3
+  # R7（ADR-0008）：@Scheduled 默认单线程调度池——多个定时任务互相会排队饿死，逐步扩容
+  # （库存巡检/库存日审/过期扫描/过期日审 + L5 锁定超时扫描/超时审计 = 3→4）
   task:
     scheduling:
       pool:
-        size: 3
+        size: 4
 
 server:
   port: 8080
@@ -36,6 +37,9 @@ coupon:
     sql-show: false
   id:
     worker-id: ${WORKER_ID:1}
+  # L5 锁定超时窗口（分钟）：与订单域支付超时契约对齐（订单超时取消=券超时收场，两边同步死）
+  trade:
+    lock-timeout-minutes: ${LOCK_TIMEOUT_MINUTES:30}
 
 mybatis-plus:
   configuration:

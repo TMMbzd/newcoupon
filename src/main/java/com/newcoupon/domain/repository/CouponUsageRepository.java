@@ -28,4 +28,12 @@ public interface CouponUsageRepository {
 
     /** L2 过期关闭（CAS）：按券id——扫描器路径（券锁定中过期，占用单同步收尾） */
     boolean casExpireByCouponId(long userCouponId);
+
+    // ---------- L5 锁定超时收场（2026-09-15） ----------
+
+    /** 超时关闭（CAS）：占用中→超时关闭（第四种终结：订单沉默，系统收场）。按占用单号 */
+    boolean casTimeoutByUsageNo(String usageNo);
+
+    /** T+1 锁龄审计：仍占用中且锁龄早于阈值的合同（漏注册任务兜底，走 idx_occupy） */
+    java.util.List<CouponUsage> selectOverdueOccupying(LocalDateTime threshold, int limit);
 }

@@ -19,6 +19,9 @@ public enum CouponTransition {
     CONFIRM(CouponStatus.LOCKED, CouponStatus.USED, "支付成功核销"),
     /** 订单取消/支付超时释放（由占用单状态驱动，未过期则回可用） */
     RELEASE(CouponStatus.LOCKED, CouponStatus.USABLE, "订单取消释放"),
+    /** 锁定超时收场（L5）：订单在窗口内既未核销也未释放（消息丢失/调用方死亡）——系统兜底。
+     *  目标"待使用"是主路径（未过期回池）；券若已过期由 SQL 的 IF 分流到已过期（与 RELEASE 同构）。 */
+    LOCK_TIMEOUT(CouponStatus.LOCKED, CouponStatus.USABLE, "锁定超时释放"),
     /** 锁定期超时仍未核销 */
     EXPIRE_ON_LOCK(CouponStatus.LOCKED, CouponStatus.EXPIRED, "锁定期超时过期"),
     /** 到期未使用（定时任务+查询惰性判断双保险） */

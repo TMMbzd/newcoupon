@@ -91,6 +91,18 @@ public final class CouponEvent {
                 usage.getOrderNo(), null, now);
     }
 
+    /**
+     * 锁定超时释放事件（L5，2026-09-15）。event_no = "LKT:"+usageNo——usage_no 全表唯一，
+     * 天然防重放。注意不能用券id当编号：一张券一生可签多份合同（锁定→释放→再锁定），
+     * 每份合同的超时收场都是一条独立事件。orderNo 记订单供对账归因"哪个订单的死锁被收了场"。
+     */
+    public static CouponEvent lockTimeout(UserCoupon coupon, CouponUsage usage, LocalDateTime now) {
+        return new CouponEvent(null,
+                "LKT:" + usage.getUsageNo(), EventType.LOCK_TIMEOUT,
+                coupon.getTemplateId(), coupon.getId(), usage.getUserId(),
+                usage.getOrderNo(), null, now);
+    }
+
     /** 从数据库复活 */
     public static CouponEvent reconstitute(Long id, String eventNo, EventType eventType, long templateId,
                                            long userCouponId, long userId, String orderNo,

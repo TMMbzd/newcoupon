@@ -50,4 +50,7 @@ public interface UserCouponRepository {
 
     /** T+1 审计：仍待使用但过期超 10 分钟的券 id（漏注册任务兜底，走 idx_expire） */
     java.util.List<Long> selectExpiredUsableIds(int limit);
+
+    /** L5 锁定超时收场（CAS）：已锁定→(未过期?待使用:已过期)——订单沉默时系统兜底，IF 分流同释放 */
+    boolean casTimeoutClose(long userCouponId);
 }

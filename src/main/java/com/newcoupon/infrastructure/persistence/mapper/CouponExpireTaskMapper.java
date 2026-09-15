@@ -33,18 +33,23 @@ public interface CouponExpireTaskMapper extends BaseMapper<CouponExpireTaskPO> {
 
     /**
      * 失败退避：retry_count+1、下次扫描时间按指数退避推进（min(2^retry, 30min)）；
-     * 重试满 8 次置死信(3)。SET 子句按 MySQL 左到右求值，status 的 IF 用的是自增后的 retry_count。
+     * 总失败满 8 次置死信(3)。SET 子句按 MySQL 左到右求值：第 3 行的 retry_count 已是
+     * 自增后的新值（=总失败次数），条件 >=8 即"第 8 次失败死信"（红队评审#3 修正）。
      */
     @Update("UPDATE coupon_expire_task SET "
             + "retry_count = retry_count + 1, "
             + "next_scan_time = NOW() + INTERVAL LEAST(POW(2, retry_count + 1), 1800) SECOND, "
-            + "status = IF(retry_count + 1 >= 8, 3, 0) "
+            + "status = IF(retry_count >= 8, 3, 0) "
             + "WHERE coupon_id = #{couponId} AND status = 0")
     int backoff(@Param("couponId") long couponId);
 
-    /** 审计补注册（幂等）：漏注册的券补任务，已存在则忽略 */
-    @Update("INSERT IGNORE INTO coupon_expire_task (coupon_id, user_id, shard, next_scan_time, status, retry_count) "
-            + "VALUES (#{couponId}, #{userId}, #{shard}, #{nextScanTime}, 0, 0)")
+    /** 审计补注册：不存在则插入；**死信(3)则复活**为待处理并清零重试（红队评审#1：INSERT IGNORE
+     *  被死信行唯一键静默吞掉，"补注册"对死信永远做不到）。SET 求值顺序：retry_count 先判旧 status。 */
+    @Update("INSERT INTO coupon_expire_task (coupon_id, user_id, shard, next_scan_time, status, retry_count) "
+            + "VALUES (#{couponId}, #{userId}, #{shard}, #{nextScanTime}, 0, 0) "
+            + "ON DUPLICATE KEY UPDATE "
+            + "retry_count = IF(status = 3, 0, retry_count), "
+            + "status = IF(status = 3, 0, status)")
     int registerIfAbsent(@Param("couponId") long couponId, @Param("userId") long userId,
                          @Param("shard") int shard, @Param("nextScanTime") String nextScanTime);
 }

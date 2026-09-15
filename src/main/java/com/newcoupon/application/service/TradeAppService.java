@@ -12,6 +12,7 @@ import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.domain.coupon.CouponStatus;
 import com.newcoupon.domain.coupon.CouponUsage;
+import com.newcoupon.domain.coupon.UsageStatus;
 import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.repository.CouponUsageRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
@@ -51,7 +52,14 @@ public class TradeAppService {
         String usageNo = req.orderNo() + ":" + req.couponId();
         var existingUsage = couponUsageRepository.findByUsageNo(usageNo);
         if (existingUsage.isPresent()) {
-            return new LockResult(usageNo, req.couponId(), CouponStatus.LOCKED.getDesc(), true);
+            // F2（2026-09-15 随 L5 修复）：只有"占用中"才能答"已锁定"——合同已终结
+            // （已释放/过期关闭/超时关闭）时券已回池甚至易主，报成功是谎报
+            CouponUsage u = existingUsage.get();
+            if (u.getStatus() == UsageStatus.OCCUPYING) {
+                return new LockResult(usageNo, req.couponId(), CouponStatus.LOCKED.getDesc(), true);
+            }
+            throw new BizException(ErrorCode.STATE_CONFLICT,
+                    "该订单的占用已终结（" + u.getStatus().getDesc() + "），请使用新订单号");
         }
 
         try {
@@ -147,10 +155,12 @@ public class TradeAppService {
 
     // ---------- 内部 ----------
 
-    /** 同一订单重复锁同一券的幂等出口：按 usageNo 查占用单（事务外新快照），存在即返回"已锁定" */
+    /** 同一订单重复锁同一券的幂等出口：按 usageNo 查占用单（事务外新快照），
+     *  仅"占用中"答"已锁定"——终态合同（F2）不能谎报，交由调用方走冲突分类 */
     private LockResult idempotentLock(LockRequest req) {
         String usageNo = req.orderNo() + ":" + req.couponId();
         return couponUsageRepository.findByUsageNo(usageNo)
+                .filter(u -> u.getStatus() == UsageStatus.OCCUPYING)   // F2：终态不回"已锁定"
                 .map(u -> new LockResult(usageNo, req.couponId(), CouponStatus.LOCKED.getDesc(), true))
                 .orElse(null);
     }

@@ -11,7 +11,8 @@ public enum EventType {
     USED(3, "核销"),
     RELEASED(4, "释放回退"),
     EXPIRED(5, "过期"),
-    INVALIDATED(6, "作废");
+    INVALIDATED(6, "作废"),
+    LOCK_TIMEOUT(7, "锁定超时释放");
 
     private final int code;
     private final String desc;

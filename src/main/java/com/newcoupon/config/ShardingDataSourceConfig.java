@@ -62,8 +62,14 @@ public class ShardingDataSourceConfig {
                     standard:
                       shardingColumn: user_id
                       shardingAlgorithmName: et-mod
+                coupon_release_task:
+                  actualDataNodes: ds0.coupon_release_task_$->{0..63}
+                  tableStrategy:
+                    standard:
+                      shardingColumn: user_id
+                      shardingAlgorithmName: rt-mod
               bindingTables:
-                - user_coupon,coupon_usage,coupon_expire_task
+                - user_coupon,coupon_usage,coupon_expire_task,coupon_release_task
               shardingAlgorithms:
                 uc-mod:
                   type: INLINE
@@ -77,6 +83,10 @@ public class ShardingDataSourceConfig {
                   type: INLINE
                   props:
                     algorithm-expression: coupon_expire_task_${user_id % 64}
+                rt-mod:
+                  type: INLINE
+                  props:
+                    algorithm-expression: coupon_release_task_${user_id % 64}
             - !SINGLE
               tables:
                 - "*.*"

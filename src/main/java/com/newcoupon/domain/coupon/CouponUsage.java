@@ -66,15 +66,25 @@ public final class CouponUsage {
         if (status == UsageStatus.RELEASED) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT, "占用单已释放，不可核销");
         }
+        if (status == UsageStatus.EXPIRED) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT, "占用单已过期关闭，不可核销");
+        }
+        // L5（2026-09-15）：超时关闭后迟到的核销——独立错误码而非笼统冲突：
+        // 订单侧拿到 4006 走无券价/整单退款（券可能已被别的订单用掉，放行=一券两花）
+        if (status == UsageStatus.TIMEOUT_CLOSED) {
+            throw new BizException(ErrorCode.USAGE_TIMEOUT_CLOSED);
+        }
     }
 
-    /** 释放前置校验：已核销的占用单绝不允许释放（资损红线：一张券花两次） */
+    /**
+     * 释放前置校验：已核销的占用单绝不允许释放（资损红线：一张券花两次）。
+     * 其余终态（已释放/过期关闭/超时关闭）由调用方按幂等成功处理（取消意图已达成）。
+     */
     public void checkReleasable() {
         if (status == UsageStatus.CONFIRMED) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
                     "已核销不可释放（已支付订单的退券走退款流程，不改占用单）");
         }
-        // OCCUPYING / RELEASED 均可继续（RELEASED=幂等重放，调用方当成功返回）
     }
 
     /** 从数据库复活：状态以 DB 为准，不重跑校验 */

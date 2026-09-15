@@ -57,4 +57,18 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
     public boolean casExpireByCouponId(long userCouponId) {
         return mapper.casExpireByCouponId(userCouponId) == 1;
     }
+
+    // ---------- L5 锁定超时收场（2026-09-15） ----------
+
+    @Override
+    public boolean casTimeoutByUsageNo(String usageNo) {
+        return mapper.casTimeoutByUsageNo(usageNo) == 1;
+    }
+
+    @Override
+    public java.util.List<CouponUsage> selectOverdueOccupying(LocalDateTime threshold, int limit) {
+        return mapper.selectOverdueOccupying(threshold, limit).stream()
+                .map(CouponUsagePOConverter::toDomain)
+                .toList();
+    }
 }
