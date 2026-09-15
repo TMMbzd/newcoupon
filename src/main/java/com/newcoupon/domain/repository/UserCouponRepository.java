@@ -17,6 +17,15 @@ public interface UserCouponRepository {
     /** 按模板数券（ADR-0008 第二不变式）：对账修复前的守卫互证 issued_count ↔ COUNT(user_coupon) */
     long countByTemplate(long templateId);
 
+    /** L3 计数自愈：用户对模板的实际领取行数（DB 权威值，撞 uk_user_seq 时取） */
+    long countByUserAndTemplate(long userId, long templateId);
+
+    /** L3 自愈的序号来源：最大 seq（空洞免疫——下一序号必须大于全部现有） */
+    long maxSeqByUserAndTemplate(long userId, long templateId);
+
+    /** L4 交叉核对：全部锁定中的券（在途锁定=小集合） */
+    List<UserCoupon> selectLocked(int limit);
+
     /** 按主键查询：用券三段与读回断言用 */
     Optional<UserCoupon> findById(long id);
 

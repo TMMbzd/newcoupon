@@ -41,6 +41,8 @@ class StockReconcileServiceTest {
     @Mock
     private UserCouponRepository userCouponRepository;
     @Mock
+    private com.newcoupon.domain.repository.CouponUsageRepository couponUsageRepository;
+    @Mock
     private RedisStockGateway stockGateway;
     @Mock
     private StockDriftLogGateway driftLog;
@@ -52,7 +54,7 @@ class StockReconcileServiceTest {
     @BeforeEach
     void setUp() {
         service = new StockReconcileService(templateRepository, userCouponRepository,
-                stockGateway, driftLog, scanLock, 1000L, 0L);   // 日志限频 0：每条都落表，便于断言
+                couponUsageRepository, stockGateway, driftLog, scanLock, 1000L, 0L);   // 日志限频 0：每条都落表，便于断言
     }
 
     /** 模板：total=100，issued 由参数定 */

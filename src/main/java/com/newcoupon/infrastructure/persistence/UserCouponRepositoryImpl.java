@@ -34,6 +34,25 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
         return mapper.countByTemplate(templateId);
     }
 
+    // ---------- L3/L4（2026-09-15） ----------
+
+    @Override
+    public long countByUserAndTemplate(long userId, long templateId) {
+        return mapper.countByUserAndTemplate(userId, templateId);
+    }
+
+    @Override
+    public long maxSeqByUserAndTemplate(long userId, long templateId) {
+        return mapper.maxSeqByUserAndTemplate(userId, templateId);
+    }
+
+    @Override
+    public List<UserCoupon> selectLocked(int limit) {
+        return mapper.selectLocked(limit).stream()
+                .map(UserCouponPOConverter::toDomain)
+                .toList();
+    }
+
     @Override
     public Optional<UserCoupon> findById(long id) {
         return Optional.ofNullable(mapper.selectById(id))

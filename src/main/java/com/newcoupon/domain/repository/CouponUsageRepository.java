@@ -36,4 +36,10 @@ public interface CouponUsageRepository {
 
     /** T+1 锁龄审计：仍占用中且锁龄早于阈值的合同（漏注册任务兜底，走 idx_occupy） */
     java.util.List<CouponUsage> selectOverdueOccupying(LocalDateTime threshold, int limit);
+
+    /** L4 交叉核对：全部占用中的合同（在途占用=小集合） */
+    java.util.List<CouponUsage> selectOccupying(int limit);
+
+    /** L4 点查复核：某券当前是否仍有占用中合同（diff 候选二次确认） */
+    Optional<CouponUsage> findOccupyingByCouponId(long couponId);
 }

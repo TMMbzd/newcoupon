@@ -56,6 +56,8 @@ class ReceiveAppServiceTest {
     private RedisStockGateway stockGateway;
     @Mock
     private StockReconcileService reconcileService;
+    @Mock
+    private com.newcoupon.infrastructure.persistence.StockDriftLogGateway driftLog;
 
     @InjectMocks
     private ReceiveAppService service;
@@ -226,19 +228,43 @@ class ReceiveAppServiceTest {
     }
 
     @Test
-    @DisplayName("事务DuplicateKey 且非幂等键 → 3002 + cancel(TRANSIENT)（DB序号索引兜底）")
+    @DisplayName("事务DuplicateKey 且非幂等键、DB行数已达限 → 3002 + cancel(TRANSIENT) + 计数自愈（L3）")
     void duplicateKeySeqConflictIsUserLimit() {
         givenTemplateAndGate(1, new DeductResult(0, 1));
         when(issueTxService.issue(any(), any(), anyLong(), any()))
                 .thenThrow(new DuplicateKeyException("uk_user_seq"));
         when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
-                .thenReturn(Optional.empty())
                 .thenReturn(Optional.empty());
+        // L3：DB 权威行数=1（限领1）→ 真达限：重置计数+正确拒绝，不透明重试
+        when(userCouponRepository.countByUserAndTemplate(42L, 1L)).thenReturn(1L);
+        when(userCouponRepository.maxSeqByUserAndTemplate(42L, 1L)).thenReturn(1L);
 
         assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 1L)))
                 .extracting(e -> ((BizException) e).getErrorCode())
                 .isEqualTo(ErrorCode.USER_LIMIT_EXCEEDED);
         verify(stockGateway).cancel(any(), eq(CancelCause.TRANSIENT));
+        verify(stockGateway).setUserCount(1L, 42L, 1L);   // 拒绝的同时计数已自愈
+    }
+
+    @Test
+    @DisplayName("事务DuplicateKey 但 DB行数未达限 → 计数自愈+透明重试一次（L3：失忆非超领）")
+    void duplicateKeySeqConflictSelfHealsAndRetries() {
+        givenTemplateAndGate(3, new DeductResult(0, 1));
+        // 第一次 issue 撞序号索引（失忆的表征），重试（自愈后）成功
+        when(issueTxService.issue(any(), any(), anyLong(), any()))
+                .thenThrow(new DuplicateKeyException("uk_user_seq"))
+                .thenReturn(com.newcoupon.domain.coupon.UserCoupon.reconstitute(
+                        9L, 42L, 1L, "T1", 1000L, 10000L, null, null,
+                        com.newcoupon.domain.coupon.CouponStatus.USABLE, null, "req-1", 3));
+        when(userCouponRepository.findByIdempotentKey(42L, "req-1"))
+                .thenReturn(Optional.empty());
+        when(userCouponRepository.countByUserAndTemplate(42L, 1L)).thenReturn(2L);   // 2/3：失忆
+        when(userCouponRepository.maxSeqByUserAndTemplate(42L, 1L)).thenReturn(2L);
+
+        var r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
+
+        org.assertj.core.api.Assertions.assertThat(r.duplicated()).isFalse();
+        verify(stockGateway).setUserCount(1L, 42L, 2L);   // 自愈为 DB 行数
     }
 
     @Test

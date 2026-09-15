@@ -31,6 +31,22 @@ public interface UserCouponMapper extends BaseMapper<UserCouponPO> {
     @Select("SELECT COUNT(*) FROM user_coupon WHERE template_id = #{templateId}")
     long countByTemplate(@Param("templateId") long templateId);
 
+    /** L3 计数自愈：用户对模板的实际领取行数（DB 权威值）——等值双条件正好走
+     *  uk_user_seq(user_id, template_id, seq) 最左两列，零新增索引 */
+    @Select("SELECT COUNT(*) FROM user_coupon WHERE user_id = #{userId} AND template_id = #{templateId}")
+    long countByUserAndTemplate(@Param("userId") long userId, @Param("templateId") long templateId);
+
+    /** L3 自愈的序号来源（评审#1/#6 修复）：该用户该模板的最大序号——行不删除的前提下，
+     *  下一个序号必须 > 全部现有 seq。COUNT 只在无空洞时等于 MAX(seq)；补偿路径泄漏的
+     *  在途计数（cancel 失败/探针失败）会制造持久空洞（如 {1,2,3,4,6}），此时 COUNT=5
+     *  而 MAX=6——用 COUNT 自愈会让重试 seq=COUNT+1 撞在 MAX 行上，永久 3002 死循环 */
+    @Select("SELECT COALESCE(MAX(seq), 0) FROM user_coupon WHERE user_id = #{userId} AND template_id = #{templateId}")
+    long maxSeqByUserAndTemplate(@Param("userId") long userId, @Param("templateId") long templateId);
+
+    /** L4 交叉核对：全部锁定中的券（idx_expire 的 status 等值前缀；在途锁定=小集合） */
+    @Select("SELECT * FROM user_coupon WHERE status = 1 LIMIT #{limit}")
+    java.util.List<UserCouponPO> selectLocked(@Param("limit") int limit);
+
     // ---------- 状态迁移 CAS（每条 = 状态机一条合法边） ----------
 
     /** 锁券：待使用→已锁定；条件含未过期（过期的券锁了也用不了） */

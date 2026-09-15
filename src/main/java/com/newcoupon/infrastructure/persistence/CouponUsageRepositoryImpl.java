@@ -71,4 +71,17 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
                 .map(CouponUsagePOConverter::toDomain)
                 .toList();
     }
+
+    @Override
+    public java.util.List<CouponUsage> selectOccupying(int limit) {
+        return mapper.selectOccupying(limit).stream()
+                .map(CouponUsagePOConverter::toDomain)
+                .toList();
+    }
+
+    @Override
+    public Optional<CouponUsage> findOccupyingByCouponId(long couponId) {
+        return Optional.ofNullable(mapper.selectOccupyingByCouponId(couponId))
+                .map(CouponUsagePOConverter::toDomain);
+    }
 }

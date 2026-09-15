@@ -10,6 +10,7 @@ import com.newcoupon.domain.coupon.PublishStatus;
 import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
+import com.newcoupon.infrastructure.persistence.StockDriftLogGateway;
 import com.newcoupon.infrastructure.redis.RedisStockGateway;
 import com.newcoupon.infrastructure.redis.RedisStockGateway.CancelCause;
 import com.newcoupon.infrastructure.redis.RedisStockGateway.DeductCommand;
@@ -61,20 +62,30 @@ public class ReceiveAppService {
     private final CouponIssueTxService issueTxService;
     private final RedisStockGateway stockGateway;
     private final StockReconcileService reconcileService;
+    private final StockDriftLogGateway driftLog;
 
     public ReceiveAppService(UserCouponRepository userCouponRepository,
                              TemplateRepository templateRepository,
                              CouponIssueTxService issueTxService,
                              RedisStockGateway stockGateway,
-                             StockReconcileService reconcileService) {
+                             StockReconcileService reconcileService,
+                             StockDriftLogGateway driftLog) {
         this.userCouponRepository = userCouponRepository;
         this.templateRepository = templateRepository;
         this.issueTxService = issueTxService;
         this.stockGateway = stockGateway;
         this.reconcileService = reconcileService;
+        this.driftLog = driftLog;
     }
 
     public ReceiveResult receive(ReceiveRequest req) {
+        return doReceive(req, false);
+    }
+
+    /**
+     * @param retryOnce L3 自愈后的透明重试标志（仅允许一层——防失忆场景下撞索引→自愈→再撞的死循环）
+     */
+    private ReceiveResult doReceive(ReceiveRequest req, boolean retryOnce) {
         // ① 读模板 + 可领性校验（M3 将替换为二级缓存；编排层无事务=每次读最新快照）
         CouponTemplate template = templateRepository.findById(req.templateId())
                 .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + req.templateId()));
@@ -111,7 +122,7 @@ public class ReceiveAppService {
             return ReceiveResult.of(issued, false);
         } catch (DuplicateKeyException e) {
             cancelQuietly(cmd, CancelCause.TRANSIENT);   // 计数还原+库存回加，令牌出清
-            return classifyAfterRollback(req, e);
+            return classifyAfterRollback(req, cmd, retryOnce, e);
         } catch (StockDeductRejectedException e) {
             // A1' 分类先行：先取新快照判断"DB 为什么拒"，再选取消形态——
             // 售罄要钉零（防 N1 过补偿自持环），瞬时异常要回加（库存没真耗尽）
@@ -223,15 +234,61 @@ public class ReceiveAppService {
 
     // ---------- DB 冲突分类（回滚+取消记账后，事务外新快照） ----------
 
-    private ReceiveResult classifyAfterRollback(ReceiveRequest req, DuplicateKeyException e) {
+    private ReceiveResult classifyAfterRollback(ReceiveRequest req, DeductCommand cmd,
+                                                boolean retryOnce, DuplicateKeyException e) {
         log.warn("duplicate key on receive: userId={}, requestId={}, cause={}",
                 req.userId(), req.requestId(), e.getMessage());
         Optional<UserCoupon> byIdem = userCouponRepository.findByIdempotentKey(req.userId(), req.requestId());
         if (byIdem.isPresent()) {
             return toDuplicatedResult(byIdem.get(), req);   // uk_idem：重放/并发命中
         }
-        // uk_user_seq：Redis 计数丢失导致序号重复 → 该用户实际已达限领（DB 是最后防线）
-        throw new BizException(ErrorCode.USER_LIMIT_EXCEEDED);
+        // uk_user_seq：Redis 计数与 DB 事实脱节（失忆/漂移）。L3 自愈（2026-09-15，多方评审#1/#6 修正）：
+        // 两个 DB 读数分工——行数 COUNT 管"限领判断"（限领语义=张数）；最大序号 MAX(seq) 管"自愈写入值"
+        // （下一序号必须大于全部现有——补偿路径泄漏的在途计数会造持久空洞 {1,2,3,4,6}，用 COUNT 自愈
+        // 会让重试 seq=COUNT+1 撞在 MAX 行上、retryOnce 耗尽、永久 3002 死循环）。
+        long actualRows = userCouponRepository.countByUserAndTemplate(req.userId(), req.templateId());
+        long maxSeq = userCouponRepository.maxSeqByUserAndTemplate(req.userId(), req.templateId());
+        healUserCountQuietly(req, maxSeq);
+        if (actualRows >= cmd.maxPerUser()) {
+            // 真达限：正确的拒绝——计数已同步修好，下次闸门在 Redis 层就拦住，不再白撞索引
+            throw new BizException(ErrorCode.USER_LIMIT_EXCEEDED);
+        }
+        if (retryOnce) {
+            // 重试后仍撞且行数未达限（评审#1/#13）：持久空洞或自愈竞态的特征签名——
+            // 不是用户的问题，落漂移表告警 + 给可重试的错误（绝不谎报"已达限领"）
+            log.error("UL_HOLE: retried collision with rows({}) < limit({}) — seq hole or heal race: "
+                    + "templateId={}, userId={}, maxSeq={}", actualRows, cmd.maxPerUser(),
+                    req.templateId(), req.userId(), maxSeq);
+            recordUlHoleQuietly(req, actualRows, maxSeq);
+            throw new BizException(ErrorCode.DEGRADED, "领取计数校准中，请稍后重试");
+        }
+        // 失忆（DB 证明没领满）：重置后透明重试一次——cancel 已 DEL Redis 幂等键，
+        // DB 侧 uk_idem 因首次回滚不存在，重试安全；重试内 deduct 从 MAX(seq)+1 起算（必为空位）
+        log.warn("ul counter healed after loss: templateId={}, userId={}, redis→{}(maxSeq) — retrying transparently",
+                req.templateId(), req.userId(), maxSeq);
+        return doReceive(req, true);
+    }
+
+    /** L3：自愈写入失败（Redis 同挂等）不改变业务结局——最坏再撞一次索引回到 DB 兜底，不超发 */
+    private void healUserCountQuietly(ReceiveRequest req, long maxSeq) {
+        try {
+            stockGateway.setUserCount(req.templateId(), req.userId(), maxSeq);
+        } catch (RuntimeException e) {
+            log.error("ul heal failed (will retry on next collision): templateId={}, userId={}",
+                    req.templateId(), req.userId(), e);
+        }
+    }
+
+    /** 评审#1：持久空洞/自愈竞态落漂移表——此特征签名（重试仍撞+行数未达限）此前无任何告警 */
+    private void recordUlHoleQuietly(ReceiveRequest req, long rows, long maxSeq) {
+        try {
+            driftLog.record(new StockDriftLogGateway.DriftEvent(req.templateId(), 0, 0, 0,
+                    0, rows, maxSeq, null, 0, "UL_HOLE",
+                    "重试后仍撞序号且行数未达限（seq空洞/自愈竞态）: userId=" + req.userId()
+                            + ", rows=" + rows + ", maxSeq=" + maxSeq));
+        } catch (RuntimeException e) {
+            log.error("ul hole drift record failed: {}", e.getMessage());
+        }
     }
 
     /**

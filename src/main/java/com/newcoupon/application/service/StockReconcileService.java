@@ -65,6 +65,7 @@ public class StockReconcileService {
 
     private final TemplateRepository templateRepository;
     private final UserCouponRepository userCouponRepository;
+    private final com.newcoupon.domain.repository.CouponUsageRepository couponUsageRepository;
     private final RedisStockGateway stockGateway;
     private final StockDriftLogGateway driftLog;
     private final RedisScanLock scanLock;
@@ -79,6 +80,7 @@ public class StockReconcileService {
 
     public StockReconcileService(TemplateRepository templateRepository,
                                 UserCouponRepository userCouponRepository,
+                                com.newcoupon.domain.repository.CouponUsageRepository couponUsageRepository,
                                 RedisStockGateway stockGateway,
                                 StockDriftLogGateway driftLog,
                                 RedisScanLock scanLock,
@@ -86,6 +88,7 @@ public class StockReconcileService {
                                 @Value("${coupon.reconcile.log-min-interval-ms:3600000}") long logMinIntervalMs) {
         this.templateRepository = templateRepository;
         this.userCouponRepository = userCouponRepository;
+        this.couponUsageRepository = couponUsageRepository;
         this.stockGateway = stockGateway;
         this.driftLog = driftLog;
         this.scanLock = scanLock;
@@ -274,9 +277,100 @@ public class StockReconcileService {
                 log.error("daily audit failed (isolated, continue): templateId={}", t.getId(), e);
             }
         }
+        // L4（2026-09-15）：占用单×券状态交叉核对——资产维度一致性（库存之外的独立防线）
+        crossCheckUsageAndCoupon();
         log.info("daily audit done");
         } finally {
             scanLock.unlock(AUDIT_LOCK_KEY, owner);
+        }
+    }
+
+    /**
+     * L4（2026-09-15，多方评审#2/#7/#11/#12 修正版）：占用单×券状态交叉核对。
+     * 三个防假阳性设计：
+     * ① A 侧只取"占用超 10 分钟"的合同（复用锁龄审计的阈值语义）——刚发生的 lock/收场
+     *    转换在窗口期内自然被排除；
+     * ② 截断**前置**早退：任一侧集合触顶（≥5000，分表广播下 LIMIT 是每分表语义），
+     *    残缺集合 diff 必产批量假阳性——只落一条 TRUNCATED 告警，不做双向 diff；
+     * ③ 每个 diff 候选**点查复核**（本项目"确认后才告警"的惯例，同巡检两轮确认）：
+     *    重读券状态+点查占用单——每个状态转换是单券原子事务，二次点查后仍不一致才是真悬挂。
+     * 落表不走巡检的按模板限频（评审#4/#8：天级任务无需限频，限频会吞掉同模板多张悬挂券）。
+     */
+    void crossCheckUsageAndCoupon() {
+        final int limit = 5000;
+        // A：占用超 10 分钟的合同（在途转换排除；阈值与 L5 锁龄审计同源）
+        List<com.newcoupon.domain.coupon.CouponUsage> occupying =
+                couponUsageRepository.selectOverdueOccupying(LocalDateTime.now().minusMinutes(10), limit);
+        List<com.newcoupon.domain.coupon.UserCoupon> locked = userCouponRepository.selectLocked(limit);
+
+        // 截断前置早退：触顶=数量本身即告警，残缺集合不出逐条结果
+        if (occupying.size() >= limit || locked.size() >= limit) {
+            log.error("CROSS-CHECK TRUNCATED: occupying={}, locked={} ≥{} ——在途不应有这么多，"
+                    + "本轮跳过 diff（残缺集合必产假阳性），请先排查集合为何触顶",
+                    occupying.size(), locked.size(), limit);
+            recordDriftDirect(new DriftEvent(0, 0, 0, 0, 0, 0, null, null, 0,
+                    "CROSSCHECK_TRUNCATED",
+                    "交叉核对集合触顶: occupying=" + occupying.size() + ", locked=" + locked.size()));
+            return;
+        }
+
+        java.util.Set<Long> lockedIds = new java.util.HashSet<>();
+        for (com.newcoupon.domain.coupon.UserCoupon c : locked) {
+            lockedIds.add(c.getId());
+        }
+        java.util.Set<Long> occupyingCouponIds = new java.util.HashSet<>();
+        for (com.newcoupon.domain.coupon.CouponUsage u : occupying) {
+            occupyingCouponIds.add(u.getUserCouponId());
+            if (!lockedIds.contains(u.getUserCouponId())
+                    && stillMismatchUsageHangs(u.getUserCouponId())) {   // 点查复核：二次确认
+                Long tplId = userCouponRepository.findById(u.getUserCouponId())
+                        .map(com.newcoupon.domain.coupon.UserCoupon::getTemplateId).orElse(0L);
+                log.error("CROSS-CHECK USAGE_HANGS: 占用中合同但券非锁定态（复核确认）: couponId={}, "
+                        + "usageNo={}, orderNo={} → 人工",
+                        u.getUserCouponId(), u.getUsageNo(), u.getOrderNo());
+                recordDriftDirect(new DriftEvent(tplId, 0, 0, 0, 0, 0, null, null, 0,
+                        "USAGE_HANGS", "占用中合同但券非锁定态(复核确认): couponId=" + u.getUserCouponId()
+                                + ", usageNo=" + u.getUsageNo() + ", orderNo=" + u.getOrderNo()));
+            }
+        }
+        for (com.newcoupon.domain.coupon.UserCoupon c : locked) {
+            if (!occupyingCouponIds.contains(c.getId())
+                    && stillMismatchLockHangs(c.getId())) {   // 点查复核：二次确认
+                log.error("CROSS-CHECK LOCK_HANGS: 锁定中券但无占用中合同（复核确认）: couponId={}, "
+                        + "templateId={} → 人工", c.getId(), c.getTemplateId());
+                recordDriftDirect(new DriftEvent(c.getTemplateId(), 0, 0, 0, 0, 0, null, null, 0,
+                        "LOCK_HANGS", "锁定中券但无占用中合同(复核确认): couponId=" + c.getId()));
+            }
+        }
+    }
+
+    /** USAGE_HANGS 复核：占用单仍占用中 且 券当前仍非锁定（每个转换是单券原子事务，
+     *  两次读之间状态自洽——仍不一致即真悬挂，假阳性窗口收敛到近零） */
+    private boolean stillMismatchUsageHangs(long couponId) {
+        boolean usageStillOccupying =
+                couponUsageRepository.findOccupyingByCouponId(couponId).isPresent();
+        boolean couponStillNotLocked = userCouponRepository.findById(couponId)
+                .map(c -> c.getStatus() != com.newcoupon.domain.coupon.CouponStatus.LOCKED)
+                .orElse(true);   // 券已不在=仍是不一致（合同还挂着）
+        return usageStillOccupying && couponStillNotLocked;
+    }
+
+    /** LOCK_HANGS 复核：券仍锁定 且 仍无占用中合同 */
+    private boolean stillMismatchLockHangs(long couponId) {
+        boolean couponStillLocked = userCouponRepository.findById(couponId)
+                .map(c -> c.getStatus() == com.newcoupon.domain.coupon.CouponStatus.LOCKED)
+                .orElse(false);
+        boolean noOccupyingUsage =
+                couponUsageRepository.findOccupyingByCouponId(couponId).isEmpty();
+        return couponStillLocked && noOccupyingUsage;
+    }
+
+    /** L4 专用落表：不走巡检的按模板限频（评审#4/#8——天级任务、条数天然受真实异常数约束） */
+    private void recordDriftDirect(DriftEvent e) {
+        try {
+            driftLog.record(e);
+        } catch (RuntimeException ex) {
+            log.error("cross-check drift record failed (must not block audit): {}", e, ex);
         }
     }
 

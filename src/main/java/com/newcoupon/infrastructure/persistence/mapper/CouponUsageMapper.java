@@ -49,4 +49,13 @@ public interface CouponUsageMapper extends BaseMapper<CouponUsagePO> {
     @Select("SELECT * FROM coupon_usage WHERE status = 0 AND occupy_time < #{threshold} LIMIT #{limit}")
     java.util.List<CouponUsagePO> selectOverdueOccupying(@Param("threshold") LocalDateTime threshold,
                                                          @Param("limit") int limit);
+
+    /** L4 交叉核对：全部占用中的合同（idx_occupy 的 status 等值前缀；在途占用=小集合） */
+    @Select("SELECT * FROM coupon_usage WHERE status = 0 LIMIT #{limit}")
+    java.util.List<CouponUsagePO> selectOccupying(@Param("limit") int limit);
+
+    /** L4 点查复核：某张券当前是否仍有占用中的合同（diff 候选的二次确认用——
+     *  广播查询但只在异常候选上触发，正常态为 0 次） */
+    @Select("SELECT * FROM coupon_usage WHERE user_coupon_id = #{couponId} AND status = 0 LIMIT 1")
+    CouponUsagePO selectOccupyingByCouponId(@Param("couponId") long couponId);
 }

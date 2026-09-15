@@ -285,6 +285,16 @@ public class RedisStockGateway {
         redis.delete(ulKey(templateId, userId));
     }
 
+    /**
+     * L3 自愈（2026-09-15）：无条件把用户累计计数重置为 DB 权威行数。
+     * 与懒重建的条件 SET（EXISTS 才放弃）语义不同——这里是**修正已知的错误值**，必须覆盖。
+     * TTL 对齐 deduct 的 7 天续期节奏（604800s）。
+     */
+    public void setUserCount(long templateId, long userId, long count) {
+        redis.opsForValue().set(ulKey(templateId, userId), String.valueOf(count),
+                java.time.Duration.ofSeconds(604800));
+    }
+
     public Long userCount(long templateId, long userId) {
         String v = redis.opsForValue().get(ulKey(templateId, userId));
         return v == null ? null : Long.parseLong(v);
