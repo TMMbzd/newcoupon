@@ -57,7 +57,7 @@
 **五段 Lua**：DEDUCT（无 issued）/CANCEL 三态（transient 含 so 检测内部改终态；sold_out=void+1 不动 stk——污染留给 FORCE；offline=void 吸收存量）/CONFIRM 不变/CONSERVATION（清扫+读五键）/REBUILD NX|FORCE|shadow 合并（ZCARD 门+双键栅栏+retired/活跃分支推导）。
 **巡检重写**：守恒两轮确认+方向性镜像（幻影臂陈旧 ic 不告警——P0-① 修复；confirm-lost 臂 pend==0 才动——告警永动解药）；deep 独立单线程（v2 P1）；白名单五条件；只告警清单（活跃态才检 void 异常——实施期修正②）；心跳键/风暴聚合/transient 5min 计数（M2 熔断动作）/维护豁免/连续 FORCE≥2 熔断修复环；影子模式默认（v3-8，生产观察后切 force）。
 **V8**：idx_tpl×64（守卫 COUNT 从全表扫到索引）+ drift_log 加 redis_void/disposition 列。**A4 作废口径**（ADR 实施增补）：作废不回补（dbi 是"已发放"非"当前有效"；回补=超发）、必落 INVALIDATED 事件（财务核销）、M6 工具按此实现。
-**实施期三修正**：①跨语言契约 Bug 二进宫（soldout vs sold_out——void 静默失效，测试当场暴露；契约注释写死）②"不可能态"守卫误拦退役修复（改活跃态才检）③shadow 不得 clearSoldout（单测抓）。
+**实施后多方评审 8 条全修**（守卫④/日审 TOCTOU 新鲜重读、NX 精确稳态式（dbi:=ic−pend——迟到 confirm 竞态归 confirm-lost 自愈方向）、升级检查归位 recordDrift、publish 落 RESET 审计、心跳检查先观测后续命、修复开关在线路径 c:reconcile:mode）。**实施期三修正**：①跨语言契约 Bug 二进宫（soldout vs sold_out——void 静默失效，测试当场暴露；契约注释写死）②"不可能态"守卫误拦退役修复（改活跃态才检）③shadow 不得 clearSoldout（单测抓）。
 **认账**：REBUILD·NX 全清库形态近似（§8.3——清库风暴测试从"精确断言"改为"守恒 FORCE 收敛后精确"）；领取重试 ul 自愈的 L3 已于 2026-09-15 前置实施。
 
 ### 安全底册+IP 频控最小版（2026-09-16，用户裁定"文档完整+先做必须且重要的"）

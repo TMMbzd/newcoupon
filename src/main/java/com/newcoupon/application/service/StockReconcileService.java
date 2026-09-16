@@ -121,8 +121,8 @@ public class StockReconcileService {
             return 0;
         }
         try {
+            checkHeartbeatLiveness();   // 评审#6 修复：先观测后续命——写在前面会把键刚续命就读到，告警永不可达
             writeHeartbeat();
-            checkHeartbeatLiveness();
             List<CouponTemplate> published = templateRepository.findPublished();
             int confirmed = 0;
             int suspectedThisRound = 0;
@@ -298,14 +298,22 @@ public class StockReconcileService {
             return;
         }
         deferredRounds.set(0);
-        // 白名单④：DB 账实互证（首条即升级人工——ic 不可信时修复失去基准）
+        // 白名单④：DB 账实互证。评审#1 修复（2026-09-16）：COUNT 是 64 分表扇出的独立快照，
+        // 读取晚于 ic 数十毫秒——窗口内领券提交使 COUNT>ic 恒为读偏斜（全库无 ic 递减/行删除，
+        // 诚实态失配只可能是 COUNT 偏大）。失配时按主键重读新鲜 ic 再判（幻影臂同款惯例），
+        // 仍失配才是真账本矛盾——消灭流量期假 GUARD_FAILED（首条升级人工的立即叫醒级误报）。
         Long couponCount = userCouponRepository.countByTemplate(templateId);
         if (couponCount != ic) {
-            log.error("GUARD FAILED: ic({}) != COUNT(user_coupon)({})——账本自相矛盾，冻结一切自动动作: "
-                    + "templateId={}", ic, couponCount, templateId);
-            recordDrift(new DriftEvent(templateId, 0, r.dbi(), r.pend(), total, ic, couponCount, r.stk(),
-                    0, "GUARD_FAILED", reason, r.voidRetired(), null));
-            return;
+            CouponTemplate freshT = templateRepository.findById(templateId).orElse(null);
+            long freshIc = freshT == null ? ic : freshT.getIssuedCount();
+            if (freshT == null || couponCount != freshIc) {
+                log.error("GUARD FAILED: 新鲜ic({}) != COUNT(user_coupon)({})——账本自相矛盾，冻结一切自动动作: "
+                        + "templateId={}", freshIc, couponCount, templateId);
+                recordDrift(new DriftEvent(templateId, 0, r.dbi(), r.pend(), total, freshIc, couponCount, r.stk(),
+                        0, "GUARD_FAILED", reason, r.voidRetired(), null));
+                return;
+            }
+            ic = freshIc;   // 读偏斜止步：新鲜 ic 追平 COUNT，用新值继续后续推导
         }
         // 只告警形态：total 被调小 / 活跃态 void 异常——仅对【活跃态】检查（so 已立或 ic≥total
         // 的退役态，污染余量正是 FORCE retired 分支要归零的对象，不得在此拦截——2026-09-16
@@ -338,7 +346,22 @@ public class StockReconcileService {
             return;
         }
 
+        // 评审#7 修复：开关在线路径（ADR v3-8"Redis 全局键分钟级生效"）——c:reconcile:mode
+        // 存在时覆盖静态配置（force/shadow/off：off=全跳过修复含影子推导），无键时用 @Value 默认。
         String mode = "shadow".equals(repairMode) ? "shadow" : "force";
+        if (auxReady()) {
+            try {
+                String online = aux().opsForValue().get("c:reconcile:mode");
+                if (online != null && !online.isBlank()) {
+                    if ("off".equalsIgnoreCase(online.trim())) {
+                        log.warn("repair loop OFFLINE by c:reconcile:mode=off——本轮跳过修复（含影子推导）");
+                        return;
+                    }
+                    mode = "shadow".equalsIgnoreCase(online.trim()) ? "shadow" : "force";
+                }
+            } catch (RuntimeException ignore) {
+            }
+        }
         RebuildResult res = stockGateway.rebuild(templateId, mode, total, ic, inflightTtlMs,
                 r.dbi(), r.voidRetired());   // 栅栏快照=与修复参数同批读得（非目标 ic）
         if (res.ret() == -1) {
@@ -367,7 +390,6 @@ public class StockReconcileService {
             log.warn("conservation SHADOW repair (derived only, no SET): templateId={}, 应为 stk={}, dbi={}, "
                     + "void={} ({})", templateId, res.stk(), res.dbi(), res.voidRetired(), reason);
         }
-        escalateIfRepeated(templateId);
     }
 
     // ==================== 懒重建（-7 领券可用性路径——总开关不拦） ====================
@@ -399,13 +421,19 @@ public class StockReconcileService {
                 try {
                     long count = userCouponRepository.countByTemplate(t.getId());
                     if (count != t.getIssuedCount()) {
-                        log.error("DAILY AUDIT FAILED: templateId={} issued_count={} != COUNT(user_coupon)={} "
-                                + "→ 人工介入", t.getId(), t.getIssuedCount(), count);
-                        recordDrift(new DriftEvent(t.getId(), 0, 0, 0,
-                                t.getTotalCount(), t.getIssuedCount(), count,
-                                stockGateway.remaining(t.getId()), 0,
-                                "AUDIT_FAILED", "T+1 互证失败：DB 账本与券明细不一致",
-                                stockGateway.conservation(t.getId(), inflightTtlMs).voidRetired(), null));
+                        // 评审#3 修复：列表快照的 ic 在长循环里陈旧（前序模板的 64 分表 COUNT 累加窗口），
+                        // 失配先按主键重读新鲜 ic 再判——消灭 7×24 热模板每夜假"人工介入"
+                        CouponTemplate freshT = templateRepository.findById(t.getId()).orElse(null);
+                        long freshIc = freshT == null ? t.getIssuedCount() : freshT.getIssuedCount();
+                        if (freshT == null || count != freshIc) {
+                            log.error("DAILY AUDIT FAILED: templateId={} 新鲜ic({}) != COUNT(user_coupon)({}) "
+                                    + "→ 人工介入", t.getId(), freshIc, count);
+                            recordDrift(new DriftEvent(t.getId(), 0, 0, 0,
+                                    t.getTotalCount(), freshIc, count,
+                                    stockGateway.remaining(t.getId()), 0,
+                                    "AUDIT_FAILED", "T+1 互证失败（新鲜读数）：DB 账本与券明细不一致",
+                                    stockGateway.conservation(t.getId(), inflightTtlMs).voidRetired(), null));
+                        }
                     }
                 } catch (Exception e) {
                     log.error("daily audit failed (isolated, continue): templateId={}", t.getId(), e);
@@ -625,6 +653,7 @@ public class StockReconcileService {
         try {
             driftLog.record(e);
             lastLogAt.put(e.templateId(), now);   // 修序：insert 成功后才占限频窗（DB 故障期不烧窗）
+            escalateIfRepeated(e.templateId());   // 评审#4/#8 修复：升级检查统一在此（ADR §4 原文——任意 action 计数，覆盖 ALARM_ONLY/GUARD_FAILED/REPAIR_LOOP 等全部只告警形态）
         } catch (RuntimeException ex) {
             log.error("drift log write failed (must not block reconcile): {}", e, ex);
         }

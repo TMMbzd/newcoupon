@@ -132,6 +132,17 @@ stk + ZCARD(pend,清扫后) + dbi + void ≡ total        （期望精确相等�
 - **M6 客服作废工具落地时**按此口径实现（双人复核+作废原因入事件 detail）；对账侧无需新增检查——第二不变式（ic↔COUNT）覆盖行存在性，作废不改行数。
 - **与 void 的区分**（一句话）：void 是"发放前的退役"（令牌没变成券）；INVALIDATE 是"发放后的作废"（券存在但失效）。前者动守恒键，后者只动券状态+事件。
 
+### 实施后多方评审（2026-09-16，四视角×17 agent，8 条确认全修）
+
+| # | 发现 | 修复 |
+|---|---|---|
+| 1【medium】 | 守卫④ TOCTOU：ic 与 COUNT 两个独立快照（后者 64 分表扇出晚数十毫秒），窗口内领券提交→假 GUARD_FAILED（立即叫醒级误报，流量期每轮复发） | 失配时按主键重读新鲜 ic 再判（幻影臂同款惯例——v2 给幻影臂修过同类，守卫④漏了）；日审同款（#3） |
+| 2【low】 | NX 的 dbi:=ic 与迟到 confirm 竞态成 dbi=ic+1——幻影臂永响假 P0 且无自愈（方向保守：1 张被囚禁） | NX 改精确稳态式：dbi:=max(0, ic−pend)（稳态 ic=dbi+pend）、stk:=max(0,total−ic−void)——残余误差落 confirm-lost 臂（有 FORCE 自愈路径的方向） |
+| 4/8【medium】 | 24h≥5 升级检查只在 deep 修复成功路径——ALARM_ONLY/GUARD_FAILED/REPAIR_LOOP 等只告警形态永不计入 | escalateIfRepeated 移入 recordDrift insert 成功后（§4 原文"统一在 recordDrift 内执行"） |
+| 5【low】 | publish 整本重置（唯一能整本改写五键的路径）无审计落表 | 重置前读旧五键落 RESET 行（drift_log） |
+| 6【medium】 | 心跳存活检查在写入之后同轮执行——SET 先续命再 GET，告警永不可达 | checkHeartbeatLiveness 移到 writeHeartbeat 之前 |
+| 7【medium】 | 影子/force 切换无在线路径（@Value 静态注入要重启——v3-8 承诺"Redis 全局键分钟级生效"） | deep 前读 c:reconcile:mode（force/shadow/off，off=全跳过含影子推导），覆盖静态配置 |
+
 ### 实施期修正三则（2026-09-16）
 
 1. **跨语言契约 Bug 二进宫**：CANCEL Lua 判 `mode=='soldout'` 而 Java 传 `SOLD_OUT→"sold_out"`——售罄终态静默失效（void 永不+1），集成测试 void 断言当场暴露。已统一 `sold_out` 并在脚本头写死契约注释。ADR-0008 时代同类 Bug 的精确复刻——教训升级：**mode 类字符串契约必须在脚本头注释里写死 Java 侧的真实生成规则**。

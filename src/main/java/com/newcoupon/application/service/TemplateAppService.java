@@ -9,6 +9,7 @@ import com.newcoupon.domain.coupon.ValidType;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.PublishStatus;
 import com.newcoupon.domain.repository.TemplateRepository;
+import com.newcoupon.infrastructure.persistence.StockDriftLogGateway;
 import com.newcoupon.infrastructure.redis.RedisStockGateway;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -38,12 +39,15 @@ public class TemplateAppService {
 
     private final TemplateRepository templateRepository;
     private final RedisStockGateway redisStockGateway;
+    private final com.newcoupon.infrastructure.persistence.StockDriftLogGateway driftLog;
 
     // 构造器注入（而非字段 @Autowired）：依赖显式、不可变、单测可直接 new——企业规范
     public TemplateAppService(TemplateRepository templateRepository,
-                              RedisStockGateway redisStockGateway) {
+                              RedisStockGateway redisStockGateway,
+                              StockDriftLogGateway driftLog) {
         this.templateRepository = templateRepository;
         this.redisStockGateway = redisStockGateway;
+        this.driftLog = driftLog;
     }
 
     /** 建券：生成业务编码 → 聚合工厂校验 → 落库（通用限领 1~99 自 ADR-0006 开放） */
@@ -89,9 +93,16 @@ public class TemplateAppService {
         // 发布=整本重置协议（ADR-0009 §2）：stk=total−ic、dbi:=ic、DEL pend、void:=0、DEL so——
         // 重新上线必须走此协议（否则触发"囚禁告警"：剩余量被 void 吞掉）
         CouponTemplate published = templateRepository.findById(id).orElseThrow();
+        // 评审#5 修复：重置前读旧五键落 RESET 审计行（唯一能整本改写五键的路径不得在对账黑匣子里）
+        var before = redisStockGateway.conservation(id, 180_000);
         redisStockGateway.resetAll(id, published.getTotalCount(), published.getIssuedCount());
-        log.info("template published (resetAll): id={}, stk={}, dbi={}",
-                id, published.getTotalCount() - published.getIssuedCount(), published.getIssuedCount());
+        driftLog.record(new StockDriftLogGateway.DriftEvent(id, 0, before.dbi(), before.pend(),
+                published.getTotalCount(), published.getIssuedCount(), null,
+                before.stk(), before.sum() - published.getTotalCount(),
+                "RESET", "发布/重新上线整本重置（前读数留档）", before.voidRetired(), null));
+        log.info("template published (resetAll): id={}, stk={}, dbi={}, 前读数 stk={} pend={} dbi={} void={}",
+                id, published.getTotalCount() - published.getIssuedCount(), published.getIssuedCount(),
+                before.stk(), before.pend(), before.dbi(), before.voidRetired());
     }
 
     /** 查询模板详情 */

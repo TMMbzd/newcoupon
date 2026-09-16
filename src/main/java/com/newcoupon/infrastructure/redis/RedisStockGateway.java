@@ -128,7 +128,8 @@ public class RedisStockGateway {
      * 重建（NX|FORCE 合并原 LAZY_REBUILD+REPAIR；ADR-0009 §2/§4）。
      * ARGV: 1 mode('nx'|'force'|'shadow')  2 total  3 ic  4 inflightTtlMs  5 dbiObs  6 voidObs
      * NX（-7 懒重建，领券可用性路径——总开关不拦）：清扫；stk 存在→放弃（清库风暴首个生效）；
-     *   否则 dbi 缺失→SET dbi:=ic；SET stk=max(0,total−dbi−ZCARD−void)。选择性丢失精确、全清库近似。
+     *   dbi 缺失→SET dbi:=max(0, ic−pend)（评审#2 精确稳态式——稳态 ic=dbi+pend；旧式 dbi:=ic
+     *   与迟到 confirm 构成 dbi=ic+1 幻影永响）；stk=max(0,total−ic−void)（ic 已含在途）。
      * FORCE（守卫修复）：ZCARD 门（在途非空→-1 推迟）；双键栅栏（GET dbi≠dbiObs 或 GET void≠voidObs
      *   →-2 中止——封"读数与执行之间混入 confirm/terminal"；纯 confirm-lost 形态 dbiObs&lt;ic 放行）；
      *   分支推导：退役态（so 存在或 ic≥total）→ stk=0,dbi=ic,void=total−ic（污染洗白归零）；
@@ -147,13 +148,22 @@ public class RedisStockGateway {
             local pend = redis.call('ZCARD', KEYS[2])
             if mode == 'nx' then
               if redis.call('EXISTS', KEYS[1]) == 1 then return {0, 0, 0, 0} end
-              local dbiV = tonumber(redis.call('GET', KEYS[3]) or '0')
-              if redis.call('EXISTS', KEYS[3]) == 0 then
-                dbiV = ic
-                redis.call('SET', KEYS[3], ic)
-              end
               local voidV = tonumber(redis.call('GET', KEYS[4]) or '0')
-              local stkV = math.max(0, total - dbiV - pend - voidV)
+              local dbiV
+              if redis.call('EXISTS', KEYS[3]) == 0 then
+                -- 评审#2 修复（精确稳态式）：稳态恒等式 ic = dbi + pend（每张已提交的券要么
+                -- confirm 过（dbi）要么令牌还在途（pend））。dbi 缺失时按 ic−pend 推导，
+                -- 而非旧写法的 dbi:=ic——旧写法让跨越重建的迟到 confirm 再 INCR 一次成
+                -- dbi=ic+1（幻影臂永响假 P0 且无自愈）；精确式把残余误差留给 confirm-lost
+                -- 臂（ic−dbi>0 且 pend==0 → deep → FORCE 精确归位——有自愈路径的方向）
+                dbiV = math.max(0, ic - pend)
+                redis.call('SET', KEYS[3], dbiV)
+              else
+                dbiV = tonumber(redis.call('GET', KEYS[3]))
+              end
+              -- stk 同步改精确式：ic 已含在途，不再重复扣 pend（旧式 total−dbi−pend−void
+              -- 在 dbi:=ic−pend 推导下等价于 total−ic−void，直接写显式真值）
+              local stkV = math.max(0, total - ic - voidV)
               redis.call('SET', KEYS[1], stkV)
               return {1, stkV, dbiV, voidV}
             end

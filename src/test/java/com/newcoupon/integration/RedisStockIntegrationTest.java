@@ -221,7 +221,8 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(stockGateway.pendingCount(tplId)).isZero();
         assertThat(stockGateway.conservation(tplId, 300).sum() - 100L).isZero();
         assertThat(driftLogGateway.countSince(tplId, LocalDateTime.now().minusMinutes(5)))
-                .as("漂移必须留痕（审计与升级依据）").isEqualTo(1);
+                .as("漂移必须留痕（审计与升级依据；含 publish 的 RESET 审计行——评审#5 后发布也落表）")
+                .isGreaterThanOrEqualTo(1);
     }
 
     @Test
