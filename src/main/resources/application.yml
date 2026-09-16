@@ -40,6 +40,12 @@ coupon:
   # L5 锁定超时窗口（分钟）：与订单域支付超时契约对齐（订单超时取消=券超时收场，两边同步死）
   trade:
     lock-timeout-minutes: ${LOCK_TIMEOUT_MINUTES:30}
+  # 风控前置最小版（docs/11 §6）：IP 频控固定窗口——挡脚本高频领券；fail-open
+  risk:
+    ip-rate:
+      enabled: true
+      window-seconds: 60
+      max-per-window: 30
 
 mybatis-plus:
   configuration:
