@@ -47,38 +47,52 @@ public interface UserCouponMapper extends BaseMapper<UserCouponPO> {
     @Select("SELECT * FROM user_coupon WHERE status = 1 LIMIT #{limit}")
     java.util.List<UserCouponPO> selectLocked(@Param("limit") int limit);
 
+    /** 热路径路由版主键查询（A1）：锁券入口先查券——带 user_id 单分表命中，
+     *  替代 findById 的 64 表广播（findById 保留给拿不到 userId 的冷路径） */
+    @Select("SELECT * FROM user_coupon WHERE id = #{id} AND user_id = #{userId}")
+    UserCouponPO selectByIdForUser(@Param("id") long id, @Param("userId") long userId);
+
     // ---------- 状态迁移 CAS（每条 = 状态机一条合法边） ----------
+    // 路由纪律（2026-09-16 大厂审查 A1）：全部谓词含 user_id——分片键随行，
+    // 否则每条 UPDATE 广播 64 物理分表（核销/收场热路径的隐性放大器）。
+    // 调用方全部持有 userId（请求携带或先查到 usage/coupon）。
 
     /** 锁券：待使用→已锁定；条件含未过期（过期的券锁了也用不了） */
-    @Update("UPDATE user_coupon SET status = 1 WHERE id = #{id} AND status = 0 AND valid_end > NOW()")
-    int casLock(@Param("id") long id);
+    @Update("UPDATE user_coupon SET status = 1 WHERE id = #{id} AND user_id = #{userId} "
+            + "AND status = 0 AND valid_end > NOW()")
+    int casLock(@Param("id") long id, @Param("userId") long userId);
 
     /** 核销：已锁定→已核销（终态）。L2 补有效期谓词——锁定期间过期的券核销被拒（资损防线，0行→编排层分类收场） */
-    @Update("UPDATE user_coupon SET status = 2 WHERE id = #{id} AND status = 1 AND valid_end > NOW()")
-    int casConfirm(@Param("id") long id);
+    @Update("UPDATE user_coupon SET status = 2 WHERE id = #{id} AND user_id = #{userId} "
+            + "AND status = 1 AND valid_end > NOW()")
+    int casConfirm(@Param("id") long id, @Param("userId") long userId);
 
     // ---------- L2 过期流转（2026-09-12） ----------
 
     /** 到期未使用（CAS）：待使用→已过期，守卫"确已到期"——重复触发影响 0 行（幂等） */
-    @Update("UPDATE user_coupon SET status = 3 WHERE id = #{id} AND status = 0 AND valid_end <= NOW()")
-    int casExpireUsable(@Param("id") long id);
+    @Update("UPDATE user_coupon SET status = 3 WHERE id = #{id} AND user_id = #{userId} "
+            + "AND status = 0 AND valid_end <= NOW()")
+    int casExpireUsable(@Param("id") long id, @Param("userId") long userId);
 
     /** 锁定中过期（CAS）：已锁定→已过期，守卫"确已到期" */
-    @Update("UPDATE user_coupon SET status = 3 WHERE id = #{id} AND status = 1 AND valid_end <= NOW()")
-    int casExpireOnLock(@Param("id") long id);
+    @Update("UPDATE user_coupon SET status = 3 WHERE id = #{id} AND user_id = #{userId} "
+            + "AND status = 1 AND valid_end <= NOW()")
+    int casExpireOnLock(@Param("id") long id, @Param("userId") long userId);
 
     /** T+1 审计：仍待使用但过期超 10 分钟的券（漏注册任务的兜底，走 idx_expire） */
     @Select("SELECT id FROM user_coupon WHERE status = 0 AND valid_end < NOW() - INTERVAL 10 MINUTE LIMIT #{limit}")
     java.util.List<Long> selectExpiredUsableIds(@Param("limit") int limit);
 
     /** 释放：已锁定→未过期?待使用:已过期（过期券不能退回可用态） */
-    @Update("UPDATE user_coupon SET status = IF(valid_end > NOW(), 0, 3) WHERE id = #{id} AND status = 1")
-    int casRelease(@Param("id") long id);
+    @Update("UPDATE user_coupon SET status = IF(valid_end > NOW(), 0, 3) WHERE id = #{id} "
+            + "AND user_id = #{userId} AND status = 1")
+    int casRelease(@Param("id") long id, @Param("userId") long userId);
 
     // ---------- L5 锁定超时收场（2026-09-15） ----------
 
     /** 锁定超时收场（CAS）：已锁定→(未过期?待使用:已过期)——与 casRelease 同款 IF 分流；
      *  对券与用户资产而言，订单取消与订单超时死亡结果一致，差异在占用单终态(4)与事件类型。 */
-    @Update("UPDATE user_coupon SET status = IF(valid_end > NOW(), 0, 3) WHERE id = #{id} AND status = 1")
-    int casTimeoutClose(@Param("id") long id);
+    @Update("UPDATE user_coupon SET status = IF(valid_end > NOW(), 0, 3) WHERE id = #{id} "
+            + "AND user_id = #{userId} AND status = 1")
+    int casTimeoutClose(@Param("id") long id, @Param("userId") long userId);
 }

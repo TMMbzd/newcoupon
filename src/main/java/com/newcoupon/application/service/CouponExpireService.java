@@ -127,10 +127,10 @@ public class CouponExpireService {
                     && !coupon.getValidEnd().isAfter(LocalDateTime.now());
             boolean transitioned = false;
             if (expired && coupon.getStatus() == CouponStatus.USABLE) {
-                transitioned = userCouponRepository.casExpireUsable(couponId);
+                transitioned = userCouponRepository.casExpireUsable(couponId, coupon.getUserId());
             } else if (expired && coupon.getStatus() == CouponStatus.LOCKED) {
                 // 锁定中过期：券收终态 + 占用单过期关闭（用户不再来核销/取消时的兜底收场）
-                transitioned = userCouponRepository.casExpireOnLock(couponId);
+                transitioned = userCouponRepository.casExpireOnLock(couponId, coupon.getUserId());
                 if (transitioned) {
                     couponUsageRepository.casExpireByCouponId(couponId);
                 } else {
@@ -140,7 +140,7 @@ public class CouponExpireService {
                     // 重读券：确已回池且仍到期 → 改走"待使用过期"分支当场收掉。
                     UserCoupon fresh = userCouponRepository.findById(couponId).orElse(null);
                     if (fresh != null && fresh.getStatus() == CouponStatus.USABLE) {
-                        transitioned = userCouponRepository.casExpireUsable(couponId);
+                        transitioned = userCouponRepository.casExpireUsable(couponId, coupon.getUserId());
                     }
                 }
             } else if (expired && coupon.getStatus() == CouponStatus.EXPIRED) {

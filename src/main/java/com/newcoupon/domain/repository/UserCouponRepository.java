@@ -26,8 +26,11 @@ public interface UserCouponRepository {
     /** L4 交叉核对：全部锁定中的券（在途锁定=小集合） */
     List<UserCoupon> selectLocked(int limit);
 
-    /** 按主键查询：用券三段与读回断言用 */
+    /** 按主键查询：用券三段与读回断言用（无 user_id→64 表广播，冷路径用） */
     Optional<UserCoupon> findById(long id);
+
+    /** 热路径路由版主键查询（A1）：带分片键单表命中——锁券入口专用 */
+    Optional<UserCoupon> findByIdForUser(long id, long userId);
 
     /** 查用户的券列表（status 为 null 查全部）："我的券包"接口用 */
     List<UserCoupon> findByUser(long userId, CouponStatus status);
@@ -38,28 +41,28 @@ public interface UserCouponRepository {
     // ---------- 状态迁移 CAS（每条对应状态机一条合法边） ----------
 
     /** 锁券（CAS）：待使用→已锁定，条件含"未过期"。返回是否成功 */
-    boolean casLock(long userCouponId);
+    boolean casLock(long userCouponId, long userId);
 
     /** 核销（CAS）：已锁定→已核销（终态）。返回是否成功 */
-    boolean casConfirm(long userCouponId);
+    boolean casConfirm(long userCouponId, long userId);
 
     /**
      * 释放（CAS）：已锁定→(未过期?待使用:已过期)——释放时券若已过期直接进过期态，
      * 不能退回"待使用"（否则出现"能用的过期券"）。返回是否成功
      */
-    boolean casRelease(long userCouponId);
+    boolean casRelease(long userCouponId, long userId);
 
     // ---------- L2 过期流转（2026-09-12） ----------
 
     /** 到期未使用（CAS）：待使用→已过期（终态）。重复触发影响 0 行 */
-    boolean casExpireUsable(long userCouponId);
+    boolean casExpireUsable(long userCouponId, long userId);
 
     /** 锁定中过期（CAS）：已锁定→已过期（终态），守卫"确已到期" */
-    boolean casExpireOnLock(long userCouponId);
+    boolean casExpireOnLock(long userCouponId, long userId);
 
     /** T+1 审计：仍待使用但过期超 10 分钟的券 id（漏注册任务兜底，走 idx_expire） */
     java.util.List<Long> selectExpiredUsableIds(int limit);
 
     /** L5 锁定超时收场（CAS）：已锁定→(未过期?待使用:已过期)——订单沉默时系统兜底，IF 分流同释放 */
-    boolean casTimeoutClose(long userCouponId);
+    boolean casTimeoutClose(long userCouponId, long userId);
 }

@@ -54,6 +54,12 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     }
 
     @Override
+    public Optional<UserCoupon> findByIdForUser(long id, long userId) {
+        return Optional.ofNullable(mapper.selectByIdForUser(id, userId))
+                .map(UserCouponPOConverter::toDomain);
+    }
+
+    @Override
     public Optional<UserCoupon> findById(long id) {
         return Optional.ofNullable(mapper.selectById(id))
                 .map(UserCouponPOConverter::toDomain);
@@ -75,30 +81,30 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     }
 
     @Override
-    public boolean casLock(long userCouponId) {
-        return mapper.casLock(userCouponId) == 1;
+    public boolean casLock(long userCouponId, long userId) {
+        return mapper.casLock(userCouponId, userId) == 1;
     }
 
     @Override
-    public boolean casConfirm(long userCouponId) {
-        return mapper.casConfirm(userCouponId) == 1;
+    public boolean casConfirm(long userCouponId, long userId) {
+        return mapper.casConfirm(userCouponId, userId) == 1;
     }
 
     @Override
-    public boolean casRelease(long userCouponId) {
-        return mapper.casRelease(userCouponId) == 1;
+    public boolean casRelease(long userCouponId, long userId) {
+        return mapper.casRelease(userCouponId, userId) == 1;
     }
 
     // ---------- L2 过期流转（2026-09-12） ----------
 
     @Override
-    public boolean casExpireUsable(long userCouponId) {
-        return mapper.casExpireUsable(userCouponId) == 1;
+    public boolean casExpireUsable(long userCouponId, long userId) {
+        return mapper.casExpireUsable(userCouponId, userId) == 1;
     }
 
     @Override
-    public boolean casExpireOnLock(long userCouponId) {
-        return mapper.casExpireOnLock(userCouponId) == 1;
+    public boolean casExpireOnLock(long userCouponId, long userId) {
+        return mapper.casExpireOnLock(userCouponId, userId) == 1;
     }
 
     @Override
@@ -107,7 +113,7 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     }
 
     @Override
-    public boolean casTimeoutClose(long userCouponId) {
-        return mapper.casTimeoutClose(userCouponId) == 1;
+    public boolean casTimeoutClose(long userCouponId, long userId) {
+        return mapper.casTimeoutClose(userCouponId, userId) == 1;
     }
 }

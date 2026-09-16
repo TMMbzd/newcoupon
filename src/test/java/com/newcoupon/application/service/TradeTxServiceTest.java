@@ -3,6 +3,7 @@ package com.newcoupon.application.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -68,8 +69,8 @@ class TradeTxServiceTest {
     @Test
     @DisplayName("锁券：状态迁移+建占用单+记锁定事件，返回 usageNo=订单号:券id")
     void lockHappyPath() {
-        when(userCouponRepository.findById(5L)).thenReturn(Optional.of(coupon(CouponStatus.USABLE)));
-        when(userCouponRepository.casLock(5L)).thenReturn(true);
+        when(userCouponRepository.findByIdForUser(5L, 42L)).thenReturn(Optional.of(coupon(CouponStatus.USABLE)));
+        when(userCouponRepository.casLock(5L, 42L)).thenReturn(true);
         when(couponUsageRepository.save(any())).thenAnswer(inv -> inv.<CouponUsage>getArgument(0).withId(9L));
 
         LockResult r = service.lock(new LockRequest("ORD-1", 42L, 5L), NOW);
@@ -82,11 +83,13 @@ class TradeTxServiceTest {
     @Test
     @DisplayName("锁券：券不属于该用户 → 拒绝（防拿他人券下单），CAS 不发生")
     void lockRejectsForeignCoupon() {
-        when(userCouponRepository.findById(5L)).thenReturn(Optional.of(coupon(CouponStatus.USABLE)));
+        // 券的 userId=42（coupon() 工厂固定 42），请求用 99——路由查询带 99 落空
+        // → 直接"券不存在"（这也正是路由键防越权的副产物：查别人+带错号=查不到）
+        when(userCouponRepository.findByIdForUser(5L, 99L)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.lock(new LockRequest("ORD-1", 99L, 5L), NOW))   // 用户99
-                .hasMessageContaining("不属于");
-        verify(userCouponRepository, never()).casLock(5L);
+                .isInstanceOf(com.newcoupon.common.BizException.class);   // USER_COUPON_NOT_FOUND
+        verify(userCouponRepository, never()).casLock(anyLong(), anyLong());
     }
 
     @Test

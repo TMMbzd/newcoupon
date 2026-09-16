@@ -64,13 +64,13 @@ public class TradeTxService {
 
     @Transactional
     public LockResult lock(LockRequest req, LocalDateTime now) {
-        UserCoupon coupon = userCouponRepository.findById(req.couponId())
+        UserCoupon coupon = userCouponRepository.findByIdForUser(req.couponId(), req.userId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND, "id=" + req.couponId()));
         if (coupon.getUserId() != req.userId()) {
             throw new BizException(ErrorCode.STATE_CONFLICT, "券不属于该用户（防拿他人券下单）");
         }
         CouponStateMachine.transit(coupon.getStatus(), CouponTransition.LOCK);   // 内存快检：USABLE→LOCKED
-        if (!userCouponRepository.casLock(req.couponId())) {
+        if (!userCouponRepository.casLock(req.couponId(), req.userId())) {
             throw new TradeCasRejectedException("coupon-lock", req.couponId());
         }
         String usageNo = req.orderNo() + ":" + req.couponId();
@@ -99,7 +99,7 @@ public class TradeTxService {
         }
         UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
-        if (!userCouponRepository.casConfirm(usage.getUserCouponId())) {
+        if (!userCouponRepository.casConfirm(usage.getUserCouponId(), usage.getUserId())) {
             throw new TradeCasRejectedException("coupon-confirm", usage.getUserCouponId());
         }
         couponEventRepository.append(CouponEvent.used(coupon, usage, req.discountAmt(), now));
@@ -126,7 +126,7 @@ public class TradeTxService {
         if (!couponUsageRepository.casExpireByUsageNo(usageNo)) {
             throw new TradeCasRejectedException("usage-expire", usageNo);
         }
-        if (!userCouponRepository.casExpireOnLock(couponId)) {
+        if (!userCouponRepository.casExpireOnLock(couponId, usage.getUserId())) {
             throw new TradeCasRejectedException("coupon-expire-on-lock", couponId);
         }
         couponEventRepository.append(CouponEvent.expired(coupon, usage, now));
@@ -150,7 +150,7 @@ public class TradeTxService {
             return false;   // 券已不在锁定态（异常残留）——不动，交由审计/人工
         }
         CouponStateMachine.transit(coupon.getStatus(), CouponTransition.LOCK_TIMEOUT);   // 快检：LOCKED→USABLE
-        if (!userCouponRepository.casTimeoutClose(coupon.getId())) {
+        if (!userCouponRepository.casTimeoutClose(coupon.getId(), usage.getUserId())) {
             return false;   // CAS 输家：核销/释放/过期收场恰好在同瞬间完成
         }
         couponUsageRepository.casTimeoutByUsageNo(usageNo);
@@ -176,7 +176,7 @@ public class TradeTxService {
         }
         UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
-        if (!userCouponRepository.casRelease(usage.getUserCouponId())) {
+        if (!userCouponRepository.casRelease(usage.getUserCouponId(), usage.getUserId())) {
             throw new TradeCasRejectedException("coupon-release", usage.getUserCouponId());
         }
         couponEventRepository.append(CouponEvent.released(coupon, usage, now));

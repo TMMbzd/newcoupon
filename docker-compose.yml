@@ -31,11 +31,12 @@ services:
     image: redis:7-alpine
     container_name: newcoupon-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]   # AOF 持久化：阶段1 库存扣减的数据安全底线
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]   # 配置基线见 docker/redis/redis.conf（A2）
     ports:
       - "6379:6379"
     volumes:
       - redis-data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
 
   # XXL-JOB 调度中心（ADR-0010）：调度/控制台/执行留痕/分片广播。复用主 MySQL 的 xxl_job 库。
   xxl-job-admin:
