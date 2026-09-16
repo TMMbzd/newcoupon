@@ -17,11 +17,22 @@ import org.springframework.stereotype.Component;
 public class StockDriftLogGateway {
 
     /** 一条漂移事实：读数快照 + 判定动作 + 归因（字段含义见 V3 表注释） */
+    /** ADR-0009 V8：redisVoid=守恒第四态读数；disposition=处置回填（true/false误报/manual，可空）。
+     *  redisIssued 已废弃（issued 键族删除）——历史构造调用传 0，列保留 NULL 语义由 mapper 映射。 */
     public record DriftEvent(long templateId,
                              long redisIssued, long redisDbi, long redisPending,
                              long dbTotal, long dbIssued, Long couponCount,
                              Long redisStock, long delta,
-                             String action, String detail) {
+                             String action, String detail,
+                             Long redisVoid, String disposition) {
+
+        /** 兼容构造（无 void/disposition）——存量调用点 */
+        public DriftEvent(long templateId, long redisIssued, long redisDbi, long redisPending,
+                          long dbTotal, long dbIssued, Long couponCount, Long redisStock, long delta,
+                          String action, String detail) {
+            this(templateId, redisIssued, redisDbi, redisPending, dbTotal, dbIssued,
+                    couponCount, redisStock, delta, action, detail, null, null);
+        }
     }
 
     private final StockDriftLogMapper mapper;
@@ -43,6 +54,8 @@ public class StockDriftLogGateway {
         po.setRedisStock(e.redisStock());
         po.setDelta(e.delta());
         po.setAction(e.action());
+        po.setRedisVoid(e.redisVoid());
+        po.setDisposition(e.disposition());
         po.setDetail(e.detail());
         mapper.insert(po);
     }

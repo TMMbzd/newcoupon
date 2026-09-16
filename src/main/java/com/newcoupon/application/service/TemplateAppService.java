@@ -86,11 +86,12 @@ public class TemplateAppService {
             throw new BizException(ErrorCode.STATE_CONFLICT,
                     "发布失败：模板状态已被并发变更，请刷新后重试");
         }
-        // 发布即初始化 Redis 可扣额度 = 审批总量 - 已发放（ADR-0006：Redis是闸门，DB是账本）
+        // 发布=整本重置协议（ADR-0009 §2）：stk=total−ic、dbi:=ic、DEL pend、void:=0、DEL so——
+        // 重新上线必须走此协议（否则触发"囚禁告警"：剩余量被 void 吞掉）
         CouponTemplate published = templateRepository.findById(id).orElseThrow();
-        redisStockGateway.initStock(id, published.getTotalCount() - published.getIssuedCount());
-        log.info("template published: id={}, redisStock={}",
-                id, published.getTotalCount() - published.getIssuedCount());
+        redisStockGateway.resetAll(id, published.getTotalCount(), published.getIssuedCount());
+        log.info("template published (resetAll): id={}, stk={}, dbi={}",
+                id, published.getTotalCount() - published.getIssuedCount(), published.getIssuedCount());
     }
 
     /** 查询模板详情 */

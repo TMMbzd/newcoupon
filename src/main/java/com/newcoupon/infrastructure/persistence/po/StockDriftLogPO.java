@@ -23,6 +23,8 @@ public class StockDriftLogPO {
     private Long delta;
     private String action;
     private String detail;
+    private Long redisVoid;        // V8：守恒式第四态读数
+    private String disposition;    // V8：处置回填（true/false误报/manual）
     private LocalDateTime createTime;
 
     public Long getId() { return id; }
@@ -53,4 +55,9 @@ public class StockDriftLogPO {
     public void setDetail(String detail) { this.detail = detail; }
     public LocalDateTime getCreateTime() { return createTime; }
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }
+
+    public Long getRedisVoid() { return redisVoid; }
+    public void setRedisVoid(Long redisVoid) { this.redisVoid = redisVoid; }
+    public String getDisposition() { return disposition; }
+    public void setDisposition(String disposition) { this.disposition = disposition; }
 }

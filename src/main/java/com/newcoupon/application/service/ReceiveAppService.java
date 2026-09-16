@@ -185,6 +185,9 @@ public class ReceiveAppService {
     private void cancelQuietly(DeductCommand cmd, CancelCause cause) {
         try {
             stockGateway.cancel(cmd, cause);
+            if (cause == CancelCause.TRANSIENT) {
+                reconcileService.noteTransientCancel(cmd.templateId());   // ADR-0009 §4：取消率熔断的计数
+            }
         } catch (RuntimeException e) {
             log.error("cancel failed (token left to TTL sweep, reconcile will heal): "
                     + "templateId={}, requestId={}, cause={}", cmd.templateId(), cmd.requestId(), cause, e);

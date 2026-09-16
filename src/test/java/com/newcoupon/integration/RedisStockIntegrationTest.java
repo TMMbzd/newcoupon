@@ -44,7 +44,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 @org.springframework.boot.test.context.SpringBootTest(properties = {
         "spring.datasource.hikari.maximum-pool-size=50",
         "coupon.reconcile.inflight-ttl-ms=300",       // 测试压缩在途 TTL（生产 180s）
-        "coupon.reconcile.log-min-interval-ms=0"      // 测试不限频，便于断言漂移表
+        "coupon.reconcile.log-min-interval-ms=0",     // 测试不限频，便于断言漂移表
+        "coupon.reconcile.auto-repair.mode=force"     // 本类验证修复行为（生产默认 shadow）
 })
 class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
 
@@ -79,6 +80,16 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
     /** P0③测试：day 由调用方固化传入——这里用"构造时刻的今天"（与生产编排层同语义） */
     private static final java.util.function.Supplier<String> TODAY =
             () -> java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"));
+
+    /** 等 deep 执行器跑完（异步单线程——提交后轮询其空闲，最多 5s） */
+    private void awaitDeep() throws Exception {
+        for (int i = 0; i < 50; i++) {
+            if (reconcileService.deepQueueIdle()) {
+                return;
+            }
+            Thread.sleep(100);
+        }
+    }
 
     private long createTemplate(long stock, Integer perUserLimit, Long dailyLimit, Integer perUserDaily) {
         TemplateAppService.CreatedTemplate t = templateAppService.create(new TemplateCreateRequest(
@@ -170,12 +181,11 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
             var tpl = templateRepository.findById(tplId).orElseThrow();
             assertThat(tpl.getIssuedCount()).isEqualTo(1000);
             assertThat(stockGateway.remaining(tplId))
-                    .as("Redis余量=总量-已发（取消记账无残留）").isEqualTo(tpl.getTotalCount() - 1000);
-            assertThat(stockGateway.issuedCount(tplId)).as("借方=1000").isEqualTo(1000);
-            assertThat(stockGateway.confirmedCount(tplId)).as("贷方=1000").isEqualTo(1000);
+                    .as("Redis余量=总量-已发（取消记账无残留）").isEqualTo(1000L - 1000);
+            assertThat(stockGateway.confirmedCount(tplId)).as("dbi=1000").isEqualTo(1000);
             assertThat(stockGateway.pendingCount(tplId)).as("在途=0").isZero();
-            assertThat(stockGateway.identity(tplId, 300).delta())
-                    .as("issued − dbi − pend ≡ 0").isZero();
+            assertThat(stockGateway.conservation(tplId, 300).sum() - 1000L)
+                    .as("守恒式：stk+pend+dbi+void=total").isZero();
         } finally {
             pool.shutdownNow();
         }
@@ -194,22 +204,22 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(stockGateway.remaining(tplId)).isEqualTo(99);
         assertThat(stockGateway.pendingCount(tplId)).isEqualTo(1);
 
-        // 在途 TTL(300ms) 内：恒等式仍成立（pend 持令牌）→ 首轮巡检不告警
-        assertThat(reconcileService.identityCheckAll()).as("在途期间不是漂移").isZero();
+        // 在途 TTL(300ms) 内：守恒式仍成立（stk99+pend1+dbi0+void0=100）→ 不告警
+        assertThat(reconcileService.checkOne(tplId)).as("在途期间不是漂移").isFalse();
 
         Thread.sleep(400);   // 令牌过期（生产=180s：DB锁等待50s的3倍）
 
-        // 第一轮：清理过期令牌 → delta=+1 → 只疑似（防一次性干扰）
-        assertThat(reconcileService.identityCheckAll()).isZero();
-        // 第二轮：仍在 → 确认 → 深对账：在途已清 + COUNT互证过 → 按 DB 口径重置三本账
-        assertThat(reconcileService.identityCheckAll()).isEqualTo(1);
+        // 第一轮：清扫过期令牌 → sum=99≠100 → 只疑似（防一次性干扰）
+        assertThat(reconcileService.checkOne(tplId)).isFalse();
+        // 第二轮：仍在 → 确认 → deep：白名单全过 → FORCE 按业务状态推导（活跃态 stk=100,dbi=ic=0,void=0）
+        assertThat(reconcileService.checkOne(tplId)).isTrue();
 
+        awaitDeep();
         assertThat(stockGateway.remaining(tplId))
-                .as("崩溃多扣的 1 个额度被找回（total-issued=100）").isEqualTo(100);
-        assertThat(stockGateway.issuedCount(tplId)).as("幽灵借方被抹掉").isZero();
-        assertThat(stockGateway.confirmedCount(tplId)).isZero();
+                .as("崩溃残留被守恒修复找回（FORCE 活跃分支 stk=total-ic=100）").isEqualTo(100);
+                assertThat(stockGateway.confirmedCount(tplId)).isZero();
         assertThat(stockGateway.pendingCount(tplId)).isZero();
-        assertThat(stockGateway.identity(tplId, 300).delta()).isZero();
+        assertThat(stockGateway.conservation(tplId, 300).sum() - 100L).isZero();
         assertThat(driftLogGateway.countSince(tplId, LocalDateTime.now().minusMinutes(5)))
                 .as("漂移必须留痕（审计与升级依据）").isEqualTo(1);
     }
@@ -227,7 +237,7 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
                 .as("在途期间 pend 持令牌，恒等式成立").isZero();
 
         assertThat(stockGateway.confirm(slow)).as("TTL内 confirm：dbi+1 且令牌出清").isTrue();
-        assertThat(stockGateway.identity(tplId, 300).delta()).isZero();
+        assertThat(stockGateway.conservation(tplId, 300).sum() - 100L).isZero();
         assertThat(stockGateway.remaining(tplId)).isEqualTo(99);   // 正常扣减，未被触碰
     }
 
@@ -250,7 +260,7 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
                 .as("二次取消不得把库存多加回去（否则Redis偏高→过闸的多→DB拒绝循环）")
                 .isEqualTo(100);
         assertThat(stockGateway.userCount(tplId, uid)).isEqualTo(0);
-        assertThat(stockGateway.issuedCount(tplId))
+        assertThat(stockGateway.confirmedCount(tplId))
                 .as("借方被回滚一次（=0），不得减成负数或二次扣减").isZero();
 
         // 凭证删除后，同一 requestId 的真实重试必须能重新过闸（幂等不能破坏重试语义）
@@ -258,14 +268,14 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(stockGateway.confirm(cmd)).isTrue();
         assertThat(stockGateway.confirm(cmd)).as("重复 confirm 不得二次 dbi+1").isFalse();
         assertThat(stockGateway.confirmedCount(tplId)).isEqualTo(1);
-        assertThat(stockGateway.issuedCount(tplId)).isEqualTo(1);
+        assertThat(stockGateway.confirmedCount(tplId)).isEqualTo(1);
         assertThat(stockGateway.remaining(tplId)).isEqualTo(99);
     }
 
     @Test
     @Timeout(120)
     @DisplayName("验收⑨【A1'+B4】：DB拒绝分类先行 → 售罄钉零+立标志 → 后续请求 Lua 首行短路（不再打DB）")
-    void soldoutPinZeroAndFlag() {
+    void soldoutPinZeroAndFlag() throws Exception {
         long tplId = createTemplate(1, 1, null, null);
         long u1 = USER.incrementAndGet();
         long u2 = USER.incrementAndGet();
@@ -280,14 +290,23 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         Res second = receive(u2, "so-2", tplId);
         assertThat(second.code()).isEqualTo("3001");
 
+        // ADR-0009 售罄终态语义：void+1（只退休这张令牌）、不动 stk（被污染的 5 留给 FORCE 精确还原
+        // ——v2 P0：钉零会把污染洗白进 void 且 FORCE 无法修复）
+        assertThat(stockGateway.conservation(tplId, 300).voidRetired())
+                .as("售罄取消=void+1（这张令牌退役，不再回 stk）").isEqualTo(1);
         assertThat(stockGateway.remaining(tplId))
-                .as("售罄取消=钉零（SET 0），不是 INCR 回加——断 N1 自持环").isZero();
+                .as("售罄终态不回加 stk（deduct 已 DECR 到 4，污染余量留给 FORCE 归零）").isEqualTo(4);
         assertThat(stockGateway.isSoldout(tplId))
                 .as("B4：售罄标志已立（独立于 stock 值，抗误写）").isTrue();
         assertThat(stockGateway.userCount(tplId, u2))
                 .as("u2 过闸时被加的限领计数必须回滚").isZero();
-        assertThat(stockGateway.identity(tplId, 300).delta())
-                .as("售罄取消后三本账仍归零（issued回滚1，dbi=1，pend=0）").isZero();
+        // FORCE 修复（retired 分支：so 存在 → stk=0, dbi=ic=1, void=total-ic=0——污染归零）
+        reconcileService.checkOne(tplId);   // round1 疑似
+        reconcileService.checkOne(tplId);   // round2 确认 → deep retired 分支
+        awaitDeep();
+        assertThat(stockGateway.conservation(tplId, 300).sum() - 1L)
+                .as("FORCE retired 分支修复后守恒（stk=0+dbi=1+void=0）").isZero();
+        assertThat(stockGateway.remaining(tplId)).as("污染的 5 被 FORCE 归零").isZero();
 
         // u3 在 Lua 第一行被 soldout 标志短路：不过闸、不打 DB、无补偿
         assertThat(receive(u3, "so-3", tplId).code()).isEqualTo("3001");
@@ -321,10 +340,15 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
 
             long ok = results.stream().filter(r -> "OK".equals(r.code())).count();
             assertThat(ok).as("退避+条件SET后全部恢复领取").isEqualTo(50);
-            // 风暴中若重建是"无条件 SET 到已扣减的 key 上"，余量会被错误抬高（DECR 被覆盖）
+            // ADR-0009 §8.3 认账：NX 全清库形态为【近似】（误差=重建瞬间未提交在途数，dbi:=ic
+            // 竞态可致 dbi 虚高/余量偏差）——方向安全（DB 硬顶零超发），由守恒巡检 FORCE 收敛：
+            reconcileService.checkOne(tplId);
+            reconcileService.checkOne(tplId);
+            awaitDeep();
+            assertThat(stockGateway.conservation(tplId, 300).sum() - 100L)
+                    .as("守恒修复收敛后 sum=total（精确）").isZero();
             assertThat(stockGateway.remaining(tplId))
-                    .as("余量=100-50：每个成功扣减都被保留").isEqualTo(50);
-            assertThat(stockGateway.identity(tplId, 300).delta()).isZero();
+                    .as("余量=100-50（FORCE 按 ic=50 推导）").isEqualTo(50);
         } finally {
             pool.shutdownNow();
         }
@@ -382,14 +406,14 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
 
         // 守卫①（Java 侧）此刻读到 pending=0 是伪造的前提——真实场景是"检查后、执行前溜进新预占"。
         // 这里直接构造"执行瞬间在途非空"：repair 必须原子拒绝，库存不被覆盖。
-        assertThat(stockGateway.repair(tplId, 999, 0, 0))
-                .as("在途非空，Lua 门必须原子拦截（TOCTOU 窗口关闭）").isFalse();
+        assertThat(stockGateway.rebuild(tplId, "force", 100, 0, 300, 0, 0).ret())
+                .as("在途非空，Lua ZCARD 门必须原子拦截（TOCTOU 窗口关闭）").isEqualTo(-1);
         assertThat(stockGateway.remaining(tplId))
                 .as("被拦截的修复不得写任何值").isEqualTo(99);
 
         // 令牌出清（取消）后，同一修复放行
         assertThat(stockGateway.cancel(cmd, CancelCause.TRANSIENT)).isTrue();
-        assertThat(stockGateway.repair(tplId, 100, 0, 0)).isTrue();
+        assertThat(stockGateway.rebuild(tplId, "force", 100, 0, 300, 0, 0).rebuilt()).isTrue();
         assertThat(stockGateway.remaining(tplId)).isEqualTo(100);
     }
 

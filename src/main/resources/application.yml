@@ -40,6 +40,11 @@ coupon:
   # L5 锁定超时窗口（分钟）：与订单域支付超时契约对齐（订单超时取消=券超时收场，两边同步死）
   trade:
     lock-timeout-minutes: ${LOCK_TIMEOUT_MINUTES:30}
+  # ADR-0009 守恒对账：修复模式 force|shadow（影子=推导落表不执行，v3 修订8 先行 1-2 周）
+  reconcile:
+    auto-repair:
+      mode: ${REPAIR_MODE:shadow}
+    transient-burst-threshold: 500
   # 风控前置最小版（docs/11 §6）：IP 频控固定窗口——挡脚本高频领券；fail-open
   risk:
     ip-rate:

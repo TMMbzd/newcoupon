@@ -3,8 +3,8 @@ package com.newcoupon.application.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -18,7 +18,8 @@ import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.infrastructure.persistence.StockDriftLogGateway;
 import com.newcoupon.infrastructure.redis.RedisScanLock;
 import com.newcoupon.infrastructure.redis.RedisStockGateway;
-import com.newcoupon.infrastructure.redis.RedisStockGateway.IdentityReading;
+import com.newcoupon.infrastructure.redis.RedisStockGateway.ConservationReading;
+import com.newcoupon.infrastructure.redis.RedisStockGateway.RebuildResult;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -28,12 +29,14 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 /**
- * 恒等式对账决策逻辑单测（ADR-0008）——mock 存储与网关，逐分支覆盖：
- * 恒等成立 / 首轮疑似 / 连续两轮确认+守卫全过修复 / 复核自愈 / 守卫①在途未清推迟 /
- * 守卫②账本互证失败冻结 / 修复后余量为0不清售罄标志。
+ * 守恒对账决策逻辑单测（ADR-0009，2026-09-16 重写——前身恒等式版随范式退役）。
+ * 逐分支覆盖：守恒成立 / 首轮疑似 / 两轮确认提交 deep / 镜像幻影臂（陈旧 ic 不告警、
+ * 新鲜 ic 才告警）/ confirm-lost 臂（方向性判据）/ deep 白名单逐关 / FORCE 分支推导 /
+ * 影子模式不 SET / 栅栏中止 / 在途推迟 / 账实矛盾冻结 / 不可领只告警 / 不可能态 / 囚禁。
+ * deep 直调 deepReconcileSync（同步版），避免异步执行器在单测里的时序问题。
  */
 @ExtendWith(MockitoExtension.class)
-@DisplayName("对账·恒等式验账（ADR-0008）")
+@DisplayName("对账·守恒式验账（ADR-0009）")
 class StockReconcileServiceTest {
 
     @Mock
@@ -49,15 +52,20 @@ class StockReconcileServiceTest {
     @Mock
     private RedisScanLock scanLock;
 
-    private StockReconcileService service;
+    private StockReconcileService forceService;   // force 模式
+    private StockReconcileService shadowService;  // 影子模式
 
     @BeforeEach
     void setUp() {
-        service = new StockReconcileService(templateRepository, userCouponRepository,
-                couponUsageRepository, stockGateway, driftLog, scanLock, 1000L, 0L);   // 日志限频 0：每条都落表，便于断言
+        forceService = new StockReconcileService(templateRepository, userCouponRepository,
+                couponUsageRepository, stockGateway, driftLog, scanLock,
+                1000L, 0L, "force", 500);
+        shadowService = new StockReconcileService(templateRepository, userCouponRepository,
+                couponUsageRepository, stockGateway, driftLog, scanLock,
+                1000L, 0L, "shadow", 500);
     }
 
-    /** 模板：total=100，issued 由参数定 */
+    /** 模板：total=100，issued 由参数定（可领态） */
     private CouponTemplate tpl(long issued) {
         return CouponTemplate.reconstitute(1L,
                 CouponTemplate.Creation.builder()
@@ -68,147 +76,197 @@ class StockReconcileServiceTest {
                 issued, ApproveStatus.APPROVED, PublishStatus.PUBLISHED);
     }
 
-    private IdentityReading reading(long issued, long dbi, long pending) {
-        return new IdentityReading(issued, dbi, pending);
+    /** 不可领模板（已下线——白名单②不过） */
+    private CouponTemplate offlineTpl(long issued) {
+        return CouponTemplate.reconstitute(1L,
+                CouponTemplate.Creation.builder()
+                        .templateCode("T1").activityId(1L).name("n")
+                        .couponType(CouponType.NO_THRESHOLD).faceValue(500L).threshold(0L)
+                        .totalCount(100L).perUserLimit(1)
+                        .validType(ValidType.AFTER_RECEIVE).validDays(7).build(),
+                issued, ApproveStatus.APPROVED, PublishStatus.OFFLINE);
     }
 
+    private ConservationReading reading(long stk, long pend, long dbi, long voidR, boolean so) {
+        return new ConservationReading(stk, pend, dbi, voidR, so);
+    }
+
+    // ==================== 巡检：守恒式两轮确认 ====================
+
     @Test
-    @DisplayName("恒等式成立（issued−dbi−pend=0）：无事发生，不触碰 Redis")
-    void identityHolds() {
-        when(stockGateway.identity(1L, 1000L)).thenReturn(reading(10, 8, 2));
+    @DisplayName("守恒成立（stk+pend+dbi+void=total）：无事发生")
+    void conservationHolds() {
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(90, 2, 8, 0, false));
 
-        assertThat(service.identityCheckOne(1L)).isFalse();
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
 
-        verify(stockGateway, never()).repair(anyLong(), anyLong(), anyLong(), anyLong());
         verify(driftLog, never()).record(any());
     }
 
     @Test
-    @DisplayName("首轮差值≠0：只疑似告警，不进第二层（等下轮复核）")
+    @DisplayName("首轮守恒破缺：只疑似（等下轮复核——瞬态在途保护）")
     void firstRoundOnlySuspects() {
-        when(stockGateway.identity(1L, 1000L)).thenReturn(reading(11, 10, 0));   // delta=+1
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(89, 0, 8, 0, false));   // sum=97≠100
 
-        assertThat(service.identityCheckOne(1L)).isFalse();
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
 
-        verify(stockGateway, never()).repair(anyLong(), anyLong(), anyLong(), anyLong());
         verify(driftLog, never()).record(any());
     }
 
     @Test
-    @DisplayName("连续两轮差值≠0 + 守卫全过：按 DB 口径重置三本账并落表")
-    void confirmedDriftRepairs() {
-        when(stockGateway.identity(1L, 1000L)).thenReturn(reading(11, 10, 0));   // delta=+1
-        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
-        when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);         // 守卫②过
-        when(stockGateway.remaining(1L)).thenReturn(89L);
-        when(stockGateway.repair(anyLong(), anyLong(), anyLong(), anyLong())).thenReturn(true);  // P0④：Lua 门放行
-        when(driftLog.countSince(anyLong(), any())).thenReturn(0L);
+    @DisplayName("连续两轮破缺：确认（提交 deep）")
+    void secondRoundConfirms() {
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(89, 0, 8, 0, false));
 
-        assertThat(service.identityCheckOne(1L)).isFalse();   // 第1轮：疑似
-        assertThat(service.identityCheckOne(1L)).isTrue();    // 第2轮：确认→修复
+        forceService.conservationCheckOne(tpl(8L));   // round 1
+        boolean confirmed = forceService.conservationCheckOne(tpl(8L));   // round 2 → deep
 
-        verify(stockGateway, times(1)).repair(1L, 90L, 10L, 10L);   // stock=100-10, issued=dbi=10
-        verify(stockGateway, times(1)).clearSoldout(1L);            // B4：恢复余量必须清标志
-        verify(driftLog, times(1)).record(any());
+        assertThat(confirmed).isTrue();
+    }
+
+    // ==================== 镜像：方向性两臂 ====================
+
+    @Test
+    @DisplayName("镜像·幻影臂：dbi>列表ic 但新鲜ic 追平——陈旧列表不告警（P0-① 零误报）")
+    void phantomArmStaleListIcNoAlarm() {
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(90, 0, 11, 0, false));   // dbi=11
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(11L)));   // 新鲜 ic=11 → 追平
+
+        assertThat(forceService.mirrorCheck(tpl(10L))).isFalse();   // 列表 ic=10（陈旧）
+
+        verify(driftLog, never()).record(any());
     }
 
     @Test
-    @DisplayName("P0④回归：修复执行瞬间在途非空（Lua 门拦截）→ 推迟不修、不清售罄标志")
-    void repairDeferredByLuaGate() {
-        when(stockGateway.identity(1L, 1000L)).thenReturn(reading(11, 10, 0));
+    @DisplayName("镜像·幻影臂：dbi>新鲜ic——真幻影（抹掉已提交事务），立即告警")
+    void phantomArmFreshIcAlarms() {
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(89, 0, 11, 0, false));
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));   // 新鲜 ic 仍=10 < dbi=11
+
+        assertThat(forceService.mirrorCheck(tpl(10L))).isTrue();
+
+        verify(driftLog).record(any());
+    }
+
+    @Test
+    @DisplayName("镜像·confirm-lost 臂：gap>0 且 pend==0 → deep；pend>0 时不动作（方向性判据）")
+    void confirmLostArmDirectional() {
+        // pend>0：在途解释了 gap——不动作（流量期告警永动的解药）
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(89, 2, 8, 0, false));   // gap=2=pend
+        assertThat(forceService.mirrorCheck(tpl(10L))).isFalse();
+
+        // pend==0 且 gap>0：confirm 丢失——deep
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(90, 0, 8, 0, false));   // gap=2, pend=0
+        assertThat(forceService.mirrorCheck(tpl(10L))).isTrue();
+    }
+
+    // ==================== deep：白名单与分支推导 ====================
+
+    private void givenDeepPassGates(CouponTemplate t) {
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(t));
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
+        when(userCouponRepository.countByTemplate(1L)).thenReturn(t.getIssuedCount());
+        when(stockGateway.rebuild(eq(1L), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong()))
+                .thenReturn(new RebuildResult(1, 90, 10, 0));
+    }
+
+    @Test
+    @DisplayName("deep·白名单全过（force）：按业务状态推导重建+清 so+落表 REPAIRED")
+    void deepForceRepairs() {
+        givenDeepPassGates(tpl(10L));
+
+        forceService.deepReconcileSync(1L, "test");
+
+        verify(stockGateway).rebuild(eq(1L), eq("force"), eq(100L), eq(10L), eq(1000L), eq(10L), eq(0L));
+        verify(stockGateway).clearSoldout(1L);   // B4：修复恢复余量必清标志
+        verify(driftLog).record(any());
+    }
+
+    @Test
+    @DisplayName("deep·影子模式：推导落表但 mode=shadow（不执行 SET）")
+    void deepShadowDerivesOnly() {
+        givenDeepPassGates(tpl(10L));
+
+        shadowService.deepReconcileSync(1L, "test");
+
+        verify(stockGateway).rebuild(eq(1L), eq("shadow"), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
+        verify(stockGateway, never()).clearSoldout(anyLong());
+    }
+
+    @Test
+    @DisplayName("deep·白名单②不可领模板：破缺只告警（ALARM_ONLY），不修复")
+    void deepNotReceivableAlarmsOnly() {
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(offlineTpl(10L)));
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(50, 0, 10, 0, false));   // sum=60≠100
+
+        forceService.deepReconcileSync(1L, "test");
+
+        verify(stockGateway, never()).rebuild(anyLong(), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
+        verify(driftLog).record(any());
+    }
+
+    @Test
+    @DisplayName("deep·在途未清：DEFERRED（修复会覆盖在途记账——推迟到下轮）")
+    void deepPendingDefers() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 2, 10, 0, false));   // pend=2
+
+        forceService.deepReconcileSync(1L, "test");
+
+        verify(stockGateway, never()).rebuild(anyLong(), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
+        verify(driftLog).record(any());
+    }
+
+    @Test
+    @DisplayName("deep·账实矛盾（ic≠COUNT）：GUARD_FAILED 冻结一切自动动作（修复失去基准）")
+    void deepGuardFailedFreezes() {
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
+        when(userCouponRepository.countByTemplate(1L)).thenReturn(9L);   // ≠ ic=10
+
+        forceService.deepReconcileSync(1L, "test");
+
+        verify(stockGateway, never()).rebuild(anyLong(), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
+        verify(driftLog).record(any());
+    }
+
+    @Test
+    @DisplayName("deep·Lua 栅栏中止（-2）：BARRIER_ABORT 落表（读数与执行间混入写）")
+    void deepBarrierAborts() {
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
         when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
-        when(stockGateway.remaining(1L)).thenReturn(89L);
-        when(stockGateway.repair(anyLong(), anyLong(), anyLong(), anyLong())).thenReturn(false); // 门拦截
+        when(stockGateway.rebuild(eq(1L), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong()))
+                .thenReturn(new RebuildResult(-2, 0, 0, 0));
 
-        service.identityCheckOne(1L);
-        assertThat(service.identityCheckOne(1L)).isTrue();
+        forceService.deepReconcileSync(1L, "test");
 
-        verify(driftLog, times(1)).record(any());                       // DEFERRED_PENDING 落表
-        verify(stockGateway, never()).clearSoldout(anyLong());          // 没修就不能动标志
+        verify(stockGateway, never()).clearSoldout(anyLong());
+        verify(driftLog).record(any());
     }
 
     @Test
-    @DisplayName("复核自愈（第2轮恒等式归0）：不修复——慢请求 confirm 迟到的核心回归")
-    void transientDriftHealsOnSecondRound() {
-        when(stockGateway.identity(1L, 1000L))
-                .thenReturn(reading(11, 10, 0))    // 第1轮：delta=+1 疑似
-                .thenReturn(reading(10, 10, 0));   // 第2轮：confirm 迟到到达，自愈
-
-        assertThat(service.identityCheckOne(1L)).isFalse();
-        assertThat(service.identityCheckOne(1L)).isFalse();
-
-        verify(stockGateway, never()).repair(anyLong(), anyLong(), anyLong(), anyLong());
-    }
-
-    @Test
-    @DisplayName("守卫①：在途未清空 → 推迟修复（DEFERRED_PENDING），不动三本账")
-    void repairDeferredWhilePending() {
-        when(stockGateway.identity(1L, 1000L)).thenReturn(reading(12, 10, 1));   // delta=+1 且在途
+    @DisplayName("deep·不可能态（stk+dbi>total）：只告警（total 被调小/void 异常）")
+    void deepImpossibleStateAlarms() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
-        when(stockGateway.remaining(1L)).thenReturn(89L);
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(95, 0, 10, 0, false));   // 95+10>100
+        when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
 
-        service.identityCheckOne(1L);
-        assertThat(service.identityCheckOne(1L)).isTrue();   // 进第二层
+        forceService.deepReconcileSync(1L, "test");
 
-        verify(stockGateway, never()).repair(anyLong(), anyLong(), anyLong(), anyLong());
-        verify(driftLog, times(1)).record(any());
+        verify(stockGateway, never()).rebuild(anyLong(), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
     }
 
     @Test
-    @DisplayName("守卫②：issued_count ≠ COUNT(user_coupon) → 账本自相矛盾，冻结修复（GUARD_FAILED）")
-    void guardFailureFreezesRepair() {
-        when(stockGateway.identity(1L, 1000L)).thenReturn(reading(11, 10, 0));
+    @DisplayName("deep·囚禁告警：stk=0 无 so 且 dbi+void=total 且 dbi<total（重新上线未走协议）")
+    void deepImprisonedAlarms() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
-        when(userCouponRepository.countByTemplate(1L)).thenReturn(9L);   // 账本说10张，明细只有9行
-        when(stockGateway.remaining(1L)).thenReturn(89L);
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(0, 0, 10, 90, false));   // 0+10+90=100
+        when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
 
-        service.identityCheckOne(1L);
-        assertThat(service.identityCheckOne(1L)).isTrue();
+        forceService.deepReconcileSync(1L, "test");
 
-        verify(stockGateway, never()).repair(anyLong(), anyLong(), anyLong(), anyLong());
-        verify(driftLog, times(1)).record(any());   // 留痕 + 告警，人工介入
-    }
-
-    @Test
-    @DisplayName("修复后余量为0（售罄态修复）：不清售罄标志——B4 清除协议的反向边界")
-    void repairToZeroKeepsSoldoutFlag() {
-        when(stockGateway.identity(1L, 1000L)).thenReturn(reading(101, 100, 0));
-        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(100L)));   // total=100 全发完
-        when(userCouponRepository.countByTemplate(1L)).thenReturn(100L);
-        when(stockGateway.remaining(1L)).thenReturn(0L);
-        when(stockGateway.repair(anyLong(), anyLong(), anyLong(), anyLong())).thenReturn(true);
-        when(driftLog.countSince(anyLong(), any())).thenReturn(0L);
-
-        service.identityCheckOne(1L);
-        assertThat(service.identityCheckOne(1L)).isTrue();
-
-        verify(stockGateway, times(1)).repair(1L, 0L, 100L, 100L);
-        verify(stockGateway, never()).clearSoldout(anyLong());   // 余量0：标志必须留着短路流量
-    }
-
-    @Test
-    @DisplayName("第二层复测自愈（疑似到确认的间隙里慢请求 confirm 到达）：不修复")
-    void deepReconcileRecheckHeals() {
-        when(stockGateway.identity(1L, 1000L))
-                .thenReturn(reading(11, 10, 0))    // 第1轮疑似
-                .thenReturn(reading(12, 10, 0))    // 第2轮确认（触发 deep）
-                .thenReturn(reading(10, 10, 0));   // deep 复测：自愈了
-        service.identityCheckOne(1L);
-        service.identityCheckOne(1L);
-
-        verify(stockGateway, never()).repair(anyLong(), anyLong(), anyLong(), anyLong());
-        verify(driftLog, never()).record(any());
-    }
-
-    @Test
-    @DisplayName("懒重建走条件 SET（-7 路径）：以 DB 口径计算，由 Lua 保证只生效一次")
-    void lazyRebuildUsesConditionalSet() {
-        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
-
-        service.lazyRebuildStock(1L);
-
-        verify(stockGateway, times(1)).lazyRebuildStock(1L, 90L);
-        verify(stockGateway, never()).initStock(anyLong(), anyLong());   // 懒重建不再无条件 SET
+        verify(stockGateway, never()).rebuild(anyLong(), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
+        verify(driftLog).record(any());
     }
 }
