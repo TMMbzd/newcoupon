@@ -40,14 +40,17 @@ public class TemplateAppService {
     private final TemplateRepository templateRepository;
     private final RedisStockGateway redisStockGateway;
     private final com.newcoupon.infrastructure.persistence.StockDriftLogGateway driftLog;
+    private final StockBucketRouter stockBucketRouter;
 
     // 构造器注入（而非字段 @Autowired）：依赖显式、不可变、单测可直接 new——企业规范
     public TemplateAppService(TemplateRepository templateRepository,
                               RedisStockGateway redisStockGateway,
-                              StockDriftLogGateway driftLog) {
+                              StockDriftLogGateway driftLog,
+                              StockBucketRouter stockBucketRouter) {
         this.templateRepository = templateRepository;
         this.redisStockGateway = redisStockGateway;
         this.driftLog = driftLog;
+        this.stockBucketRouter = stockBucketRouter;
     }
 
     /** 建券：生成业务编码 → 聚合工厂校验 → 落库（通用限领 1~99 自 ADR-0006 开放） */
@@ -90,18 +93,19 @@ public class TemplateAppService {
             throw new BizException(ErrorCode.STATE_CONFLICT,
                     "发布失败：模板状态已被并发变更，请刷新后重试");
         }
-        // 发布=整本重置协议（ADR-0009 §2）：stk=total−ic、dbi:=ic、DEL pend、void:=0、DEL so——
-        // 重新上线必须走此协议（否则触发"囚禁告警"：剩余量被 void 吞掉）
+        // 发布=开桶协议（P2b v2 §7）：casAllocate 逐桶分配（allocated 单调不减）+ 建桶行 + Redis 开桶 Lua。
+        // 取代 ADR-0009 的 resetAll 整本重置——发布是状态机一次性迁移（UNPUBLISHED→PUBLISHED CAS 在上），
+        // 重发布对账协议（v2 §9）属 P7 appendStock/重新上线链路，届时配 COUNT 对账后开新代桶。
         CouponTemplate published = templateRepository.findById(id).orElseThrow();
-        // 评审#5 修复：重置前读旧五键落 RESET 审计行（唯一能整本改写五键的路径不得在对账黑匣子里）
+        // 评审#5 精神保留：开桶前读旧读数落审计行（能整本改写桶键的路径不得在对账黑匣子里）
         var before = redisStockGateway.conservation(id, 180_000);
-        redisStockGateway.resetAll(id, published.getTotalCount(), published.getIssuedCount());
+        stockBucketRouter.openInitialBuckets(id);
         driftLog.record(new StockDriftLogGateway.DriftEvent(id, 0, before.dbi(), before.pend(),
                 published.getTotalCount(), published.getIssuedCount(), null,
                 before.stk(), before.sum() - published.getTotalCount(),
-                "RESET", "发布/重新上线整本重置（前读数留档）", before.voidRetired(), null));
-        log.info("template published (resetAll): id={}, stk={}, dbi={}, 前读数 stk={} pend={} dbi={} void={}",
-                id, published.getTotalCount() - published.getIssuedCount(), published.getIssuedCount(),
+                "OPEN_BUCKETS", "发布开桶（前读数留档；旧形态 RESET 已退役）", before.voidRetired(), null));
+        log.info("template published (openBuckets): id={}, total={}, 前读数 stk={} pend={} dbi={} void={}",
+                id, published.getTotalCount(),
                 before.stk(), before.pend(), before.dbi(), before.voidRetired());
     }
 

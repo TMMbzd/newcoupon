@@ -34,30 +34,36 @@ public class CouponIssueTxService {
     private final UserCouponRepository userCouponRepository;
     private final CouponEventRepository couponEventRepository;
     private final CouponExpireTaskGateway expireTaskGateway;
+    private final com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper;
 
     public CouponIssueTxService(TemplateRepository templateRepository,
                                 UserCouponRepository userCouponRepository,
                                 CouponEventRepository couponEventRepository,
-                                CouponExpireTaskGateway expireTaskGateway) {
+                                CouponExpireTaskGateway expireTaskGateway,
+                                com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper) {
         this.templateRepository = templateRepository;
         this.userCouponRepository = userCouponRepository;
         this.couponEventRepository = couponEventRepository;
         this.expireTaskGateway = expireTaskGateway;
+        this.stockBucketMapper = stockBucketMapper;
     }
 
     /**
      * @param template 编排层已读取并校验过的模板（避免事务内重复读——事务内是旧快照，读它反而误导）
      * @param seq      Redis 用户计数给出的发放序号（1..N）
+     * @param bucket/gen 令牌命中的桶与世代（P2b：DB 扣账从模板行改打桶行——A 簇红线落位）
      */
     @Transactional
-    public UserCoupon issue(ReceiveRequest req, CouponTemplate template, long seq, LocalDateTime now) {
+    public UserCoupon issue(ReceiveRequest req, CouponTemplate template, long seq,
+                            int bucket, long gen, LocalDateTime now) {
         // 故障注入接缝（红灯基建）：挂起本事务——构造"迟到 confirm/cancel 跨桶重开窗口"。生产零开销
         com.newcoupon.infrastructure.testing.FaultHooks.fire(
                 com.newcoupon.infrastructure.testing.FaultHooks.ISSUE_SUSPEND, req.templateId());
-        // ① DB 双防线：条件扣账（Redis 过了闸门，这里再以 DB 账本为准挡一次）
-        int deducted = templateRepository.casDeductStock(req.templateId());
+        // ① DB 双防线（P2b 桶行版）：条件扣账打 stock_bucket 行——超发红线强度不变，
+        //    热行从"1 个模板行"分散到"16 个桶行"（Redis 谎报有货（平移攻击/残留旧桶）在此被封顶）
+        int deducted = stockBucketMapper.casDeductBucket(req.templateId(), bucket, (int) gen);
         if (deducted == 0) {
-            // 0行=真售罄或模板状态竞态；抛信号由编排层在事务外用新快照分类（study/04a 的 RR 教训）
+            // 0行=桶行额度真尽或世代已封账；抛信号由编排层在事务外用新快照分类（study/04a 的 RR 教训）
             throw new StockDeductRejectedException(req.templateId());
         }
         // ② 落券（seq 写入；唯一索引兜底限领与幂等）

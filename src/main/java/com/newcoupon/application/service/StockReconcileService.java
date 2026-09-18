@@ -66,6 +66,8 @@ public class StockReconcileService {
     private final RedisStockGateway stockGateway;
     private final StockDriftLogGateway driftLog;
     private final RedisScanLock scanLock;
+    private final com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper;
+    private final StockBucketRouter stockBucketRouter;
 
     private final long inflightTtlMs;
     private final long logMinIntervalMs;
@@ -91,6 +93,8 @@ public class StockReconcileService {
                                 RedisStockGateway stockGateway,
                                 StockDriftLogGateway driftLog,
                                 RedisScanLock scanLock,
+                                com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper,
+                                StockBucketRouter stockBucketRouter,
                                 @Value("${coupon.reconcile.inflight-ttl-ms:180000}") long inflightTtlMs,
                                 @Value("${coupon.reconcile.log-min-interval-ms:3600000}") long logMinIntervalMs,
                                 @Value("${coupon.reconcile.auto-repair.mode:shadow}") String repairMode,
@@ -101,6 +105,8 @@ public class StockReconcileService {
         this.stockGateway = stockGateway;
         this.driftLog = driftLog;
         this.scanLock = scanLock;
+        this.stockBucketMapper = stockBucketMapper;
+        this.stockBucketRouter = stockBucketRouter;
         this.inflightTtlMs = inflightTtlMs;
         this.logMinIntervalMs = logMinIntervalMs;
         this.repairMode = repairMode;
@@ -362,8 +368,31 @@ public class StockReconcileService {
             } catch (RuntimeException ignore) {
             }
         }
-        RebuildResult res = stockGateway.rebuild(templateId, mode, total, ic, inflightTtlMs,
-                r.dbi(), r.voidRetired());   // 栅栏快照=与修复参数同批读得（非目标 ic）
+        // P2b 桥接（step6 将重构为正式 E1/E2/E3 分代巡检）：分代 FORCE——推导锚=该代 used（CONS-3 正解）
+        var bucketRows = stockBucketMapper.selectActive(templateId);
+        var gc = stockGateway.conservationAll(templateId, inflightTtlMs);
+        long aggStk = 0, aggDbi = 0, aggVoid = 0;
+        int worstRet = 1;
+        for (var row : bucketRows) {
+            long dbiObs = 0, voidObs = 0;
+            for (var br : gc.buckets()) {
+                if (br.bucket() == row.getBucketNo() && br.gen() == row.getGeneration()) {
+                    dbiObs = br.dbi();
+                    voidObs = br.voidRetired();
+                }
+            }
+            RebuildResult one = stockGateway.rebuildBucket(templateId, row.getBucketNo(),
+                    row.getGeneration(), mode, row.getQuota(), row.getUsed(), false,
+                    inflightTtlMs, dbiObs, voidObs);
+            if (one.ret() == -1 || one.ret() == -2) {
+                worstRet = one.ret();   // 任一代被门/栅栏拦下即整体按其语义记录
+                break;
+            }
+            aggStk += one.stk();
+            aggDbi += one.dbi();
+            aggVoid += one.voidRetired();
+        }
+        RebuildResult res = new RebuildResult(worstRet, aggStk, aggDbi, aggVoid);
         if (res.ret() == -1) {
             recordDrift(new DriftEvent(templateId, 0, r.dbi(), r.pend(), total, ic, couponCount, r.stk(),
                     0, "DEFERRED_PENDING", "执行瞬间在途非空（Lua 门）：" + reason, r.voidRetired(), null));
@@ -395,14 +424,9 @@ public class StockReconcileService {
     // ==================== 懒重建（-7 领券可用性路径——总开关不拦） ====================
 
     public void lazyRebuildStock(long templateId) {
-        CouponTemplate t = templateRepository.findById(templateId).orElse(null);
-        if (t == null) {
-            return;
-        }
-        RebuildResult res = stockGateway.rebuild(templateId, "nx",
-                t.getTotalCount(), t.getIssuedCount(), inflightTtlMs, 0, 0);
-        if (res.rebuilt()) {
-            log.info("conservation lazy rebuild (NX): templateId={}, stk={}", templateId, res.stk());
+        // P2b：-7 懒重建改为 ENSURE——DB 活跃桶行是权威，Redis 注册表空时按行重建（SET 非累加）
+        if (stockBucketRouter.ensureActiveBuckets(templateId)) {
+            log.info("buckets ensured from DB (lazy rebuild NX 已退役): templateId={}", templateId);
         }
     }
 

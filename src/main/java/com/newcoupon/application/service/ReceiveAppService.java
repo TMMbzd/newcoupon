@@ -63,19 +63,22 @@ public class ReceiveAppService {
     private final RedisStockGateway stockGateway;
     private final StockReconcileService reconcileService;
     private final StockDriftLogGateway driftLog;
+    private final StockBucketRouter stockBucketRouter;
 
     public ReceiveAppService(UserCouponRepository userCouponRepository,
                              TemplateRepository templateRepository,
                              CouponIssueTxService issueTxService,
                              RedisStockGateway stockGateway,
                              StockReconcileService reconcileService,
-                             StockDriftLogGateway driftLog) {
+                             StockDriftLogGateway driftLog,
+                             StockBucketRouter stockBucketRouter) {
         this.userCouponRepository = userCouponRepository;
         this.templateRepository = templateRepository;
         this.issueTxService = issueTxService;
         this.stockGateway = stockGateway;
         this.reconcileService = reconcileService;
         this.driftLog = driftLog;
+        this.stockBucketRouter = stockBucketRouter;
     }
 
     public ReceiveResult receive(ReceiveRequest req) {
@@ -97,16 +100,23 @@ public class ReceiveAppService {
         //    重复请求是少数派，-8 后回 DB 确认即可。DB uk_idem 唯一索引仍是终审。
         DeductCommand cmd = new DeductCommand(req.templateId(), req.userId(), req.requestId(),
                 template.getPerUserLimit(), template.getPerUserDailyLimit(), template.getDailyLimit(),
-                LocalDate.now().format(DAY), DAY_TTL_SEC, IDEM_TTL_SEC);
+                LocalDate.now().format(DAY), DAY_TTL_SEC, IDEM_TTL_SEC,
+                stockBucketRouter.preferred(req.userId()));   // P2b 路由亲和（v2 §3）
         DeductResult d = stockGateway.deduct(cmd);
         if (d.code() == -7) {
-            // A2'：清库风暴中几十个请求同时撞 -7。随机退避把"同时再击"摊开；
-            // 条件 SET 保证只有一个请求真正重建，其余 no-op；其后的 DECR 天然保留。
+            // A2'：注册表空（清库/Redis 灾难）。随机退避把"同时再击"摊开；
+            // ENSURE 按 DB 权威行一次性重建（SET 非累加，幂等），其余请求 no-op。
             backoffQuietly();
-            reconcileService.lazyRebuildStock(req.templateId());
+            stockBucketRouter.ensureActiveBuckets(req.templateId());
             d = stockGateway.deduct(cmd);
             if (d.code() == -7) {
                 throw new BizException(ErrorCode.DEGRADED, "库存服务暂不可用，请稍后重试");
+            }
+        }
+        if (d.code() == -10) {
+            // P2b v2 §5：全桶耗尽 → 开桶协议（single-flight+尾量）。开不了=额度分完=真售罄。
+            if (stockBucketRouter.tryOpenBucket(req.templateId())) {
+                d = stockGateway.deduct(cmd);
             }
         }
         if (!d.success()) {
@@ -117,18 +127,19 @@ public class ReceiveAppService {
         //    P0 修复①②（2026-09-12）：confirm 单独兜底——它失败绝不回滚已提交事务的记账；
         //    RuntimeException 分支先探 DB 定案再决定动作——"不确定提交"不得盲目补偿。
         try {
-            UserCoupon issued = issueTxService.issue(req, template, d.seq(), LocalDateTime.now());
-            confirmQuietly(cmd);   // 修复①：DB 已提交，用户结果已定——confirm 失败只记日志放行
+            UserCoupon issued = issueTxService.issue(req, template, d.seq(),
+                    d.bucket(), d.gen(), LocalDateTime.now());
+            confirmQuietly(cmd, d);   // 修复①：DB 已提交，用户结果已定——confirm 失败只记日志放行
             return ReceiveResult.of(issued, false);
         } catch (DuplicateKeyException e) {
-            cancelQuietly(cmd, CancelCause.TRANSIENT);   // 计数还原+库存回加，令牌出清
+            cancelQuietly(cmd, d, CancelCause.TRANSIENT);   // 计数还原+库存回加，令牌出清
             return classifyAfterRollback(req, cmd, retryOnce, e);
         } catch (StockDeductRejectedException e) {
             // A1' 分类先行：先取新快照判断"DB 为什么拒"，再选取消形态——
             // 售罄要钉零（防 N1 过补偿自持环），瞬时异常要回加（库存没真耗尽）
-            throw classifyDeductRejectAndCancel(req, cmd);
+            throw classifyDeductRejectAndCancel(req, cmd, d);
         } catch (RuntimeException e) {
-            return recoverUncertainOutcome(req, cmd, e);   // 修复②：先探 DB，命中=已提交
+            return recoverUncertainOutcome(req, cmd, d, e);   // 修复②：先探 DB，命中=已提交
         }
     }
 
@@ -140,9 +151,9 @@ public class ReceiveAppService {
      * 现在两种失败变体都安全：命令未抵达→令牌留 pend，180s 清扫后对账按 confirm-lost 修复；
      * 已抵达仅超时→状态本就一致，无需动作。
      */
-    private void confirmQuietly(DeductCommand cmd) {
+    private void confirmQuietly(DeductCommand cmd, DeductResult d) {
         try {
-            if (!stockGateway.confirm(cmd)) {
+            if (!stockGateway.confirm(cmd, d.bucket(), d.gen())) {
                 log.debug("confirm no-op (token consumed): templateId={}, requestId={}",
                         cmd.templateId(), cmd.requestId());
             }
@@ -159,7 +170,7 @@ public class ReceiveAppService {
      * 残余窗口=「断连 且 COMMIT 落盘晚于探针一个 RTT」，IO 尖刺时秒级——有界、零超发、镜像自愈。
      */
     private ReceiveResult recoverUncertainOutcome(ReceiveRequest req, DeductCommand cmd,
-                                                  RuntimeException cause) {
+                                                  DeductResult d, RuntimeException cause) {
         Optional<UserCoupon> landed;
         try {
             landed = userCouponRepository.findByIdempotentKey(req.userId(), req.requestId());
@@ -171,10 +182,10 @@ public class ReceiveAppService {
         if (landed.isPresent()) {
             log.warn("uncertain commit RESOLVED as committed — confirm & return success: "
                     + "templateId={}, requestId={}", req.templateId(), req.requestId());
-            confirmQuietly(cmd);
+            confirmQuietly(cmd, d);
             return toDuplicatedResult(landed.get(), req);
         }
-        cancelQuietly(cmd, CancelCause.TRANSIENT);   // 真失败：不还=库存泄漏（少发）
+        cancelQuietly(cmd, d, CancelCause.TRANSIENT);   // 真失败：不还=库存泄漏（少发）
         throw cause;
     }
 
@@ -182,9 +193,9 @@ public class ReceiveAppService {
      * 取消记账的二次故障防线（答辩 A3）：cancel 自身抛异常（Redis 同时故障）时不得吞掉
      * 业务语义——记错误日志放行，令牌交 180s 清扫由对账修复（方向安全：少卖有界、不超发）。
      */
-    private void cancelQuietly(DeductCommand cmd, CancelCause cause) {
+    private void cancelQuietly(DeductCommand cmd, DeductResult d, CancelCause cause) {
         try {
-            stockGateway.cancel(cmd, cause);
+            stockGateway.cancel(cmd, d.bucket(), d.gen(), cause);
             if (cause == CancelCause.TRANSIENT) {
                 reconcileService.noteTransientCancel(cmd.templateId());   // ADR-0009 §4：取消率熔断的计数
             }
@@ -219,7 +230,8 @@ public class ReceiveAppService {
             return toDuplicatedResult(old.get(), req);
         }
         throw switch (d.code()) {
-            case -3 -> new BizException(ErrorCode.STOCK_OUT);
+            case -3, -10 -> new BizException(ErrorCode.STOCK_OUT);   // -10=全桶耗尽且开桶失败=额度分完
+            case -11 -> new BizException(ErrorCode.FROZEN);          // P2b v2 §7：冻结专用降级码，禁泄漏负数
             case -2 -> new BizException(ErrorCode.USER_LIMIT_EXCEEDED);
             case -6 -> new BizException(ErrorCode.USER_LIMIT_EXCEEDED, "已达每日限领上限");
             case -1 -> new BizException(ErrorCode.DAILY_LIMIT_EXCEEDED);
@@ -299,26 +311,27 @@ public class ReceiveAppService {
      * 分类决定 cancel 形态——取消的 stock 修复语义（钉零 vs 回加）依赖"为什么被拒"。
      * 返回待抛出的业务异常（先完成取消记账，再抛给调用方）。
      */
-    private BizException classifyDeductRejectAndCancel(ReceiveRequest req, DeductCommand cmd) {
+    private BizException classifyDeductRejectAndCancel(ReceiveRequest req, DeductCommand cmd,
+                                                        DeductResult d) {
         CouponTemplate fresh = templateRepository.findById(req.templateId()).orElse(null);
         if (fresh == null) {
-            cancelQuietly(cmd, CancelCause.OFFLINE);
+            cancelQuietly(cmd, d, CancelCause.OFFLINE);
             return new BizException(ErrorCode.TEMPLATE_NOT_FOUND);
         }
-        if (fresh.getIssuedCount() >= fresh.getTotalCount()) {
-            // 售罄：钉零 + 立标志。Redis 余量已无意义——回加只会重启"过闸→被拒→回加"
-            // 的自持环（N1）；标志让后续请求在 Lua 第一行就短路，DB 售罄 QPS 归 1。
-            cancelQuietly(cmd, CancelCause.SOLD_OUT);
+        if (stockBucketRouter.soldOutInDb(req.templateId())) {
+            // 售罄（P2b 换锚 v2 §6.3：allocated>=total——ic 已冻结为快照口径）：钉牌 + 退休令牌。
+            // Redis 余量已无意义——回加只会重启"过闸→被拒→回加"的自持环（N1）。
+            cancelQuietly(cmd, d, CancelCause.SOLD_OUT);
             return new BizException(ErrorCode.STOCK_OUT);
         }
         if (fresh.getApproveStatus() != ApproveStatus.APPROVED
                 || fresh.getPublishStatus() != PublishStatus.PUBLISHED) {
             // 下线/审批回退：同样钉零（模板停了，余量不该再放行；重新上线走回补协议）
-            cancelQuietly(cmd, CancelCause.OFFLINE);
+            cancelQuietly(cmd, d, CancelCause.OFFLINE);
             return new BizException(ErrorCode.TEMPLATE_NOT_RECEIVABLE, "模板状态已变化（被下线/审批回退）");
         }
         // 瞬时（扣账竞态输给并发/锁等待后的重试）：库存没真耗尽，正常回加
-        cancelQuietly(cmd, CancelCause.TRANSIENT);
+        cancelQuietly(cmd, d, CancelCause.TRANSIENT);
         return new BizException(ErrorCode.DEGRADED, "库存扣账未成功，请稍后重试");
     }
 

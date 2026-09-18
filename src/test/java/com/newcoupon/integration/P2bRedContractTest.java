@@ -145,8 +145,13 @@ class P2bRedContractTest extends ShardedIntegrationTestSupport {
         for (int i = 0; i < 10; i++) {
             receiveQuietly(USER.incrementAndGet(), "ta-" + tpl + "-" + i, tpl);
         }
-        // 攻击者直改 Redis 伪造 1 张可卖库存（现键形态——桶化后同样语义打桶键）
-        redis.opsForValue().increment("c:stk:{" + tpl + "}", 1);
+        // 攻击者直改 Redis 伪造 1 张可卖库存——打【当前键布局】的活跃桶键：
+        // 从 c:act 注册表取一个活跃 (桶,世代)，INCRBY 它的 stk（净值守恒全绿的平移面在此）
+        var act = redis.<String, String>opsForHash().entries("c:act:{" + tpl + "}");
+        assertThat(act).isNotEmpty();
+        String bucket = act.keySet().iterator().next();
+        String gen = act.get(bucket);
+        redis.opsForValue().increment("c:stk:{" + tpl + "}:" + bucket + ":" + gen, 1);
 
         // 第 11 张：Redis 放行（伪造），DB 桶行 used<quota 必须拒绝——资损被硬防线封顶
         String res = receiveQuietly(USER.incrementAndGet(), "ta-" + tpl + "-11th", tpl);

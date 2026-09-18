@@ -47,4 +47,9 @@ public interface StockBucketMapper extends BaseMapper<StockBucketPO> {
     @Select("SELECT * FROM stock_bucket WHERE template_id = #{tpl} AND status = 0 "
             + "ORDER BY bucket_no")
     List<StockBucketPO> selectActive(@Param("tpl") long tpl);
+
+    /** 该桶历史最大世代（重开=+1；V10 历史代 gen=0，新桶从 1 起） */
+    @Select("SELECT COALESCE(MAX(generation), 0) FROM stock_bucket WHERE template_id = #{tpl} "
+            + "AND bucket_no = #{bucket}")
+    int maxGen(@Param("tpl") long tpl, @Param("bucket") int bucket);
 }

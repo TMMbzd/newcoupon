@@ -33,6 +33,8 @@ public class CouponTemplatePO {
     private Long discountCap;
     private Long threshold;
     private Long totalCount;
+    /** P2b V10：已分配到桶的额度（单调不减，只被开桶 CAS 推进） */
+    private Long allocated;
     private Long issuedCount;
     private Integer perUserLimit;
     private Long dailyLimit;
@@ -73,6 +75,8 @@ public class CouponTemplatePO {
     public void setThreshold(Long threshold) { this.threshold = threshold; }
     public Long getTotalCount() { return totalCount; }
     public void setTotalCount(Long totalCount) { this.totalCount = totalCount; }
+    public Long getAllocated() { return allocated; }
+    public void setAllocated(Long allocated) { this.allocated = allocated; }
     public Long getIssuedCount() { return issuedCount; }
     public void setIssuedCount(Long issuedCount) { this.issuedCount = issuedCount; }
     public Integer getPerUserLimit() { return perUserLimit; }

@@ -1,22 +1,51 @@
 package com.newcoupon.application.service;
 
-/**
- * 桶路由器（P2b v2 §3/§11——骨架先行：route() 纯函数第 1 步即真实实现，
- * 耗尽切换与开桶单飞在第 4 步补齐）。
- *
- * <p>route() 是公开纯函数（USAB-10 裁决）：无状态、无 Redis 依赖——
- * 测试可预计算桶号直连桶键断言，红灯用例有程序化前置手段。
- *
- * <p>散列用 Fibonacci hashing（乘 2^64/φ 再取高位）——裸 {@code userId % n}
- * 在连续 userId（发号器产物）下会连续落同桶，乘法散列把邻近输入打散。
- */
-public final class StockBucketRouter {
+import com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper;
+import com.newcoupon.infrastructure.persistence.mapper.TemplateMapper;
+import com.newcoupon.infrastructure.persistence.po.CouponTemplatePO;
+import com.newcoupon.infrastructure.persistence.po.StockBucketPO;
+import com.newcoupon.infrastructure.redis.RedisStockGateway;
+import java.util.HashSet;
+import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
 
-    private StockBucketRouter() {
+/**
+ * 桶路由器（P2b v2 §3/§5/§11）：路由亲和、开桶协议（single-flight+尾量+夹缝钩子）、Redis 灾后重建。
+ *
+ * <p>本组件直接注入 Mapper（而非领域仓储）——它本身是"Redis 世界与 DB 分桶账本之间的搬运工"，
+ * 操作的就是持久化形态的数据（桶行/allocated），过领域层纯属绕路。
+ */
+@Component
+public class StockBucketRouter {
+
+    private static final Logger log = LoggerFactory.getLogger(StockBucketRouter.class);
+
+    private final RedisStockGateway gateway;
+    private final TemplateMapper templateMapper;
+    private final StockBucketMapper bucketMapper;
+
+    /** 每桶额度（v2 §3：10000——DB 每万笔领券被打扰一次） */
+    @Value("${coupon.sharding.bucket-size:10000}")
+    private long bucketSize;
+
+    /** 槽位数（v2 §3：16——双重职责：Redis 热 key 分散 + DB 桶行分散 312 TPS/行） */
+    @Value("${coupon.sharding.bucket-count:16}")
+    private int bucketCount;
+
+    public StockBucketRouter(RedisStockGateway gateway,
+                             TemplateMapper templateMapper,
+                             StockBucketMapper bucketMapper) {
+        this.gateway = gateway;
+        this.templateMapper = templateMapper;
+        this.bucketMapper = bucketMapper;
     }
 
     /**
-     * 用户 → 桶号（同用户恒同桶——限领计数天然隔离，v2 §3）。
+     * 用户 → 桶号（公开纯函数，USAB-10：测试可预计算桶号直连桶键断言）。
+     * Fibonacci 散列——裸 {@code userId % n} 在连续 userId（发号器产物）下会连续落同桶。
      *
      * @throws IllegalArgumentException bucketCount&lt;1（总监盲区⑦：模零除法全站 500 防护）
      */
@@ -27,5 +56,120 @@ public final class StockBucketRouter {
         long h = userId * 0x9E3779B97F4A7C15L;   // 2^64/φ 黄金比例散列
         h ^= (h >>> 32);                          // 高低位混合，放大小差异
         return (int) Long.remainderUnsigned(h, bucketCount);
+    }
+
+    /** 路由亲和位（编排层构造 DeductCommand 用） */
+    public int preferred(long userId) {
+        return route(userId, bucketCount);
+    }
+
+    /**
+     * 发布初始化：循环开桶直到额度分完或槽位占满（v2 §2/§7）。
+     * 开满策略：Σquota=total（全部额度入桶）——-10 开桶协议实际服务于 appendStock/灾后补建/未来部分分配策略。
+     */
+    public void openInitialBuckets(long templateId) {
+        CouponTemplatePO t = templateMapper.selectById(templateId);
+        if (t == null) {
+            return;
+        }
+        int opened = 0;
+        while (opened < bucketCount) {
+            if (!tryOpenBucket(templateId)) {
+                break;   // allocated==total（分完）或 CAS 失败——前者是正常出口
+            }
+            opened++;
+        }
+        log.info("initial buckets opened: templateId={}, buckets={}, allocated={}",
+                templateId, opened, t.getAllocated());
+    }
+
+    /**
+     * 开桶协议（v2 §5，D 簇）。返回 true=新桶已开（调用方重试 deduct）。
+     * <pre>
+     * ① c:opening NX 单飞锚：抢不到=别人在开，返回 false（调用方短退避后重试 deduct）
+     * ② DB：casAllocate(n=min(bucketSize, total-allocated))——尾量语义；0 行=真售罄
+     * ③ 【openbucket.seam 故障注入缝】：DB 提交后、Redis EVAL 前——崩溃夹缝钩子（红灯基建）
+     * ④ 选空闲槽位 + 世代=该桶 maxGen+1；INSERT stock_bucket 行
+     * ⑤ Redis 开桶 Lua（幂等门防 c:alloc 双计）+ 释放锚
+     * 顺序铁律：先 DB 后 Redis——夹缝偏差永远落在 c:alloc&lt;allocated 安全方向（E3a 补建）
+     * </pre>
+     */
+    public boolean tryOpenBucket(long templateId) {
+        if (!gateway.grabOpenLock(templateId)) {
+            return false;
+        }
+        try {
+            CouponTemplatePO t = templateMapper.selectById(templateId);
+            if (t == null || t.getAllocated() == null) {
+                return false;
+            }
+            long total = t.getTotalCount();
+            long allocated = t.getAllocated();
+            if (allocated >= total) {
+                return false;   // 真售罄：额度已分完（allocated 单调不减，v2 §9）
+            }
+            long n = Math.min(bucketSize, total - allocated);
+            if (templateMapper.casAllocate(templateId, n) == 0) {
+                return false;
+            }
+            // 故障注入缝：DB 已提交、Redis 未执行——CONC-2/CHAO-1 的崩溃夹缝窗口（测试专用，生产零开销）
+            com.newcoupon.infrastructure.testing.FaultHooks.fire(
+                    com.newcoupon.infrastructure.testing.FaultHooks.OPEN_BUCKET_SEAM, templateId);
+            int slot = pickFreeSlot(templateId);
+            int gen = bucketMapper.maxGen(templateId, slot) + 1;
+            StockBucketPO row = new StockBucketPO();
+            row.setTemplateId(templateId);
+            row.setBucketNo(slot);
+            row.setGeneration(gen);
+            row.setQuota(n);
+            row.setUsed(0L);
+            row.setStatus(0);
+            bucketMapper.insert(row);
+            gateway.openBucket(templateId, slot, gen, n);
+            log.info("bucket opened: templateId={}, slot={}, gen={}, quota={}", templateId, slot, gen, n);
+            return true;
+        } finally {
+            gateway.releaseOpenLock(templateId);
+        }
+    }
+
+    /**
+     * -7 灾后重建（v2 §6.1 ENSURE；CHAO-4：Redis 重启/AOF 丢 act）：
+     * DB 有活跃行而 act 注册表空 → 按 DB 权威行一次性重建（SET 非累加，不叠崩溃残余）。
+     * 返回 true=执行了重建（调用方重试 deduct）。
+     */
+    public boolean ensureActiveBuckets(long templateId) {
+        var rows = bucketMapper.selectActive(templateId);
+        if (rows.isEmpty()) {
+            return false;
+        }
+        boolean rebuilt = gateway.ensureBuckets(templateId,
+                rows.stream().map(r -> new long[]{r.getBucketNo(), r.getGeneration(), r.getQuota()})
+                        .toList());
+        if (rebuilt) {
+            log.warn("buckets ENSURED from DB rows (redis lost registry?): templateId={}, rows={}",
+                    templateId, rows.size());
+        }
+        return true;
+    }
+
+    /** DB 侧售罄判定（v2 §6.3 换锚：ic 冻结后，售罄=allocated>=total——分类路径用） */
+    public boolean soldOutInDb(long templateId) {
+        CouponTemplatePO t = templateMapper.selectById(templateId);
+        return t == null || t.getAllocated() == null || t.getAllocated() >= t.getTotalCount();
+    }
+
+    /** 选空闲槽位：0..bucketCount-1 中无活跃行的最低位 */
+    private int pickFreeSlot(long templateId) {
+        Set<Integer> active = new HashSet<>();
+        for (StockBucketPO r : bucketMapper.selectActive(templateId)) {
+            active.add(r.getBucketNo());
+        }
+        for (int slot = 0; slot < bucketCount; slot++) {
+            if (!active.contains(slot)) {
+                return slot;
+            }
+        }
+        throw new IllegalStateException("no free bucket slot (bucketCount=" + bucketCount + ")——配置错误或并发开桶异常");
     }
 }
