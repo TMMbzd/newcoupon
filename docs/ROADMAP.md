@@ -77,29 +77,37 @@
 
 **依据**：背景 5000 QPS vs DB 热行 ~400 TPS 饱和（[腾讯云 618 实证](https://developer.cloud.tencent.com/article/2623908)、[阿里 PolarDB-X 基准 512 并发下普通更新 400 TPS 饱和](https://help.aliyun.com/zh/polardb/polardb-for-xscale/update-hot-rows)）。
 
-**方案**（守恒式兼容版——[完整推导见调研报告 §5](调研-大厂高并发库存扣减方案-2026-09-17.md)）：
+**方案 v2**（2026-09-18 裁决修订——[完整方案](P2b-库存批次分片-技术方案-2026-09-17.md) v2 + [测试大纲](P2b-测试大纲与风险清单-2026-09-18.md)，v1 经 7 领域测试团队评审 TOP12 全设计缺陷后重写）：
 ```
-Redis 键结构：c:stk:{tpl}:{bucket} 等四族键按桶拆分
-两层守恒：
-  层1（桶内）：stk_i + pend_i + dbi_i + void_i ≡ bucket_total_i（每桶独立验证）
-  层2（全局）：Σ(dbi_i) + DB 未分配余量 ≡ total（DB 视角全局守恒）
+三层结构：
+  DB① coupon_template：total / allocated（单调不减，只被开桶 CAS 推进）
+  DB② stock_bucket 分桶账本（每桶一行 quota/used）：
+      领券事务内逐笔条件扣 UPDATE stock_bucket SET used=used+1 WHERE used<quota
+      ——超发红线"DB 条件更新保证"原样保留，热行从模板行分散到 16 桶行（312 TPS/行 < 400 饱和）
+  Redis：c:stk:{tpl}:{bucket}:{gen} 四族键按（桶,世代）拆分
+        c:alloc 镜像（开桶 Lua 原子同步）/ c:opening 单飞锚 / c:fz 冻结牌
 
-DB 交互只在开新桶时发生：
-  UPDATE template SET allocated = allocated + N WHERE allocated + N <= total
-  （一次行锁，每 N 笔领券只执行一次——热行消失）
+三条可判定等式（治 v1 层2自相矛盾）：
+  E1 分代桶内：stk+pend+dbi+void ≡ bucket_total（纯 Redis 原子）
+  E2 Redis 全局：Σ(活跃代四键和)+c:alloc ≡ total（纯 Redis 原子）
+  E3 镜像（方向判据）：c:alloc↔allocated ｜ 分代 dbi↔stock_bucket.used ｜ Σdbi↔SUM(used)，deep 权威=COUNT
 
-路由：用户 → hash(user_id) % bucket_count 选桶（同用户始终同桶）
-桶耗尽：换下一个非空桶；全桶空 → DB 开新桶
+关键裁决（A-G 七簇）：stock_bucket 保红线｜ic 冻结换锚｜epoch 世代隔离（迟到 cancel 落旧代 void）
+｜开桶 single-flight+尾量 min()｜V10 存量回填+quiesce 切流+回滚协议｜平移资损被 DB 封顶+单调差分检测
+｜allocated 生命周期+publish 最小鉴权（提前）
 ```
 
-**实施清单**：
-- V9 迁移：coupon_template 补 allocated 列（DB 已分配额——开桶的原子递增目标）
-- RedisStockGateway 改造：桶 key 模板+桶路由+桶耗尽切换+跨桶守恒验证
-- CouponIssueTxService 改造：领券不再逐笔 UPDATE issued_count，改走桶扣减+桶耗尽时开桶
-- 守恒巡检改造：逐桶验证层1+全局验证层2
-- 发布路径 resetAll 改造：按桶分配初始额度
+**实施清单**（v2 详表见方案 §11）：
+- 第 0 步：故障注入基建（6 类钩子——不建则半数红灯是纸面文章）
+- V10 迁移：allocated 列 + stock_bucket 表 + **存量回填（allocated=ic + 历史代行）+ 断言 SQL**
+- RedisStockGateway：桶化+世代化（冻结短路键并入 Lua 重写）+ 开桶 Lua
+- StockBucketRouter（新）：route() 公开纯函数 + 耗尽切换 + -10 单飞处理
+- CouponIssueTxService：逐笔条件扣改打桶行；affected=0 → CANCEL+drift
+- 守恒巡检：E1/E2/E3 三层 + 分代镜像 + void/dbi 单调差分 + ic 换锚
+- 发布路径：对账后开首代桶 + allocated 生命周期 + 旧键 retire + 管理端点最小鉴权
+- 错误码：-11→FROZEN 段（不泄漏负数）+ 解冻三通道
 
-**验收**：分桶后守恒式全绿（两轮验证+层1层2均过）；2000 并发分桶集成测通过；桶耗尽切换无丢请求。
+**验收**：E1/E2 全绿+E3 方向判据正确；2000 并发分桶集成测（切换零丢单/边界 P99<100ms/开桶 UPDATE=1 次）；平移攻击被 DB 拒绝且单调差分告警；V10 断言过；好用性指标全达（测试大纲 §6：FROZEN 专用码/误冻自愈≤120s/解冻≤3 步 MTTR≤5min）。
 
 #### 2c：模板本地缓存（旧 L6，从 M3 提前）
 
@@ -137,7 +145,7 @@ DB 交互只在开新桶时发生：
 - 基础指标在 Prometheus 可查
 - 2000 并发分桶集成测通过
 
-**角色工件**：批次分片技术方案（架构）、outbox ADR、V8/V9 迁移脚本、分桶集成测报告（测试）
+**角色工件**：批次分片技术方案 v2（架构）、**风险先行测试大纲（测试，73 风险×用例+好用性指标）**、outbox ADR、V8/V9/V10 迁移脚本、分桶集成测报告（测试）
 
 ---
 
