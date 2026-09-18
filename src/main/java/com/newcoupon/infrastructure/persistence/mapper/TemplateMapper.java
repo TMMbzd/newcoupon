@@ -41,4 +41,14 @@ public interface TemplateMapper extends BaseMapper<CouponTemplatePO> {
     /** 已发布模板清单：库存对账定时任务用 */
     @Select("SELECT * FROM coupon_template WHERE publish_status = 1")
     java.util.List<CouponTemplatePO> selectPublished();
+
+    /**
+     * 开桶 CAS（P2b v2 §5，D 簇）：把 N 张额度从"未分配"划给一个新桶。
+     * N=min(BUCKET_SIZE, total-allocated)（尾量语义——严格 BUCKET_SIZE 会在尾量时永远失败）。
+     * allocated 单调不减（v2 §9 生命周期不变量）：本 CAS 是唯一合法递增点。
+     * affected=0 且 allocated>=total → 真售罄（走 cancel sold_out 路径）。
+     */
+    @Update("UPDATE coupon_template SET allocated = allocated + #{n} "
+            + "WHERE id = #{id} AND allocated + #{n} <= total_count")
+    int casAllocate(@Param("id") long id, @Param("n") long n);
 }
