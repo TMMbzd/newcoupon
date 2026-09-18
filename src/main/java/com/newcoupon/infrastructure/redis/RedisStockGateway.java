@@ -229,6 +229,8 @@ public class RedisStockGateway {
     }
 
     public DeductResult deduct(DeductCommand cmd) {
+        com.newcoupon.infrastructure.testing.FaultHooks.fire(
+                com.newcoupon.infrastructure.testing.FaultHooks.REDIS_CMD_DELAY, "deduct", cmd.templateId());
         String day = cmd.day();
         String member = pendMember(cmd.userId(), cmd.requestId());
         List<?> r = redis.execute(deductScript,
@@ -244,6 +246,8 @@ public class RedisStockGateway {
 
     /** DB 提交成功后的记账确认：dbi+1 与令牌出清原子配对。失败不阻断响应——对账层修复 */
     public boolean confirm(DeductCommand cmd) {
+        com.newcoupon.infrastructure.testing.FaultHooks.fire(
+                com.newcoupon.infrastructure.testing.FaultHooks.REDIS_CMD_DELAY, "confirm", cmd.templateId());
         Long r = redis.execute(confirmScript,
                 List.of(dbiKey(cmd.templateId()), pendKey(cmd.templateId())),
                 pendMember(cmd.userId(), cmd.requestId()));
@@ -252,6 +256,8 @@ public class RedisStockGateway {
 
     /** DB 失败后的记账取消（三态）。令牌已消费则 no-op；日键用 cmd.day() */
     public boolean cancel(DeductCommand cmd, CancelCause cause) {
+        com.newcoupon.infrastructure.testing.FaultHooks.fire(
+                com.newcoupon.infrastructure.testing.FaultHooks.REDIS_CMD_DELAY, "cancel", cmd.templateId());
         String day = cmd.day();
         Long r = redis.execute(cancelScript,
                 List.of(stockKey(cmd.templateId()), ulKey(cmd.templateId(), cmd.userId()),

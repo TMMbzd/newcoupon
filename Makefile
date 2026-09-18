@@ -1,4 +1,4 @@
-.PHONY: up down test run package
+.PHONY: up down test red-contract run package
 
 # 本地常用命令统一入口（大厂惯例：新人 clone 后看一眼 Makefile/README 就能跑起来）
 up:            ## 启动本地 MySQL + Redis
@@ -9,6 +9,9 @@ down:          ## 停止本地依赖
 
 test:          ## 跑全部单测（秒级，不依赖容器）
 	mvn -q test
+
+red-contract:  ## 跑 P2b 红灯合同（实施前大面积红=问题真实存在的证据；P2b 第 8 步应全绿）
+	mvn -q test -Dred.contract=true -Dtest=P2bRedContractTest
 
 run:           ## 启动应用（需先 make up）
 	mvn spring-boot:run

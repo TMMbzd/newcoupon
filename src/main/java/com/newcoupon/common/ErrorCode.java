@@ -44,7 +44,9 @@ public enum ErrorCode {
 
     // ---- 5xxx 系统与依赖 ----
     SYSTEM_ERROR(5000, "系统繁忙，请稍后重试"),
-    DEGRADED(5001, "系统降级中，请稍后重试");
+    DEGRADED(5001, "系统降级中，请稍后重试"),
+    /** P2b v2 §7（USAB-2）：冻结专用降级码——可重试语义，响应体禁止泄漏内部负数码（-11） */
+    FROZEN(5002, "活动暂停发放，请稍后重试");
 
     private final int code;
     private final String message;

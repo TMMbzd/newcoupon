@@ -51,6 +51,9 @@ public class CouponIssueTxService {
      */
     @Transactional
     public UserCoupon issue(ReceiveRequest req, CouponTemplate template, long seq, LocalDateTime now) {
+        // 故障注入接缝（红灯基建）：挂起本事务——构造"迟到 confirm/cancel 跨桶重开窗口"。生产零开销
+        com.newcoupon.infrastructure.testing.FaultHooks.fire(
+                com.newcoupon.infrastructure.testing.FaultHooks.ISSUE_SUSPEND, req.templateId());
         // ① DB 双防线：条件扣账（Redis 过了闸门，这里再以 DB 账本为准挡一次）
         int deducted = templateRepository.casDeductStock(req.templateId());
         if (deducted == 0) {
