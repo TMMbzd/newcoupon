@@ -97,12 +97,23 @@ class StockReconcileServiceTest {
         return new ConservationReading(stk, pend, dbi, voidR, so);
     }
 
+    /** P2b E2 两段式桩：由聚合读数构造 GlobalConservation（Σ四键=alloc=total 时双平） */
+    private com.newcoupon.infrastructure.redis.RedisStockGateway.GlobalConservation gc(long stk, long pend,
+                                                                                       long dbi, long voidR) {
+        long sum = stk + pend + dbi + voidR;
+        return new com.newcoupon.infrastructure.redis.RedisStockGateway.GlobalConservation(
+                sum, sum, false,
+                java.util.List.of(new com.newcoupon.infrastructure.redis.RedisStockGateway.BucketReading(
+                        0, 1, stk, pend, dbi, voidR)));
+    }
+
     // ==================== 巡检：守恒式两轮确认 ====================
+
 
     @Test
     @DisplayName("守恒成立（stk+pend+dbi+void=total）：无事发生")
     void conservationHolds() {
-        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(90, 2, 8, 0, false));
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(90, 2, 8, 0));   // Σ=100=E2双平
 
         assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
 
@@ -112,7 +123,7 @@ class StockReconcileServiceTest {
     @Test
     @DisplayName("首轮守恒破缺：只疑似（等下轮复核——瞬态在途保护）")
     void firstRoundOnlySuspects() {
-        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(89, 0, 8, 0, false));   // sum=97≠100
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(89, 0, 8, 0));   // Σ=97≠alloc=100：E2a破
 
         assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
 
@@ -122,7 +133,7 @@ class StockReconcileServiceTest {
     @Test
     @DisplayName("连续两轮破缺：确认（提交 deep）")
     void secondRoundConfirms() {
-        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(89, 0, 8, 0, false));
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(89, 0, 8, 0));
 
         forceService.conservationCheckOne(tpl(8L));   // round 1
         boolean confirmed = forceService.conservationCheckOne(tpl(8L));   // round 2 → deep

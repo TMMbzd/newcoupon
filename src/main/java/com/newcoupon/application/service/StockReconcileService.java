@@ -218,25 +218,34 @@ public class StockReconcileService {
     }
 
     /**
-     * 守恒单模板检查：两轮确认（第一轮怀疑/第二轮定罪），确认步在 deep 内用新鲜读数。
+     * 守恒单模板检查（P2b E2 正式两段式）：两轮确认（第一轮怀疑/第二轮定罪），确认步在 deep 内用新鲜读数。
+     *
+     * <p>E2 公式修正（2026-09-19，治双计）：旧式「Σ四键+c:alloc≡total」在全量分配策略下
+     * c:alloc=total，等式左边=2×total 恒破。正式形态拆两段：
+     * <pre>
+     * E2a（Redis 内部）：Σ(活跃代四键和) ≡ c:alloc   ——桶间平移/桶键丢失/注册表丢代在此现形
+     * E2b（分配侧，全量分配策略）：c:alloc ≡ total    ——镜像篡改/开桶双计在此现形（E3a 的 Redis 侧快判）
+     * </pre>
+     * 三步当场确认（2e-①）仍按计划在 2e 收尾——当前保持两轮确认。
      */
     boolean conservationCheckOne(CouponTemplate t) {
-        ConservationReading r = stockGateway.conservation(t.getId(), inflightTtlMs);
-        if (r.sum() == t.getTotalCount()) {
-            return false;   // 和守恒（本轮清零由 deep 结果驱动——见 §5 修位）
+        var gc = stockGateway.conservationAll(t.getId(), inflightTtlMs);
+        if (gc.redisSum() == gc.alloc() && gc.alloc() == t.getTotalCount()) {
+            return false;   // E2a+E2b 双平（本轮清零由 deep 结果驱动——见 §5 修位）
         }
+        String breach = gc.redisSum() != gc.alloc()
+                ? "E2a(Σ四键=" + gc.redisSum() + " ≠ c:alloc=" + gc.alloc() + ")"
+                : "E2b(c:alloc=" + gc.alloc() + " ≠ total=" + t.getTotalCount() + ")";
         int rounds = driftRounds.merge(t.getId(), 1, (a, b) -> a + b);
         if (rounds == 1) {
-            log.warn("conservation drift suspected (round 1): templateId={}, stk={}, pend={}, dbi={}, void={}, "
-                    + "sum={} ≠ total={} → 下轮复核", t.getId(), r.stk(), r.pend(), r.dbi(), r.voidRetired(),
-                    r.sum(), t.getTotalCount());
+            log.warn("conservation drift suspected (round 1): templateId={}, alloc={}, Σ四键={}, buckets={} "
+                    + "→ {} → 下轮复核", t.getId(), gc.alloc(), gc.redisSum(), gc.buckets().size(), breach);
             return false;
         }
-        log.warn("CONSERVATION DRIFT confirmed: templateId={}, 五键读数 stk={} pend={} dbi={} void={} sum={} "
-                + "≠ total={} → deep reconcile", t.getId(), r.stk(), r.pend(), r.dbi(), r.voidRetired(),
-                r.sum(), t.getTotalCount());
+        log.warn("CONSERVATION DRIFT confirmed: templateId={}, alloc={}, Σ四键={}, buckets={} → {} "
+                + "→ deep reconcile", t.getId(), gc.alloc(), gc.redisSum(), gc.buckets().size(), breach);
         driftRounds.remove(t.getId());
-        return submitDeep(t.getId(), "conservation(sum=" + r.sum() + ")");
+        return submitDeep(t.getId(), "conservation(" + breach + ")");
     }
 
     // ==================== 深对账（独立线程：白名单+分支推导+修复） ====================
