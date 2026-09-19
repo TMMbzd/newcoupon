@@ -224,18 +224,21 @@ public class StockReconcileService {
      * c:alloc=total，等式左边=2×total 恒破。正式形态拆两段：
      * <pre>
      * E2a（Redis 内部）：Σ(活跃代四键和) ≡ c:alloc   ——桶间平移/桶键丢失/注册表丢代在此现形
-     * E2b（分配侧，全量分配策略）：c:alloc ≡ total    ——镜像篡改/开桶双计在此现形（E3a 的 Redis 侧快判）
+     * E2b（分配侧）：c:alloc ≡ Σ(stock_bucket.quota)  ——镜像篡改/开桶双计在此现形（部分分配合法：total 可大于此值）
      * </pre>
      * 三步当场确认（2e-①）仍按计划在 2e 收尾——当前保持两轮确认。
      */
     boolean conservationCheckOne(CouponTemplate t) {
         var gc = stockGateway.conservationAll(t.getId(), inflightTtlMs);
-        if (gc.redisSum() == gc.alloc() && gc.alloc() == t.getTotalCount()) {
+        // E2b 锚 Σquota（2026-09-19 二次修正：total>槽位×桶额时部分分配是合法态，锚 total 会
+        // 每轮假破缺；锚 DB 行和=镜像自检——c:alloc 必须等于已建桶的额度合计，篡改/双计现形）
+        long quotaSum = stockBucketMapper.sumQuota(t.getId());
+        if (gc.redisSum() == gc.alloc() && gc.alloc() == quotaSum) {
             return false;   // E2a+E2b 双平（本轮清零由 deep 结果驱动——见 §5 修位）
         }
         String breach = gc.redisSum() != gc.alloc()
                 ? "E2a(Σ四键=" + gc.redisSum() + " ≠ c:alloc=" + gc.alloc() + ")"
-                : "E2b(c:alloc=" + gc.alloc() + " ≠ total=" + t.getTotalCount() + ")";
+                : "E2b(c:alloc=" + gc.alloc() + " ≠ Σquota=" + quotaSum + ")";
         int rounds = driftRounds.merge(t.getId(), 1, (a, b) -> a + b);
         if (rounds == 1) {
             log.warn("conservation drift suspected (round 1): templateId={}, alloc={}, Σ四键={}, buckets={} "
@@ -457,18 +460,19 @@ public class StockReconcileService {
             for (CouponTemplate t : templateRepository.findPublished()) {
                 try {
                     long count = userCouponRepository.countByTemplate(t.getId());
-                    if (count != t.getIssuedCount()) {
-                        // 评审#3 修复：列表快照的 ic 在长循环里陈旧（前序模板的 64 分表 COUNT 累加窗口），
-                        // 失配先按主键重读新鲜 ic 再判——消灭 7×24 热模板每夜假"人工介入"
-                        CouponTemplate freshT = templateRepository.findById(t.getId()).orElse(null);
-                        long freshIc = freshT == null ? t.getIssuedCount() : freshT.getIssuedCount();
-                        if (freshT == null || count != freshIc) {
-                            log.error("DAILY AUDIT FAILED: templateId={} 新鲜ic({}) != COUNT(user_coupon)({}) "
-                                    + "→ 人工介入", t.getId(), freshIc, count);
+                    // P2b 换锚（审查 P1，治 CONS-1 预言的"告警信用清零"）：ic 已冻结（写方被
+                    // casDeductBucket 取代），日审判据改为 COUNT(user_coupon) vs SUM(stock_bucket.used)
+                    // ——券行与桶行同事务提交，零读偏斜；失配复读一次新鲜值（保留评审#3 惯例）
+                    long usedSum = stockBucketMapper.sumUsed(t.getId());
+                    if (count != usedSum) {
+                        long freshUsed = stockBucketMapper.sumUsed(t.getId());
+                        if (count != freshUsed) {
+                            log.error("DAILY AUDIT FAILED: templateId={} SUM(used)({}) != COUNT(user_coupon)({}) "
+                                    + "→ 人工介入", t.getId(), freshUsed, count);
                             recordDrift(new DriftEvent(t.getId(), 0, 0, 0,
-                                    t.getTotalCount(), freshIc, count,
+                                    t.getTotalCount(), freshUsed, count,
                                     stockGateway.remaining(t.getId()), 0,
-                                    "AUDIT_FAILED", "T+1 互证失败（新鲜读数）：DB 账本与券明细不一致",
+                                    "AUDIT_FAILED", "T+1 互证失败（新鲜读数）：分桶账本与券明细不一致",
                                     stockGateway.conservation(t.getId(), inflightTtlMs).voidRetired(), null));
                         }
                     }

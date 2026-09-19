@@ -43,6 +43,15 @@ public class StockBucketRouter {
         this.bucketMapper = bucketMapper;
     }
 
+    /** 启动校验（审查 P2：bucket-size=0 笔误 → casAllocate(0) 恒成功 → 零额度开桶行无界堆积） */
+    @jakarta.annotation.PostConstruct
+    void validateConfig() {
+        if (bucketSize < 1 || bucketCount < 1) {
+            throw new IllegalStateException("coupon.sharding.bucket-size/bucket-count 必须 ≥1，当前 size="
+                    + bucketSize + ", count=" + bucketCount);
+        }
+    }
+
     /**
      * 用户 → 桶号（公开纯函数，USAB-10：测试可预计算桶号直连桶键断言）。
      * Fibonacci 散列——裸 {@code userId % n} 在连续 userId（发号器产物）下会连续落同桶。
@@ -72,6 +81,9 @@ public class StockBucketRouter {
         if (t == null) {
             return;
         }
+        // 槽位上限（2026-09-19 二次修正：额度驱动"开到分完"会在发布时提前复用槽位——
+        // 把还有存货的旧代封账=困库存。部分分配（total>count×size）是合法态：余量等
+        // 桶耗尽的 -10 重开路径补（那时复用封账才安全——旧代已空）。E2b 同步改锚 Σquota。
         int opened = 0;
         while (opened < bucketCount) {
             if (!tryOpenBucket(templateId)) {
@@ -80,7 +92,7 @@ public class StockBucketRouter {
             opened++;
         }
         log.info("initial buckets opened: templateId={}, buckets={}, allocated={}",
-                templateId, opened, t.getAllocated());
+                templateId, opened, templateMapper.selectById(templateId).getAllocated());
     }
 
     /**
@@ -95,7 +107,8 @@ public class StockBucketRouter {
      * </pre>
      */
     public boolean tryOpenBucket(long templateId) {
-        if (!gateway.grabOpenLock(templateId)) {
+        String lockToken = gateway.grabOpenLock(templateId);
+        if (lockToken == null) {
             return false;
         }
         try {
@@ -108,6 +121,12 @@ public class StockBucketRouter {
             // 夹缝差额恢复（CHAO-1 自愈路径，2026-09-19 故障用例逼出）：上次开桶死在
             // 「DB CAS 已提交、行/Redis 未建」——allocated 已含那笔 n 但 Σ(行quota) 没有。
             // 补建差额，不重复 CAS（否则差额永远卡死成"已分完"的假售罄）。
+            // 孤儿桶重放（审查 P1：insert 已提交但 Redis EVAL 未执行的窗口——行在、注册无）：
+            // 幂等门保证重放安全（已注册则 no-op）；重放后本请求的 deduct 重试可达
+            boolean replayed = replayOrphanBuckets(templateId);
+            if (replayed) {
+                return true;   // 有桶被补登记——调用方直接重扣
+            }
             long rowsQuota = bucketMapper.sumQuota(templateId);
             long n;
             if (rowsQuota < allocated) {
@@ -127,6 +146,10 @@ public class StockBucketRouter {
                     com.newcoupon.infrastructure.testing.FaultHooks.OPEN_BUCKET_SEAM, templateId);
             int slot = pickFreeSlot(templateId);
             int gen = bucketMapper.maxGen(templateId, slot) + 1;
+            if (gen > 1) {
+                // 复用槽位=旧代存在——封账（status=1：ENSURE 取 maxGen、镜像臂转活跃口径的前提）
+                sealOldGenerations(templateId, slot, gen);
+            }
             StockBucketPO row = new StockBucketPO();
             row.setTemplateId(templateId);
             row.setBucketNo(slot);
@@ -139,7 +162,7 @@ public class StockBucketRouter {
             log.info("bucket opened: templateId={}, slot={}, gen={}, quota={}", templateId, slot, gen, n);
             return true;
         } finally {
-            gateway.releaseOpenLock(templateId);
+            gateway.releaseOpenLock(templateId, lockToken);
         }
     }
 
@@ -161,6 +184,33 @@ public class StockBucketRouter {
                     templateId, rows.size());
         }
         return true;
+    }
+
+    /** 孤儿桶重放：DB 活跃行未注册进 Redis act 的，重放开桶 Lua（幂等）。true=有补登记 */
+    private boolean replayOrphanBuckets(long templateId) {
+        var registered = gateway.actEntries(templateId);   // 槽 -> 当代世代
+        boolean replayed = false;
+        for (StockBucketPO row : bucketMapper.selectActive(templateId)) {
+            String cur = registered.get(String.valueOf(row.getBucketNo()));
+            if (cur == null || Long.parseLong(cur) < row.getGeneration()) {
+                gateway.openBucket(templateId, row.getBucketNo(), row.getGeneration(), row.getQuota());
+                log.warn("orphan bucket replayed (row committed but EVAL never ran): "
+                        + "templateId={}, slot={}, gen={}, quota={}",
+                        templateId, row.getBucketNo(), row.getGeneration(), row.getQuota());
+                replayed = true;
+            }
+        }
+        return replayed;
+    }
+
+    /** 封账旧代（status=1）——世代账本闭合的 DB 侧写方 */
+    private void sealOldGenerations(long templateId, int slot, int newGen) {
+        for (StockBucketPO row : bucketMapper.selectActive(templateId)) {
+            if (row.getBucketNo() == slot && row.getGeneration() < newGen) {
+                row.setStatus(1);
+                bucketMapper.updateById(row);
+            }
+        }
     }
 
     /** DB 侧售罄判定（v2 §6.3 换锚：ic 冻结后，售罄=allocated>=total——分类路径用） */

@@ -105,10 +105,15 @@ public class ReceiveAppService {
         DeductResult d = stockGateway.deduct(cmd);
         if (d.code() == -7) {
             // A2'：注册表空（清库/Redis 灾难）。随机退避把"同时再击"摊开；
-            // ENSURE 按 DB 权威行一次性重建（SET 非累加，幂等），其余请求 no-op。
+            // ENSURE 按 DB 权威行一次性重建（按 quota-used 推导铸 stk，幂等）。
             backoffQuietly();
             stockBucketRouter.ensureActiveBuckets(req.templateId());
             d = stockGateway.deduct(cmd);
+            if (d.code() == -7 && stockBucketRouter.tryOpenBucket(req.templateId())) {
+                // 兜底（审查 P1）：DB 有额度但一行活跃桶都没有（如 V10 前形态/回填缺口）——
+                // 把"首桶缺失"视为可开桶状态，而不是死路 DEGRADED
+                d = stockGateway.deduct(cmd);
+            }
             if (d.code() == -7) {
                 throw new BizException(ErrorCode.DEGRADED, "库存服务暂不可用，请稍后重试");
             }
@@ -127,6 +132,11 @@ public class ReceiveAppService {
                 }
                 backoffQuietly();
                 d = stockGateway.deduct(cmd);
+            }
+            if (d.code() == -10 && !stockBucketRouter.soldOutInDb(req.templateId())) {
+                // 审查 P1：重试预算(~0.5s)≪开桶锁 TTL(5s)——慢开桶/持有者死亡窗口内退出时，
+                // "开不动"≠"额度分完"。终态 STOCK_OUT 是谎报（3001 不可重试=等同丢单），改可重试降级码
+                throw new BizException(ErrorCode.DEGRADED, "库存补给中，请稍后重试");
             }
         }
         if (!d.success()) {

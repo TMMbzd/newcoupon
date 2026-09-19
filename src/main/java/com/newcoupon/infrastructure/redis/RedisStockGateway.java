@@ -176,17 +176,19 @@ public class RedisStockGateway {
      * 按 DB 权威行一次性重建注册表+各代四键+alloc=Σquota（SET 非累加——崩溃残余不叠加）。
      */
     public static final String ENSURE_BUCKETS_SCRIPT = """
-            -- KEYS: 1 act(hash)  2 alloc  3 gens(set)   ARGV: 1 tpl  2 b1  3 g1  4 q1  5 b2  6 g2  7 q2 ...（三元组）
+            -- KEYS: 1 act(hash)  2 alloc  3 gens(set)   ARGV: 1 tpl  2 b1  3 g1  4 q1  5 u1  6 b2 ...（四元组 b,g,quota,used）
             if redis.call('HLEN', KEYS[1]) > 0 then return 0 end
             local total = 0
-            for i = 2, #ARGV, 3 do
-              local b, g, q = ARGV[i], ARGV[i + 1], tonumber(ARGV[i + 2])
+            for i = 2, #ARGV, 4 do
+              local b, g = ARGV[i], ARGV[i + 1]
+              local q, u = tonumber(ARGV[i + 2]), tonumber(ARGV[i + 3])
               redis.call('HSET', KEYS[1], b, g)
               redis.call('SADD', KEYS[3], b .. ':' .. g)
               local base = 'c:stk:{' .. ARGV[1] .. '}:' .. b .. ':' .. g
               if redis.call('EXISTS', base) == 0 then
-                redis.call('SET', base, q)
-                redis.call('SET', 'c:dbi:{' .. ARGV[1] .. '}:' .. b .. ':' .. g, 0)
+                -- 按 quota-used 推导铸 stk（审查 P2：全额铸=凭空回补已卖量）；dbi 同步落 used
+                redis.call('SET', base, math.max(0, q - u))
+                redis.call('SET', 'c:dbi:{' .. ARGV[1] .. '}:' .. b .. ':' .. g, u)
                 redis.call('SET', 'c:void:{' .. ARGV[1] .. '}:' .. b .. ':' .. g, 0)
               end
               total = total + q
@@ -226,7 +228,9 @@ public class RedisStockGateway {
               return {-2, 0, 0, 0}
             end
             local used = tonumber(ARGV[6])
-            local retired = tonumber(ARGV[7]) == 1 or redis.call('EXISTS', KEYS[5]) == 1
+            -- 当代门（审查 P2）：该桶注册当代≠本代=旧代——按 retired 处理（防 void 复活/误删售罄牌）
+            local isCurrentGen = redis.call('HGET', KEYS[6], ARGV[3]) == ARGV[4]
+            local retired = tonumber(ARGV[7]) == 1 or redis.call('EXISTS', KEYS[5]) == 1 or not isCurrentGen
             local stkV, dbiV, voidV
             if retired then
               stkV = 0; dbiV = used; voidV = tonumber(ARGV[5]) - used
@@ -387,23 +391,39 @@ public class RedisStockGateway {
         List<String> keys = List.of(actKey(templateId), allocKey(templateId), gensKey(templateId));
         List<String> argv = new ArrayList<>();
         argv.add(String.valueOf(templateId));
-        for (long[] bgq : bucketGenQuota) {
-            argv.add(String.valueOf(bgq[0]));
-            argv.add(String.valueOf(bgq[1]));
-            argv.add(String.valueOf(bgq[2]));
+        for (long[] bgqu : bucketGenQuota) {
+            argv.add(String.valueOf(bgqu[0]));
+            argv.add(String.valueOf(bgqu[1]));
+            argv.add(String.valueOf(bgqu[2]));
+            argv.add(String.valueOf(bgqu[3]));
         }
         Long r = redis.execute(ensureBucketsScript, keys, argv.toArray(new String[0]));
         return r != null && r == 1;
     }
 
-    /** 开桶 single-flight 锚（v2 §5 D 簇）：SET NX PX 5000 */
-    public boolean grabOpenLock(long templateId) {
-        return Boolean.TRUE.equals(redis.opsForValue()
-                .setIfAbsent(openingKey(templateId), "1", java.time.Duration.ofSeconds(5)));
+    /** 活跃注册表只读（槽->当代世代，字符串形态）——孤儿桶重放/巡检辅助 */
+    public java.util.Map<String, String> actEntries(long templateId) {
+        return redis.<String, String>opsForHash().entries(actKey(templateId));
     }
 
-    public void releaseOpenLock(long templateId) {
-        redis.delete(openingKey(templateId));
+    /** 开桶 single-flight 锚（v2 §5 D 簇）：SET NX PX 5000 */
+    private static final String RELEASE_LOCK_SCRIPT = """
+            if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+            return 0
+            """;
+    private final DefaultRedisScript<Long> releaseLockScript =
+            new DefaultRedisScript<>(RELEASE_LOCK_SCRIPT, Long.class);
+
+    /** 抢开桶锁（返回属主令牌；null=别人持有）。值=UUID——释放时比对，防超时后误删他人锁 */
+    public String grabOpenLock(long templateId) {
+        String token = java.util.UUID.randomUUID().toString();
+        boolean ok = Boolean.TRUE.equals(redis.opsForValue()
+                .setIfAbsent(openingKey(templateId), token, java.time.Duration.ofSeconds(5)));
+        return ok ? token : null;
+    }
+
+    public void releaseOpenLock(long templateId, String token) {
+        redis.execute(releaseLockScript, List.of(openingKey(templateId)), token);
     }
 
     /**

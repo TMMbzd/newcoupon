@@ -35,11 +35,19 @@ CREATE TABLE stock_bucket (
 -- ===================================================================
 -- ③ 存量回填：allocated 对齐 + 历史代封账行（generation=0 只此一批，新桶从 1 起）
 -- ===================================================================
+-- 在售模板（已发布且有未卖余量）：allocated 直接对齐 total（全量分配策略），并补一行
+-- **活跃代**承载余量——否则存量模板无 status=0 行，升级后首个请求 -7 死角（ensure 空、
+-- 开桶挂在 -10 永不可达、重发布被 CAS 挡）→ 永久 DEGRADED（三视角审查 2026-09-19 P1）
 UPDATE coupon_template SET allocated = issued_count;
+UPDATE coupon_template SET allocated = total_count
+  WHERE publish_status = 1 AND issued_count < total_count;
 
 INSERT INTO stock_bucket (template_id, bucket_no, generation, quota, used, status)
   SELECT id, 0, 0, issued_count, issued_count, 1
   FROM coupon_template WHERE issued_count > 0;
+INSERT INTO stock_bucket (template_id, bucket_no, generation, quota, used, status)
+  SELECT id, 0, 1, total_count - issued_count, 0, 0
+  FROM coupon_template WHERE publish_status = 1 AND issued_count < total_count;
 
 -- ===================================================================
 -- ④ 迁移内断言：allocated 不得越过 total_count（数据被污染时中止迁移而非带病上线）
@@ -47,9 +55,11 @@ INSERT INTO stock_bucket (template_id, bucket_no, generation, quota, used, statu
 DELIMITER //
 CREATE PROCEDURE v10_assert_allocated()
 BEGIN
-  IF EXISTS (SELECT 1 FROM coupon_template WHERE allocated > total_count) THEN
+  IF EXISTS (SELECT 1 FROM coupon_template WHERE allocated > total_count) OR
+     EXISTS (SELECT 1 FROM coupon_template t WHERE allocated <
+             (SELECT COALESCE(SUM(quota),0) FROM stock_bucket b WHERE b.template_id = t.id)) THEN
     SIGNAL SQLSTATE '45000'
-      SET MESSAGE_TEXT = 'V10 assertion failed: allocated > total_count (存量 issued_count 已被污染，先修数据再迁移)';
+      SET MESSAGE_TEXT = 'V10 assertion failed: allocated 越界或与 Σquota 不一致（存量数据被污染，先修数据再迁移）';
   END IF;
 END//
 CALL v10_assert_allocated()//

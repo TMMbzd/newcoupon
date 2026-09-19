@@ -23,7 +23,9 @@ public interface StockBucketMapper extends BaseMapper<StockBucketPO> {
      */
     @Update("UPDATE stock_bucket SET used = used + 1 "
             + "WHERE template_id = #{tpl} AND bucket_no = #{bucket} AND generation = #{gen} "
-            + "AND used < quota AND status = 0")
+            + "AND used < quota AND status = 0 "
+            + "AND EXISTS (SELECT 1 FROM coupon_template ct WHERE ct.id = stock_bucket.template_id "
+            + "  AND ct.publish_status = 1 AND ct.approve_status = 1)")
     int casDeductBucket(@Param("tpl") long tpl,
                         @Param("bucket") int bucket,
                         @Param("gen") int gen);
@@ -35,17 +37,22 @@ public interface StockBucketMapper extends BaseMapper<StockBucketPO> {
                                      @Param("bucket") int bucket,
                                      @Param("gen") int gen);
 
-    /** 全局已用求和（E3c 廉价锚：Σdbi ↔ SUM(used)，16 行求和不打大表） */
+    /** 全局已用求和（deep 守卫口径：COUNT(user_coupon) ↔ 全量 SUM(used)——含历史封账代） */
     @Select("SELECT COALESCE(SUM(used), 0) FROM stock_bucket WHERE template_id = #{tpl}")
     long sumUsed(@Param("tpl") long tpl);
+
+    /** 活跃代已用求和（镜像臂口径：Redis dbi 只活在注册代上，历史代 dbi 键不存在——
+     * 用全量 SUM 会造成 confirm-lost 永久误报（gen=0 历史行的 gap 不可收敛），三视角审查 P1） */
+    @Select("SELECT COALESCE(SUM(used), 0) FROM stock_bucket WHERE template_id = #{tpl} AND status = 0")
+    long sumUsedActive(@Param("tpl") long tpl);
 
     /** 全局额度求和（不变量断言：SUM(quota) ≡ template.allocated——巡检 E3a 侧证） */
     @Select("SELECT COALESCE(SUM(quota), 0) FROM stock_bucket WHERE template_id = #{tpl}")
     long sumQuota(@Param("tpl") long tpl);
 
-    /** 活跃桶行清单（开桶选址/巡检遍历用） */
+    /** 活跃桶行清单（开桶选址/巡检遍历用）。同桶多代按代序——ENSURE 重建取 maxGen 的前提（审查 P2 修复） */
     @Select("SELECT * FROM stock_bucket WHERE template_id = #{tpl} AND status = 0 "
-            + "ORDER BY bucket_no")
+            + "ORDER BY bucket_no, generation")
     List<StockBucketPO> selectActive(@Param("tpl") long tpl);
 
     /** 该桶历史最大世代（重开=+1；V10 历史代 gen=0，新桶从 1 起） */
