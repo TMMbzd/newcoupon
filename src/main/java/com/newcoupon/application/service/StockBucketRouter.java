@@ -105,12 +105,22 @@ public class StockBucketRouter {
             }
             long total = t.getTotalCount();
             long allocated = t.getAllocated();
-            if (allocated >= total) {
+            // 夹缝差额恢复（CHAO-1 自愈路径，2026-09-19 故障用例逼出）：上次开桶死在
+            // 「DB CAS 已提交、行/Redis 未建」——allocated 已含那笔 n 但 Σ(行quota) 没有。
+            // 补建差额，不重复 CAS（否则差额永远卡死成"已分完"的假售罄）。
+            long rowsQuota = bucketMapper.sumQuota(templateId);
+            long n;
+            if (rowsQuota < allocated) {
+                n = Math.min(bucketSize, allocated - rowsQuota);
+                log.warn("open-bucket gap recovery: templateId={}, allocated={}, Σquota={} → 补建 {}（不重复 CAS）",
+                        templateId, allocated, rowsQuota, n);
+            } else if (allocated >= total) {
                 return false;   // 真售罄：额度已分完（allocated 单调不减，v2 §9）
-            }
-            long n = Math.min(bucketSize, total - allocated);
-            if (templateMapper.casAllocate(templateId, n) == 0) {
-                return false;
+            } else {
+                n = Math.min(bucketSize, total - allocated);
+                if (templateMapper.casAllocate(templateId, n) == 0) {
+                    return false;
+                }
             }
             // 故障注入缝：DB 已提交、Redis 未执行——CONC-2/CHAO-1 的崩溃夹缝窗口（测试专用，生产零开销）
             com.newcoupon.infrastructure.testing.FaultHooks.fire(
@@ -159,7 +169,11 @@ public class StockBucketRouter {
         return t == null || t.getAllocated() == null || t.getAllocated() >= t.getTotalCount();
     }
 
-    /** 选空闲槽位：0..bucketCount-1 中无活跃行的最低位 */
+    /**
+     * 选桶策略：优先空闲槽位（0..bucketCount-1 无活跃行的最低位）；全忙则**复用最低活跃槽**
+     * （重开新世代——世代隔离保证旧代账不丢：迟到操作按令牌世代寻址，E2 遍历 c:gens 全世代）。
+     * 2026-09-19 修复：旧版全忙时抛 IllegalStateException——槽位数小于活跃桶数时 -10 开桶直接炸。
+     */
     private int pickFreeSlot(long templateId) {
         Set<Integer> active = new HashSet<>();
         for (StockBucketPO r : bucketMapper.selectActive(templateId)) {
@@ -170,6 +184,10 @@ public class StockBucketRouter {
                 return slot;
             }
         }
-        throw new IllegalStateException("no free bucket slot (bucketCount=" + bucketCount + ")——配置错误或并发开桶异常");
+        int lowest = Integer.MAX_VALUE;
+        for (int slot : active) {
+            lowest = Math.min(lowest, slot);
+        }
+        return lowest;   // 复用：maxGen+1 新世代在 tryOpenBucket 里推进
     }
 }

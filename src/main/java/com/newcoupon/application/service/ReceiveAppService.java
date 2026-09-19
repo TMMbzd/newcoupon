@@ -114,8 +114,18 @@ public class ReceiveAppService {
             }
         }
         if (d.code() == -10) {
-            // P2b v2 §5：全桶耗尽 → 开桶协议（single-flight+尾量）。开不了=额度分完=真售罄。
-            if (stockBucketRouter.tryOpenBucket(req.templateId())) {
+            // P2b v2 §5：全桶耗尽 → 开桶协议（single-flight+尾量+尾差恢复）。
+            // 抢不到开桶锁≠售罄——别人正在开，短退避后重试（v2 §5 ①的原义，含夹缝自愈重放）；
+            // 有界两轮，防开桶风暴下请求自旋。真售罄（DB allocated>=total）直接走售罄。
+            // 每轮：先试开桶（自己开/别人已开/差额补建均无害）→ 真售罄才退 → 退避 → 重扣。
+            // 注意顺序：soldOutInDb(allocated>=total) 在夹缝态为真但差额未补——必须先给
+            // tryOpenBucket 一次补建机会再判售罄（2026-09-19 夹缝用例回退实锤）。
+            for (int attempt = 0; attempt < 3 && !d.success(); attempt++) {
+                boolean opened = stockBucketRouter.tryOpenBucket(req.templateId());
+                if (!opened && stockBucketRouter.soldOutInDb(req.templateId())) {
+                    break;   // 真售罄（开不动且 DB 无差额可补）——不再自旋
+                }
+                backoffQuietly();
                 d = stockGateway.deduct(cmd);
             }
         }

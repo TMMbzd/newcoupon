@@ -119,18 +119,23 @@ public class RedisStockGateway {
             return 1
             """;
 
-    /** E1+E2 原子读：清扫各代 pend 后逐代读四键，返回 {alloc, Σ四键, so存在性, b1,g1,stk1,pend1,dbi1,void1, ...} */
+    /**
+     * E1+E2 原子读：清扫各代 pend 后逐代读四键，返回 {alloc, Σ四键, so存在性, b1,g1,stk1,pend1,dbi1,void1, ...}
+     * 遍历 c:gens 全世代集合（含已退役未 GC 的代）——槽位复用重开后旧代账不丢（E2 假破缺修复，
+     * 2026-09-19 第8步故障用例推演发现：只数 act 活跃代，重开槽位的旧代 dbi 会凭空消失）。
+     */
     public static final String CONSERVATION_SCRIPT = """
-            -- KEYS: 1 act(hash)  2 alloc  3 so    ARGV: 1 tpl  2 inflightTtlMs
+            -- KEYS: 1 act(hash)  2 alloc  3 so  4 gens(set)   ARGV: 1 tpl  2 inflightTtlMs
             local t = redis.call('TIME')
             local nowms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
             local tpl = ARGV[1]
-            local flat = redis.call('HGETALL', KEYS[1])
+            local members = redis.call('SMEMBERS', KEYS[4])
             local out = {}
             local sum = 0
-            for i = 1, #flat, 2 do
-              local b = flat[i]
-              local g = flat[i + 1]
+            for _, bg in ipairs(members) do
+              local colon = string.find(bg, ':', 1, true)
+              local b = string.sub(bg, 1, colon - 1)
+              local g = string.sub(bg, colon + 1)
               local base = '{' .. tpl .. '}:' .. b .. ':' .. g
               redis.call('ZREMRANGEBYSCORE', 'c:pend:' .. base, '-inf', nowms - tonumber(ARGV[2]))
               local stk = tonumber(redis.call('GET', 'c:stk:' .. base) or '0')
@@ -150,12 +155,13 @@ public class RedisStockGateway {
      * 幂等门（治 CONC-3 崩溃夹缝重试双计）：该桶当代==目标代 且 stk 键已存在 → return 0 不再加 alloc。
      */
     public static final String OPEN_BUCKET_SCRIPT = """
-            -- KEYS: 1 act(hash)  2 alloc    ARGV: 1 tpl  2 bucket  3 gen  4 quota
+            -- KEYS: 1 act(hash)  2 alloc  3 gens(set)   ARGV: 1 tpl  2 bucket  3 gen  4 quota
             local cur = redis.call('HGET', KEYS[1], ARGV[2])
             if cur == ARGV[3] and redis.call('EXISTS', 'c:stk:{' .. ARGV[1] .. '}:' .. ARGV[2] .. ':' .. ARGV[3]) == 1 then
               return 0
             end
             redis.call('HSET', KEYS[1], ARGV[2], ARGV[3])
+            redis.call('SADD', KEYS[3], ARGV[2] .. ':' .. ARGV[3])
             local base = 'c:stk:{' .. ARGV[1] .. '}:' .. ARGV[2] .. ':' .. ARGV[3]
             redis.call('SET', base, tonumber(ARGV[4]))
             redis.call('SET', 'c:dbi:{' .. ARGV[1] .. '}:' .. ARGV[2] .. ':' .. ARGV[3], 0)
@@ -170,12 +176,13 @@ public class RedisStockGateway {
      * 按 DB 权威行一次性重建注册表+各代四键+alloc=Σquota（SET 非累加——崩溃残余不叠加）。
      */
     public static final String ENSURE_BUCKETS_SCRIPT = """
-            -- KEYS: 1 act(hash)  2 alloc    ARGV: 1 tpl  2 b1  3 g1  4 q1  5 b2  6 g2  7 q2 ...（三元组）
+            -- KEYS: 1 act(hash)  2 alloc  3 gens(set)   ARGV: 1 tpl  2 b1  3 g1  4 q1  5 b2  6 g2  7 q2 ...（三元组）
             if redis.call('HLEN', KEYS[1]) > 0 then return 0 end
             local total = 0
             for i = 2, #ARGV, 3 do
               local b, g, q = ARGV[i], ARGV[i + 1], tonumber(ARGV[i + 2])
               redis.call('HSET', KEYS[1], b, g)
+              redis.call('SADD', KEYS[3], b .. ':' .. g)
               local base = 'c:stk:{' .. ARGV[1] .. '}:' .. b .. ':' .. g
               if redis.call('EXISTS', base) == 0 then
                 redis.call('SET', base, q)
@@ -348,7 +355,7 @@ public class RedisStockGateway {
     /** E1+E2 全量守恒读数（含各代 pend 清扫副作用） */
     public GlobalConservation conservationAll(long templateId, long inflightTtlMs) {
         List<?> r = redis.execute(conservationScript,
-                List.of(actKey(templateId), allocKey(templateId), soldoutKey(templateId)),
+                List.of(actKey(templateId), allocKey(templateId), soldoutKey(templateId), gensKey(templateId)),
                 String.valueOf(templateId), String.valueOf(inflightTtlMs));
         long alloc = ((Number) r.get(0)).longValue();
         long sum = ((Number) r.get(1)).longValue();
@@ -370,14 +377,14 @@ public class RedisStockGateway {
     /** 开桶 Redis 侧（v2 §5 ④）。返回 false=幂等命中（该代已开，alloc 未双计） */
     public boolean openBucket(long templateId, int bucket, long gen, long quota) {
         Long r = redis.execute(openBucketScript,
-                List.of(actKey(templateId), allocKey(templateId)),
+                List.of(actKey(templateId), allocKey(templateId), gensKey(templateId)),
                 String.valueOf(templateId), String.valueOf(bucket), String.valueOf(gen), String.valueOf(quota));
         return r != null && r == 1;
     }
 
     /** Redis 侧灾难恢复：act 为空时按 DB 行重建（三元组 b,g,quota 平铺传入） */
     public boolean ensureBuckets(long templateId, List<long[]> bucketGenQuota) {
-        List<String> keys = List.of(actKey(templateId), allocKey(templateId));
+        List<String> keys = List.of(actKey(templateId), allocKey(templateId), gensKey(templateId));
         List<String> argv = new ArrayList<>();
         argv.add(String.valueOf(templateId));
         for (long[] bgq : bucketGenQuota) {
@@ -492,6 +499,7 @@ public class RedisStockGateway {
     private String actKey(long t) { return "c:act:{" + t + "}"; }
     private String allocKey(long t) { return "c:alloc:{" + t + "}"; }
     private String openingKey(long t) { return "c:opening:{" + t + "}"; }
+    private String gensKey(long t) { return "c:gens:{" + t + "}"; }
     private String freezeKey(long t) { return "c:fz:{" + t + "}"; }
     private String soldoutKey(long t) { return "c:so:{" + t + "}"; }
     private String ulKey(long t, long u) { return "c:ul:{" + t + "}:" + u; }
