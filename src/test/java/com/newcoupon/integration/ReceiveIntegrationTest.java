@@ -61,6 +61,8 @@ class ReceiveIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired
     private ReceiveAppService receiveAppService;
     @Autowired
+    private javax.sql.DataSource dataSource;
+    @Autowired
     private TemplateRepository templateRepository;
     @Autowired
     private UserCouponRepository userCouponRepository;
@@ -133,7 +135,7 @@ class ReceiveIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(failureDist.get("3001")).isEqualTo(900L);
 
         // 对账恒等式（ADR-0004）：成功数 == issued_count == 发放事件数
-        long issued = templateRepository.findById(templateId).orElseThrow().getIssuedCount();
+        long issued = bucketUsed(templateId);
         assertThat(issued).isEqualTo(100);
         // 事件数由 ④ 的读回断言间接覆盖 + 下面的直查
         // （coupon_event 无领域查询端口，此处经 user_coupon 行数与事件数一致性校验）
@@ -156,7 +158,7 @@ class ReceiveIntegrationTest extends ShardedIntegrationTestSupport {
         long limit = results.stream().filter(o -> "3002".equals(o.code())).count();
         assertThat(success).isEqualTo(1);
         assertThat(limit).isEqualTo(9);
-        assertThat(templateRepository.findById(templateId).orElseThrow().getIssuedCount())
+        assertThat(bucketUsed(templateId))
                 .as("超领失败的 9 次扣减必须被回滚").isEqualTo(1);
     }
 
@@ -177,7 +179,7 @@ class ReceiveIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(oks).as("恰 1 个新领成功").hasSize(1);
         long retryHint = results.stream().filter(o -> "1001".equals(o.code())).count();
         assertThat(retryHint).as("其余 9 个收到'处理中请重试'(1001)").isEqualTo(9);
-        assertThat(templateRepository.findById(templateId).orElseThrow().getIssuedCount())
+        assertThat(bucketUsed(templateId))
                 .as("只发了 1 张（闸门在扣库存前就拦下重放）").isEqualTo(1);
 
         // 串行重放（赢家已提交）：同一 requestId 再来 → duplicated=true 且同一张券
@@ -253,7 +255,7 @@ class ReceiveIntegrationTest extends ShardedIntegrationTestSupport {
         assertThatThrownByCode(() -> receiveAppService.receive(new ReceiveRequest("rb-c-2", 50_001L, templateId)),
                 ErrorCode.USER_LIMIT_EXCEEDED.getCode());
 
-        assertThat(templateRepository.findById(templateId).orElseThrow().getIssuedCount())
+        assertThat(bucketUsed(templateId))
                 .as("第二次的扣库存必须被事务回滚撤销（若未回滚，此值=2 即库存泄漏）")
                 .isEqualTo(1);
     }
@@ -265,5 +267,13 @@ class ReceiveIntegrationTest extends ShardedIntegrationTestSupport {
         } catch (BizException e) {
             assertThat(e.getErrorCode().getCode()).isEqualTo(expectedCode);
         }
+    }
+
+    /** P2b B簇换锚：ic 冻结后，发放权威读数 = SUM(stock_bucket.used)（E3c 锚） */
+    private long bucketUsed(long tplId) {
+        Long v = new org.springframework.jdbc.core.JdbcTemplate(dataSource)
+                .queryForObject("SELECT COALESCE(SUM(used),0) FROM stock_bucket WHERE template_id = ?",
+                        Long.class, tplId);
+        return v == null ? 0 : v;
     }
 }

@@ -193,26 +193,26 @@ public class StockReconcileService {
      */
     boolean mirrorCheck(CouponTemplate t) {
         ConservationReading r = stockGateway.conservation(t.getId(), inflightTtlMs);
-        long icList = t.getIssuedCount();
-        if (r.dbi() > icList) {
-            CouponTemplate fresh = templateRepository.findById(t.getId()).orElse(null);
-            if (fresh == null) {
-                return false;
-            }
-            if (r.dbi() > fresh.getIssuedCount()) {
-                log.error("PHANTOM CONFIRM: dbi({}) > 新鲜ic({})——存在被抹掉的已提交事务（P0 Bug① 签名）"
-                        + " → 立即叫醒级告警: templateId={}", r.dbi(), fresh.getIssuedCount(), t.getId());
+        // P2b B簇换锚（v2 §6.3，治 CONS-1/USAB-1）：ic 已冻结为迁移快照——幻影判据换绑
+        // Σdbi ↔ SUM(stock_bucket.used)（E3c，16 行求和廉价）。方向性不变：confirm 的 dbi+1
+        // 严格晚于其事务的 used+1 提交，诚实态 used ≥ dbi 恒成立——dbi>used 才是幻影。
+        long usedSum = stockBucketMapper.sumUsed(t.getId());
+        if (r.dbi() > usedSum) {
+            long freshUsed = stockBucketMapper.sumUsed(t.getId());   // 主键重读新鲜值（同款惯例）
+            if (r.dbi() > freshUsed) {
+                log.error("PHANTOM CONFIRM: dbi({}) > SUM(used)({})——存在被抹掉的已提交事务（P0 Bug① 签名）"
+                        + " → 立即叫醒级告警: templateId={}", r.dbi(), freshUsed, t.getId());
                 recordDrift(new DriftEvent(t.getId(), 0, r.dbi(), r.pend(),
-                        fresh.getTotalCount(), fresh.getIssuedCount(), null, r.stk(),
-                        r.dbi() - fresh.getIssuedCount(), "PHANTOM_CONFIRM",
-                        "幻影确认：dbi 超过新鲜 ic——立即叫醒级", r.voidRetired(), null));
+                        t.getTotalCount(), freshUsed, null, r.stk(),
+                        r.dbi() - freshUsed, "PHANTOM_CONFIRM",
+                        "幻影确认：dbi 超过分桶账本 used——立即叫醒级", r.voidRetired(), null));
                 return true;
             }
-            return false;   // 陈旧列表 ic 的假阳——新鲜读数止步
+            return false;   // 首读偏斜的假阳——新鲜读数止步
         }
-        long gap = icList - r.dbi();
+        long gap = usedSum - r.dbi();
         if (gap > 0 && r.pend() == 0) {
-            return submitDeep(t.getId(), "confirm-lost(ic领先镜像" + gap + ")");
+            return submitDeep(t.getId(), "confirm-lost(used领先镜像" + gap + ")");
         }
         return false;
     }
@@ -275,7 +275,9 @@ public class StockReconcileService {
         }
         ConservationReading r = stockGateway.conservation(templateId, inflightTtlMs);
         long total = t.getTotalCount();
-        long ic = t.getIssuedCount();
+        // P2b B簇换锚：deep 内 ic 变量口径=SUM(stock_bucket.used)（分桶账本发放真值；
+        // 模板 issued_count 已冻结为迁移快照）。下游 retired 判定/void 上界/推导全部随之换语义
+        long ic = stockBucketMapper.sumUsed(templateId);
 
         // 白名单②：模板可领（publish=1 AND approve=1 AND 窗口内）——不可领的走只告警通道
         boolean receivable = t.getPublishStatus() == com.newcoupon.domain.coupon.PublishStatus.PUBLISHED
@@ -309,17 +311,19 @@ public class StockReconcileService {
         // 诚实态失配只可能是 COUNT 偏大）。失配时按主键重读新鲜 ic 再判（幻影臂同款惯例），
         // 仍失配才是真账本矛盾——消灭流量期假 GUARD_FAILED（首条升级人工的立即叫醒级误报）。
         Long couponCount = userCouponRepository.countByTemplate(templateId);
-        if (couponCount != ic) {
-            CouponTemplate freshT = templateRepository.findById(templateId).orElse(null);
-            long freshIc = freshT == null ? ic : freshT.getIssuedCount();
-            if (freshT == null || couponCount != freshIc) {
-                log.error("GUARD FAILED: 新鲜ic({}) != COUNT(user_coupon)({})——账本自相矛盾，冻结一切自动动作: "
-                        + "templateId={}", freshIc, couponCount, templateId);
-                recordDrift(new DriftEvent(templateId, 0, r.dbi(), r.pend(), total, freshIc, couponCount, r.stk(),
+        // P2b B簇换锚：ic 冻结后账实互证换 COUNT ↔ SUM(stock_bucket.used)——券行与桶行
+        // used+1 在同一事务提交（CouponIssueTxService），零读偏斜窗口，比旧 ic 判据更严
+        long usedSum = stockBucketMapper.sumUsed(templateId);
+        if (couponCount != usedSum) {
+            long freshUsed = stockBucketMapper.sumUsed(templateId);   // 复读一次排除在途 COUNT 读偏
+            if (couponCount != freshUsed) {
+                log.error("GUARD FAILED: SUM(used)({}) != COUNT(user_coupon)({})——账本自相矛盾，冻结一切自动动作: "
+                        + "templateId={}", freshUsed, couponCount, templateId);
+                recordDrift(new DriftEvent(templateId, 0, r.dbi(), r.pend(), total, freshUsed, couponCount, r.stk(),
                         0, "GUARD_FAILED", reason, r.voidRetired(), null));
                 return;
             }
-            ic = freshIc;   // 读偏斜止步：新鲜 ic 追平 COUNT，用新值继续后续推导
+            ic = freshUsed;   // 读偏斜止步：新鲜 SUM(used) 追平 COUNT，用新值继续后续推导
         }
         // 只告警形态：total 被调小 / 活跃态 void 异常——仅对【活跃态】检查（so 已立或 ic≥total
         // 的退役态，污染余量正是 FORCE retired 分支要归零的对象，不得在此拦截——2026-09-16

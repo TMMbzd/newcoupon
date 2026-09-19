@@ -3,6 +3,7 @@ package com.newcoupon.application.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -42,6 +43,8 @@ class CouponIssueTxServiceTest {
     private CouponEventRepository couponEventRepository;
     @Mock
     private com.newcoupon.infrastructure.persistence.CouponExpireTaskGateway expireTaskGateway;
+    @Mock
+    private com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper;
 
     @InjectMocks
     private CouponIssueTxService service;
@@ -63,11 +66,11 @@ class CouponIssueTxServiceTest {
     @Test
     @DisplayName("成功：DB扣账 → 落券(带seq) → 记事件")
     void successPath() {
-        when(templateRepository.casDeductStock(1L)).thenReturn(1);
+        when(stockBucketMapper.casDeductBucket(1L, 0, 1)).thenReturn(1);
         when(userCouponRepository.save(any())).thenAnswer(
                 inv -> inv.<UserCoupon>getArgument(0).withId(5L));
 
-        UserCoupon result = service.issue(req(), template(), 1L, NOW);
+        UserCoupon result = service.issue(req(), template(), 1L, 0, 1L, NOW);
 
         assertThat(result.getId()).isEqualTo(5L);
         assertThat(result.getSeq()).isEqualTo(1);
@@ -77,9 +80,9 @@ class CouponIssueTxServiceTest {
     @Test
     @DisplayName("DB扣账 0 行 → 抛信号（分类在编排层，事务内不重读——RR 快照教训）")
     void zeroRowThrowsSignal() {
-        when(templateRepository.casDeductStock(1L)).thenReturn(0);
+        when(stockBucketMapper.casDeductBucket(1L, 0, 1)).thenReturn(0);
 
-        assertThatThrownBy(() -> service.issue(req(), template(), 1L, NOW))
+        assertThatThrownBy(() -> service.issue(req(), template(), 1L, 0, 1L, NOW))
                 .isInstanceOf(StockDeductRejectedException.class);
         verify(userCouponRepository, never()).save(any());
         verify(couponEventRepository, never()).append(any());
@@ -88,12 +91,12 @@ class CouponIssueTxServiceTest {
     @Test
     @DisplayName("落券撞唯一索引（幂等/序号）→ 异常透传给编排层做补偿+分类")
     void duplicateKeyPropagates() {
-        when(templateRepository.casDeductStock(1L)).thenReturn(1);
+        when(stockBucketMapper.casDeductBucket(1L, 0, 1)).thenReturn(1);
         when(userCouponRepository.save(any())).thenThrow(new DuplicateKeyException("dup"));
 
-        assertThatThrownBy(() -> service.issue(req(), template(), 1L, NOW))
+        assertThatThrownBy(() -> service.issue(req(), template(), 1L, 0, 1L, NOW))
                 .isInstanceOf(DuplicateKeyException.class);
         verify(couponEventRepository, never()).append(any());
-        verify(templateRepository, times(1)).casDeductStock(anyLong());   // 扣账确实发生了（待补偿）
+        verify(stockBucketMapper, times(1)).casDeductBucket(anyLong(), anyInt(), anyInt());   // 扣账确实发生了（待补偿）
     }
 }

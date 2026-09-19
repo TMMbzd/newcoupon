@@ -271,6 +271,8 @@ public class RedisStockGateway {
     /** 扣减结果：code 见脚本头；seq=成功时该用户第几张；bucket/gen=命中桶（令牌固化，confirm/cancel 寻址） */
     public record DeductResult(int code, long seq, int bucket, long gen) {
         public boolean success() { return code == 0; }
+        /** 兼容旧测试桩：无桶位（-1）——仅测试构造用，生产结果一律来自 deduct() 实测 */
+        public DeductResult(int code, long seq) { this(code, seq, -1, -1); }
     }
 
     /** 单代守恒读数（E1） */
@@ -436,10 +438,12 @@ public class RedisStockGateway {
         return Boolean.TRUE.equals(redis.hasKey(freezeKey(templateId)));
     }
 
-    /** 对账余量读数（聚合各活跃代；非原子——观测/测试用，巡检走 conservationAll） */
+    /** 对账余量读数（聚合各活跃代；非原子——观测/测试用，巡检走 conservationAll）。
+     * ttl 取 MAX_VALUE：观测方法不得有清扫副作用（ttl=0 会把全部在途令牌扫掉——2026-09-19
+     * repairGated 红灯实测抓到：remaining() 一调，随后的在途拦截断言就失真） */
     public Long remaining(long templateId) {
         long sum = 0;
-        for (BucketReading b : conservationAll(templateId, 0).buckets()) {
+        for (BucketReading b : conservationAll(templateId, Long.MAX_VALUE).buckets()) {
             sum += b.stk();
         }
         return sum;
@@ -448,7 +452,7 @@ public class RedisStockGateway {
     /** DB 侧已确认计数（聚合；E3c 正式形态=Σdbi ↔ SUM(stock_bucket.used)，step6 接） */
     public Long confirmedCount(long templateId) {
         long sum = 0;
-        for (BucketReading b : conservationAll(templateId, 0).buckets()) {
+        for (BucketReading b : conservationAll(templateId, Long.MAX_VALUE).buckets()) {
             sum += b.dbi();
         }
         return sum;

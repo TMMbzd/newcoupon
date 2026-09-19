@@ -74,6 +74,8 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
     private StockDriftLogGateway driftLogGateway;
     @Autowired
     private org.springframework.data.redis.core.StringRedisTemplate redis;
+    @Autowired
+    private javax.sql.DataSource dataSource;
 
     private static final AtomicInteger USER = new AtomicInteger(80_000);
 
@@ -125,7 +127,7 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(receive(uid, "n-4", tplId).code()).isEqualTo("3002");
         assertThat(receive(uid, "n-5", tplId).code()).isEqualTo("3002");
 
-        assertThat(templateRepository.findById(tplId).orElseThrow().getIssuedCount())
+        assertThat(bucketUsed(tplId))
                 .as("超领的两次不产生扣账（Redis闸门在扣库存前拦截）").isEqualTo(3);
     }
 
@@ -142,7 +144,7 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
 
         Res third = receive(uid, "s-3", tplId);
         assertThat(third.code()).as("Redis 已放行，DB 序号唯一索引仍挡住超领").isEqualTo("3002");
-        assertThat(templateRepository.findById(tplId).orElseThrow().getIssuedCount()).isEqualTo(2);
+        assertThat(bucketUsed(tplId)).isEqualTo(2);
     }
 
     @Test
@@ -178,8 +180,7 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
 
             // 恒等式验账：每笔成功都完成了 confirm（dbi+1 与令牌出清原子配对），
             // 每笔失败都在闸门被拒（从未进记账）→ 三本账精确归零，无容忍带
-            var tpl = templateRepository.findById(tplId).orElseThrow();
-            assertThat(tpl.getIssuedCount()).isEqualTo(1000);
+            assertThat(bucketUsed(tplId)).as("P2b：发放权威读数=SUM(stock_bucket.used)").isEqualTo(1000);
             assertThat(stockGateway.remaining(tplId))
                     .as("Redis余量=总量-已发（取消记账无残留）").isEqualTo(1000L - 1000);
             assertThat(stockGateway.confirmedCount(tplId)).as("dbi=1000").isEqualTo(1000);
@@ -232,12 +233,14 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         long tplId = createTemplate(100, 2, null, null);
         long uid = USER.incrementAndGet();
         DeductCommand slow = new DeductCommand(tplId, uid, "slow-1", 2, 0, 0, TODAY.get(), 172800, 600);
-        assertThat(stockGateway.deduct(slow).success()).isTrue();   // 过闸
+        var slowRes = stockGateway.deduct(slow);
+        assertThat(slowRes.success()).isTrue();   // 过闸（P2b：结果固化桶/世代）
 
         assertThat(reconcileService.identityCheckAll())
                 .as("在途期间 pend 持令牌，恒等式成立").isZero();
 
-        assertThat(stockGateway.confirm(slow)).as("TTL内 confirm：dbi+1 且令牌出清").isTrue();
+        assertThat(stockGateway.confirm(slow, slowRes.bucket(), slowRes.gen()))
+                .as("TTL内 confirm：dbi+1 且令牌出清").isTrue();
         assertThat(stockGateway.conservation(tplId, 300).sum() - 100L).isZero();
         assertThat(stockGateway.remaining(tplId)).isEqualTo(99);   // 正常扣减，未被触碰
     }
@@ -250,10 +253,11 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         long uid = USER.incrementAndGet();
         DeductCommand cmd = new DeductCommand(tplId, uid, "cp-idem-1", 2, 0, 0, TODAY.get(), 172800, 600);
 
-        assertThat(stockGateway.deduct(cmd).success()).isTrue();   // stock 100→99, ul 0→1
+        var firstRes = stockGateway.deduct(cmd);
+        assertThat(firstRes.success()).isTrue();   // stock 100→99, ul 0→1
 
-        assertThat(stockGateway.cancel(cmd, CancelCause.TRANSIENT)).isTrue();   // 正常回滚
-        assertThat(stockGateway.cancel(cmd, CancelCause.TRANSIENT))
+        assertThat(stockGateway.cancel(cmd, firstRes.bucket(), firstRes.gen(), CancelCause.TRANSIENT)).isTrue();   // 正常回滚
+        assertThat(stockGateway.cancel(cmd, firstRes.bucket(), firstRes.gen(), CancelCause.TRANSIENT))
                 .as("令牌已消费 → 第二次取消（迟到/重复投递）必须 no-op")
                 .isFalse();
 
@@ -265,9 +269,11 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
                 .as("借方被回滚一次（=0），不得减成负数或二次扣减").isZero();
 
         // 凭证删除后，同一 requestId 的真实重试必须能重新过闸（幂等不能破坏重试语义）
-        assertThat(stockGateway.deduct(cmd).success()).isTrue();
-        assertThat(stockGateway.confirm(cmd)).isTrue();
-        assertThat(stockGateway.confirm(cmd)).as("重复 confirm 不得二次 dbi+1").isFalse();
+        var retryRes = stockGateway.deduct(cmd);
+        assertThat(retryRes.success()).isTrue();
+        assertThat(stockGateway.confirm(cmd, retryRes.bucket(), retryRes.gen())).isTrue();
+        assertThat(stockGateway.confirm(cmd, retryRes.bucket(), retryRes.gen()))
+                .as("重复 confirm 不得二次 dbi+1").isFalse();
         assertThat(stockGateway.confirmedCount(tplId)).isEqualTo(1);
         assertThat(stockGateway.confirmedCount(tplId)).isEqualTo(1);
         assertThat(stockGateway.remaining(tplId)).isEqualTo(99);
@@ -284,8 +290,10 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
 
         assertThat(receive(u1, "so-1", tplId).code()).isEqualTo("OK");   // 最后 1 张
 
-        // 人为污染：Redis 余量凭空多出 5（模拟漂移/主从切换丢写）
-        stockGateway.initStock(tplId, 5);
+        // 人为污染：Redis 余量凭空多出 5（模拟漂移/主从切换丢写）——P2b：打活跃桶键
+        var soAct = redis.<String, String>opsForHash().entries("c:act:{" + tplId + "}");
+        String soBucket = soAct.keySet().iterator().next();
+        redis.opsForValue().increment("c:stk:{" + tplId + "}:" + soBucket + ":" + soAct.get(soBucket), 5);
 
         // u2 过闸（5>0）→ DB 条件扣账 0 行 → 分类先行：新快照 issued(1)>=total(1) → 售罄
         Res second = receive(u2, "so-2", tplId);
@@ -311,7 +319,7 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
 
         // u3 在 Lua 第一行被 soldout 标志短路：不过闸、不打 DB、无补偿
         assertThat(receive(u3, "so-3", tplId).code()).isEqualTo("3001");
-        assertThat(templateRepository.findById(tplId).orElseThrow().getIssuedCount())
+        assertThat(bucketUsed(tplId))
                 .as("标志短路后 DB 零压力").isEqualTo(1);
     }
 
@@ -383,12 +391,13 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         String fakeOldDay = "20990101";   // 固化为"昨天"——模拟 23:59:59.900 过闸
         DeductCommand cmd = new DeductCommand(tplId, uid, "md-1", 5, 0, 10L, fakeOldDay, 172800, 600);
 
-        assertThat(stockGateway.deduct(cmd).success()).isTrue();
+        var mdRes = stockGateway.deduct(cmd);
+        assertThat(mdRes.success()).isTrue();
         assertThat(redis.opsForValue().get("c:dly:20990101:{" + tplId + "}"))
                 .as("deduct 加的是命令里固化的那个日键").isEqualTo("1");
 
         // "午夜过后"失败取消——修复前 cancel 用 LocalDate.now() 重算日键，扣的是今天（错键）
-        assertThat(stockGateway.cancel(cmd, CancelCause.TRANSIENT)).isTrue();
+        assertThat(stockGateway.cancel(cmd, mdRes.bucket(), mdRes.gen(), CancelCause.TRANSIENT)).isTrue();
 
         assertThat(redis.opsForValue().get("c:dly:20990101:{" + tplId + "}"))
                 .as("cancel 必须回扣原日键（否则次日日限被偷走=超发方向）").isEqualTo("0");
@@ -402,24 +411,35 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         long uid = USER.incrementAndGet();
         DeductCommand cmd = new DeductCommand(tplId, uid, "rg-1", 2, 0, 0, TODAY.get(), 172800, 600);
 
-        assertThat(stockGateway.deduct(cmd).success()).isTrue();   // 令牌在途挂着
+        var rgRes = stockGateway.deduct(cmd);
+        assertThat(rgRes.success()).isTrue();   // 令牌在途挂着（P2b：固化桶/世代）
         assertThat(stockGateway.remaining(tplId)).isEqualTo(99);
 
         // 守卫①（Java 侧）此刻读到 pending=0 是伪造的前提——真实场景是"检查后、执行前溜进新预占"。
         // 这里直接构造"执行瞬间在途非空"：repair 必须原子拒绝，库存不被覆盖。
-        assertThat(stockGateway.rebuild(tplId, "force", 100, 0, 300, 0, 0).ret())
+        assertThat(stockGateway.rebuildBucket(tplId, rgRes.bucket(), rgRes.gen(), "force",
+                100, 0, false, 300, 0, 0).ret())
                 .as("在途非空，Lua ZCARD 门必须原子拦截（TOCTOU 窗口关闭）").isEqualTo(-1);
         assertThat(stockGateway.remaining(tplId))
                 .as("被拦截的修复不得写任何值").isEqualTo(99);
 
         // 令牌出清（取消）后，同一修复放行
-        assertThat(stockGateway.cancel(cmd, CancelCause.TRANSIENT)).isTrue();
-        assertThat(stockGateway.rebuild(tplId, "force", 100, 0, 300, 0, 0).rebuilt()).isTrue();
+        assertThat(stockGateway.cancel(cmd, rgRes.bucket(), rgRes.gen(), CancelCause.TRANSIENT)).isTrue();
+        assertThat(stockGateway.rebuildBucket(tplId, rgRes.bucket(), rgRes.gen(), "force",
+                100, 0, false, 300, 0, 0).rebuilt()).isTrue();
         assertThat(stockGateway.remaining(tplId)).isEqualTo(100);
     }
 
     /** 只删 stock key（保留 issued/pend 等记账 key）——精确模拟"额度 key 丢失"（N2） */
     private void redisFlushStock(long tplId) {
         redis.delete("c:stk:{" + tplId + "}");   // key 规范属网关契约（docs/10 §10.2）
+    }
+
+    /** P2b B簇换锚：ic 冻结后，发放权威读数 = SUM(stock_bucket.used)（E3c 锚） */
+    private long bucketUsed(long tplId) {
+        Long v = new org.springframework.jdbc.core.JdbcTemplate(dataSource)
+                .queryForObject("SELECT COALESCE(SUM(used),0) FROM stock_bucket WHERE template_id = ?",
+                        Long.class, tplId);
+        return v == null ? 0 : v;
     }
 }

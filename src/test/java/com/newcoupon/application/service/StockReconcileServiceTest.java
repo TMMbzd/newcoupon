@@ -2,6 +2,8 @@ package com.newcoupon.application.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -51,6 +53,10 @@ class StockReconcileServiceTest {
     private StockDriftLogGateway driftLog;
     @Mock
     private RedisScanLock scanLock;
+    @Mock
+    private com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper;
+    @Mock
+    private StockBucketRouter stockBucketRouter;
 
     private StockReconcileService forceService;   // force 模式
     private StockReconcileService shadowService;  // 影子模式
@@ -58,10 +64,10 @@ class StockReconcileServiceTest {
     @BeforeEach
     void setUp() {
         forceService = new StockReconcileService(templateRepository, userCouponRepository,
-                couponUsageRepository, stockGateway, driftLog, scanLock,
+                couponUsageRepository, stockGateway, driftLog, scanLock, stockBucketMapper, stockBucketRouter,
                 1000L, 0L, "force", 500);
         shadowService = new StockReconcileService(templateRepository, userCouponRepository,
-                couponUsageRepository, stockGateway, driftLog, scanLock,
+                couponUsageRepository, stockGateway, driftLog, scanLock, stockBucketMapper, stockBucketRouter,
                 1000L, 0L, "shadow", 500);
     }
 
@@ -130,7 +136,8 @@ class StockReconcileServiceTest {
     @DisplayName("镜像·幻影臂：dbi>列表ic 但新鲜ic 追平——陈旧列表不告警（P0-① 零误报）")
     void phantomArmStaleListIcNoAlarm() {
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(90, 0, 11, 0, false));   // dbi=11
-        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(11L)));   // 新鲜 ic=11 → 追平
+        // P2b E3c：镜像锚=sumUsed。首读 10（陈旧），主键复读 11 追平 → 不告警
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L, 11L);
 
         assertThat(forceService.mirrorCheck(tpl(10L))).isFalse();   // 列表 ic=10（陈旧）
 
@@ -141,7 +148,7 @@ class StockReconcileServiceTest {
     @DisplayName("镜像·幻影臂：dbi>新鲜ic——真幻影（抹掉已提交事务），立即告警")
     void phantomArmFreshIcAlarms() {
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(89, 0, 11, 0, false));
-        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));   // 新鲜 ic 仍=10 < dbi=11
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L, 10L);   // 两次都 10 < dbi=11：真幻影
 
         assertThat(forceService.mirrorCheck(tpl(10L))).isTrue();
 
@@ -152,6 +159,7 @@ class StockReconcileServiceTest {
     @DisplayName("镜像·confirm-lost 臂：gap>0 且 pend==0 → deep；pend>0 时不动作（方向性判据）")
     void confirmLostArmDirectional() {
         // pend>0：在途解释了 gap——不动作（流量期告警永动的解药）
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);   // P2b：镜像锚（dbi=8，gap=2）
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(89, 2, 8, 0, false));   // gap=2=pend
         assertThat(forceService.mirrorCheck(tpl(10L))).isFalse();
 
@@ -166,8 +174,29 @@ class StockReconcileServiceTest {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(t));
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
         when(userCouponRepository.countByTemplate(1L)).thenReturn(t.getIssuedCount());
-        when(stockGateway.rebuild(eq(1L), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong()))
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(t.getIssuedCount());   // P2b：守卫④/deep ic 换锚
+        // P2b 分代桥接路径：DB 行 + 分代读数 + 分代重建
+        when(stockBucketMapper.selectActive(1L)).thenReturn(java.util.List.of(bucketRow(0, 1, 100, 10)));
+        when(stockGateway.conservationAll(eq(1L), anyLong())).thenReturn(
+                new com.newcoupon.infrastructure.redis.RedisStockGateway.GlobalConservation(
+                        100, 100, false,
+                        java.util.List.of(new com.newcoupon.infrastructure.redis.RedisStockGateway.BucketReading(
+                                0, 1, 88, 0, 10, 0))));
+        when(stockGateway.rebuildBucket(eq(1L), anyInt(), anyLong(), any(), anyLong(), anyLong(),
+                anyBoolean(), anyLong(), anyLong(), anyLong()))
                 .thenReturn(new RebuildResult(1, 90, 10, 0));
+    }
+
+    private com.newcoupon.infrastructure.persistence.po.StockBucketPO bucketRow(int b, int g, long quota, long used) {
+        com.newcoupon.infrastructure.persistence.po.StockBucketPO po =
+                new com.newcoupon.infrastructure.persistence.po.StockBucketPO();
+        po.setTemplateId(1L);
+        po.setBucketNo(b);
+        po.setGeneration(g);
+        po.setQuota(quota);
+        po.setUsed(used);
+        po.setStatus(0);
+        return po;
     }
 
     @Test
@@ -177,7 +206,8 @@ class StockReconcileServiceTest {
 
         forceService.deepReconcileSync(1L, "test");
 
-        verify(stockGateway).rebuild(eq(1L), eq("force"), eq(100L), eq(10L), eq(1000L), eq(10L), eq(0L));
+        verify(stockGateway).rebuildBucket(eq(1L), anyInt(), anyLong(), eq("force"),
+                eq(100L), eq(10L), anyBoolean(), eq(1000L), eq(10L), eq(0L));
         verify(stockGateway).clearSoldout(1L);   // B4：修复恢复余量必清标志
         verify(driftLog).record(any());
     }
@@ -189,7 +219,8 @@ class StockReconcileServiceTest {
 
         shadowService.deepReconcileSync(1L, "test");
 
-        verify(stockGateway).rebuild(eq(1L), eq("shadow"), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
+        verify(stockGateway).rebuildBucket(eq(1L), anyInt(), anyLong(), eq("shadow"),
+                anyLong(), anyLong(), anyBoolean(), anyLong(), anyLong(), anyLong());
         verify(stockGateway, never()).clearSoldout(anyLong());
     }
 
@@ -201,7 +232,8 @@ class StockReconcileServiceTest {
 
         forceService.deepReconcileSync(1L, "test");
 
-        verify(stockGateway, never()).rebuild(anyLong(), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
+        verify(stockGateway, never()).rebuildBucket(anyLong(), anyInt(), anyLong(), any(),
+                anyLong(), anyLong(), anyBoolean(), anyLong(), anyLong(), anyLong());
         verify(driftLog).record(any());
     }
 
@@ -213,7 +245,8 @@ class StockReconcileServiceTest {
 
         forceService.deepReconcileSync(1L, "test");
 
-        verify(stockGateway, never()).rebuild(anyLong(), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
+        verify(stockGateway, never()).rebuildBucket(anyLong(), anyInt(), anyLong(), any(),
+                anyLong(), anyLong(), anyBoolean(), anyLong(), anyLong(), anyLong());
         verify(driftLog).record(any());
     }
 
@@ -222,11 +255,13 @@ class StockReconcileServiceTest {
     void deepGuardFailedFreezes() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
-        when(userCouponRepository.countByTemplate(1L)).thenReturn(9L);   // ≠ ic=10
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
+        when(userCouponRepository.countByTemplate(1L)).thenReturn(9L);   // ≠ SUM(used)=10 → GUARD_FAILED
 
         forceService.deepReconcileSync(1L, "test");
 
-        verify(stockGateway, never()).rebuild(anyLong(), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
+        verify(stockGateway, never()).rebuildBucket(anyLong(), anyInt(), anyLong(), any(),
+                anyLong(), anyLong(), anyBoolean(), anyLong(), anyLong(), anyLong());
         verify(driftLog).record(any());
     }
 
@@ -235,8 +270,16 @@ class StockReconcileServiceTest {
     void deepBarrierAborts() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
         when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
-        when(stockGateway.rebuild(eq(1L), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong()))
+        when(stockBucketMapper.selectActive(1L)).thenReturn(java.util.List.of(bucketRow(0, 1, 100, 10)));
+        when(stockGateway.conservationAll(eq(1L), anyLong())).thenReturn(
+                new com.newcoupon.infrastructure.redis.RedisStockGateway.GlobalConservation(
+                        100, 100, false,
+                        java.util.List.of(new com.newcoupon.infrastructure.redis.RedisStockGateway.BucketReading(
+                                0, 1, 88, 0, 10, 0))));
+        when(stockGateway.rebuildBucket(eq(1L), anyInt(), anyLong(), any(), anyLong(), anyLong(),
+                anyBoolean(), anyLong(), anyLong(), anyLong()))
                 .thenReturn(new RebuildResult(-2, 0, 0, 0));
 
         forceService.deepReconcileSync(1L, "test");
@@ -250,11 +293,13 @@ class StockReconcileServiceTest {
     void deepImpossibleStateAlarms() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(95, 0, 10, 0, false));   // 95+10>100
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
         when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
 
         forceService.deepReconcileSync(1L, "test");
 
-        verify(stockGateway, never()).rebuild(anyLong(), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
+        verify(stockGateway, never()).rebuildBucket(anyLong(), anyInt(), anyLong(), any(),
+                anyLong(), anyLong(), anyBoolean(), anyLong(), anyLong(), anyLong());
     }
 
     @Test
@@ -262,11 +307,13 @@ class StockReconcileServiceTest {
     void deepImprisonedAlarms() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(0, 0, 10, 90, false));   // 0+10+90=100
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
         when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
 
         forceService.deepReconcileSync(1L, "test");
 
-        verify(stockGateway, never()).rebuild(anyLong(), any(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong());
+        verify(stockGateway, never()).rebuildBucket(anyLong(), anyInt(), anyLong(), any(),
+                anyLong(), anyLong(), anyBoolean(), anyLong(), anyLong(), anyLong());
         verify(driftLog).record(any());
     }
 }

@@ -70,8 +70,10 @@ class ConservationRedLightIntegrationTest extends ShardedIntegrationTestSupport 
         long tplId = publishedTemplate("stk");
         // 触发一轮巡检建立基线（首轮 suspicion 清零）
         reconcileService.identityCheckAll();
-        // 污染：直接改低 stk（人工错写/部分失效形态）——恒等式 issued−dbi−pend 不受影响
-        redis.opsForValue().set("c:stk:{" + tplId + "}", "50");
+        // 污染：直接改低活跃桶的 stk（人工错写/部分失效形态）——P2b：打桶键（旧单键已退役）
+        var act = redis.<String, String>opsForHash().entries("c:act:{" + tplId + "}");
+        String pb = act.keySet().iterator().next();
+        redis.opsForValue().set("c:stk:{" + tplId + "}:" + pb + ":" + act.get(pb), "50");
 
         reconcileService.identityCheckAll();   // 第一轮：怀疑
         int confirmed = reconcileService.identityCheckAll();   // 第二轮：定罪（两轮确认语义）
@@ -93,9 +95,17 @@ class ConservationRedLightIntegrationTest extends ShardedIntegrationTestSupport 
             assertThat(r.duplicated()).isFalse();
         }
         reconcileService.identityCheckAll();   // 基线
-        // 清库形态：状态键全部消失（故障切换丢整库）——恒等式读三个 nil 按 0 算：0−0−0=0 平
-        redis.delete(java.util.List.of("c:stk:{" + tplId + "}", "c:dbi:{" + tplId + "}",
-                "c:issued:{" + tplId + "}", "c:pend:{" + tplId + "}"));
+        // 清库形态：状态键+注册表+镜像全消失（故障切换丢整库）——P2b：桶键族
+        var act2 = redis.<String, String>opsForHash().entries("c:act:{" + tplId + "}");
+        java.util.List<String> doomed = new java.util.ArrayList<>();
+        for (var e : act2.entrySet()) {
+            String base = "{" + tplId + "}:" + e.getKey() + ":" + e.getValue();
+            doomed.add("c:stk:" + base); doomed.add("c:dbi:" + base);
+            doomed.add("c:void:" + base); doomed.add("c:pend:" + base);
+        }
+        doomed.add("c:act:{" + tplId + "}");
+        doomed.add("c:alloc:{" + tplId + "}");
+        redis.delete(doomed);
 
         reconcileService.identityCheckAll();   // 第一轮：怀疑
         int confirmed = reconcileService.identityCheckAll();   // 第二轮：定罪
