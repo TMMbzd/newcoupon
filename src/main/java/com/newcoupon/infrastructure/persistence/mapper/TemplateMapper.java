@@ -49,6 +49,6 @@ public interface TemplateMapper extends BaseMapper<CouponTemplatePO> {
      * affected=0 且 allocated>=total → 真售罄（走 cancel sold_out 路径）。
      */
     @Update("UPDATE coupon_template SET allocated = allocated + #{n} "
-            + "WHERE id = #{id} AND allocated + #{n} <= total_count")
+            + "WHERE id = #{id} AND allocated + #{n} <= total_count AND #{n} > 0")
     int casAllocate(@Param("id") long id, @Param("n") long n);
 }

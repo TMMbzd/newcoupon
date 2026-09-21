@@ -177,8 +177,10 @@ public class StockBucketRouter {
             return false;
         }
         boolean rebuilt = gateway.ensureBuckets(templateId,
-                rows.stream().map(r -> new long[]{r.getBucketNo(), r.getGeneration(), r.getQuota()})
-                        .toList());
+                rows.stream().map(r -> new long[]{r.getBucketNo(), r.getGeneration(),
+                        r.getQuota(), r.getUsed()})
+                        .toList());   // 四元组：ENSURE 按 quota-used 推导铸 stk（2026-09-20 修复：
+                                      // 此前传三元组与网关四元组消费不匹配——-7 重建路径运行时越界）
         if (rebuilt) {
             log.warn("buckets ENSURED from DB rows (redis lost registry?): templateId={}, rows={}",
                     templateId, rows.size());
