@@ -51,6 +51,10 @@ coupon:
       enabled: true
       window-seconds: 60
       max-per-window: 30
+  # 管理面最小鉴权（L27）：POST /api/templates* 需 X-Admin-Token 与此一致；空=拒绝所有管理写（fail-closed）
+  # 生产必须用环境变量覆盖；完整 HMAC/防重放/双人复核在 P7
+  admin:
+    token: ${ADMIN_TOKEN:dev-admin-token}
 
 mybatis-plus:
   configuration:
