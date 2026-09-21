@@ -64,6 +64,7 @@ public class ReceiveAppService {
     private final StockReconcileService reconcileService;
     private final StockDriftLogGateway driftLog;
     private final StockBucketRouter stockBucketRouter;
+    private final CachedTemplateReader cachedTemplateReader;
 
     public ReceiveAppService(UserCouponRepository userCouponRepository,
                              TemplateRepository templateRepository,
@@ -71,7 +72,8 @@ public class ReceiveAppService {
                              RedisStockGateway stockGateway,
                              StockReconcileService reconcileService,
                              StockDriftLogGateway driftLog,
-                             StockBucketRouter stockBucketRouter) {
+                             StockBucketRouter stockBucketRouter,
+                             CachedTemplateReader cachedTemplateReader) {
         this.userCouponRepository = userCouponRepository;
         this.templateRepository = templateRepository;
         this.issueTxService = issueTxService;
@@ -79,6 +81,7 @@ public class ReceiveAppService {
         this.reconcileService = reconcileService;
         this.driftLog = driftLog;
         this.stockBucketRouter = stockBucketRouter;
+        this.cachedTemplateReader = cachedTemplateReader;
     }
 
     public ReceiveResult receive(ReceiveRequest req) {
@@ -89,8 +92,9 @@ public class ReceiveAppService {
      * @param retryOnce L3 自愈后的透明重试标志（仅允许一层——防失忆场景下撞索引→自愈→再撞的死循环）
      */
     private ReceiveResult doReceive(ReceiveRequest req, boolean retryOnce) {
-        // ① 读模板 + 可领性校验（M3 将替换为二级缓存；编排层无事务=每次读最新快照）
-        CouponTemplate template = templateRepository.findById(req.templateId())
+        // ① 读模板 + 可领性校验（P2c：走本地缓存——每请求省一次 DB 主键查；分类/巡检等
+        //    需要"事务外新快照"的路径仍直读 repository，绝不走缓存）
+        CouponTemplate template = cachedTemplateReader.get(req.templateId())
                 .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + req.templateId()));
         template.assertReceivable(LocalDateTime.now());
 

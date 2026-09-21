@@ -61,6 +61,16 @@ class ReceiveAppServiceTest {
     private com.newcoupon.infrastructure.persistence.StockDriftLogGateway driftLog;
     @Mock
     private com.newcoupon.application.service.StockBucketRouter stockBucketRouter;
+    @Mock
+    private CachedTemplateReader cachedTemplateReader;
+
+    @org.junit.jupiter.api.BeforeEach
+    void readerPassthrough() {
+        // 入口读模板已走缓存（P2c）——让 mock 的 reader 透传给 mock 的 repository，
+        // 下方所有 findById 桩（含多段序列桩）原样生效；分类路径的直连桩不受影响
+        org.mockito.Mockito.when(cachedTemplateReader.get(org.mockito.ArgumentMatchers.anyLong()))
+                .thenAnswer(inv -> templateRepository.findById(inv.getArgument(0)));
+    }
 
     @InjectMocks
     private ReceiveAppService service;
@@ -139,7 +149,7 @@ class ReceiveAppServiceTest {
     @Test
     @DisplayName("模板不存在 → 2001（闸门前拦截）")
     void templateMissing() {
-        when(templateRepository.findById(1L)).thenReturn(Optional.empty());
+        when(cachedTemplateReader.get(1L)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.receive(new ReceiveRequest("req-1", 42L, 1L)))
                 .extracting(e -> ((BizException) e).getErrorCode())
@@ -188,7 +198,7 @@ class ReceiveAppServiceTest {
     @Test
     @DisplayName("闸门-7未初始化 → 退避+懒重建（条件SET）后重试成功")
     void gateUninitializedRebuildsAndRetries() {
-        when(templateRepository.findById(1L)).thenReturn(Optional.of(template(1)));
+        when(cachedTemplateReader.get(1L)).thenReturn(Optional.of(template(1)));
         when(stockGateway.deduct(any()))
                 .thenReturn(new DeductResult(-7, 0))
                 .thenReturn(new DeductResult(0, 1));

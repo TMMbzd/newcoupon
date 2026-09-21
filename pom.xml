@@ -78,6 +78,11 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-data-redis</artifactId>
     </dependency>
+    <!-- P2c 模板本地缓存（Caffeine：refreshAfterWrite 防击穿/负缓存短TTL 防穿透/TTL抖动 防雪崩） -->
+    <dependency>
+      <groupId>com.github.ben-manes.caffeine</groupId>
+      <artifactId>caffeine</artifactId>
+    </dependency>
 
     <!-- 测试：单测必须秒级、相互独立、不依赖 Spring 容器与真实中间件（大厂单测基线） -->
     <dependency>

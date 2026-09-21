@@ -41,16 +41,19 @@ public class TemplateAppService {
     private final RedisStockGateway redisStockGateway;
     private final com.newcoupon.infrastructure.persistence.StockDriftLogGateway driftLog;
     private final StockBucketRouter stockBucketRouter;
+    private final CachedTemplateReader cachedTemplateReader;
 
     // 构造器注入（而非字段 @Autowired）：依赖显式、不可变、单测可直接 new——企业规范
     public TemplateAppService(TemplateRepository templateRepository,
                               RedisStockGateway redisStockGateway,
                               StockDriftLogGateway driftLog,
-                              StockBucketRouter stockBucketRouter) {
+                              StockBucketRouter stockBucketRouter,
+                              CachedTemplateReader cachedTemplateReader) {
         this.templateRepository = templateRepository;
         this.redisStockGateway = redisStockGateway;
         this.driftLog = driftLog;
         this.stockBucketRouter = stockBucketRouter;
+        this.cachedTemplateReader = cachedTemplateReader;
     }
 
     /** 建券：生成业务编码 → 聚合工厂校验 → 落库（通用限领 1~99 自 ADR-0006 开放） */
@@ -76,6 +79,7 @@ public class TemplateAppService {
         CouponTemplate saved = templateRepository.save(template);
         log.info("template created: id={}, code={}, name={}, totalCount={}",
                 saved.getId(), templateCode, saved.getName(), saved.getTotalCount());
+        cachedTemplateReader.invalidate(saved.getId());   // 防御：清同 id 负缓存
         return new CreatedTemplate(saved.getId(), templateCode);
     }
 
@@ -93,6 +97,8 @@ public class TemplateAppService {
             throw new BizException(ErrorCode.STATE_CONFLICT,
                     "发布失败：模板状态已被并发变更，请刷新后重试");
         }
+        // P2c：发布后主动失效本地缓存——大促 0 点发布必须立刻可见，不能等 TTL
+        cachedTemplateReader.invalidate(id);
         // 发布=开桶协议（P2b v2 §7）：casAllocate 逐桶分配（allocated 单调不减）+ 建桶行 + Redis 开桶 Lua。
         // 取代 ADR-0009 的 resetAll 整本重置——发布是状态机一次性迁移（UNPUBLISHED→PUBLISHED CAS 在上），
         // 重发布对账协议（v2 §9）属 P7 appendStock/重新上线链路，届时配 COUNT 对账后开新代桶。

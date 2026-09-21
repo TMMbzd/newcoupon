@@ -37,6 +37,9 @@ class TemplateAppServiceTest {
     @Mock
     private com.newcoupon.infrastructure.redis.RedisStockGateway stockGateway;
 
+    @Mock
+    private CachedTemplateReader cachedTemplateReader;
+
     @InjectMocks
     private TemplateAppService service;
 
