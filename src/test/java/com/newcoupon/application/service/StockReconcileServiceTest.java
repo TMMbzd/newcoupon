@@ -148,7 +148,7 @@ class StockReconcileServiceTest {
     void phantomArmStaleListIcNoAlarm() {
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(90, 0, 11, 0, false));   // dbi=11
         // P2b E3c：镜像锚=sumUsed。首读 10（陈旧），主键复读 11 追平 → 不告警
-        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L, 11L);
+        when(stockBucketMapper.sumUsedBucketed(1L)).thenReturn(10L, 11L);
 
         assertThat(forceService.mirrorCheck(tpl(10L))).isFalse();   // 列表 ic=10（陈旧）
 
@@ -159,7 +159,7 @@ class StockReconcileServiceTest {
     @DisplayName("镜像·幻影臂：dbi>新鲜ic——真幻影（抹掉已提交事务），立即告警")
     void phantomArmFreshIcAlarms() {
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(89, 0, 11, 0, false));
-        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L, 10L);   // 两次都 10 < dbi=11：真幻影
+        when(stockBucketMapper.sumUsedBucketed(1L)).thenReturn(10L, 10L);
 
         assertThat(forceService.mirrorCheck(tpl(10L))).isTrue();
 
@@ -170,7 +170,8 @@ class StockReconcileServiceTest {
     @DisplayName("镜像·confirm-lost 臂：gap>0 且 pend==0 → deep；pend>0 时不动作（方向性判据）")
     void confirmLostArmDirectional() {
         // pend>0：在途解释了 gap——不动作（流量期告警永动的解药）
-        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);   // P2b：镜像锚（dbi=8，gap=2）
+        when(stockBucketMapper.sumUsedBucketed(1L)).thenReturn(10L);   // P2b：镜像锚（dbi=8，gap=2）
+        when(stockBucketMapper.sumUsedBucketed(1L)).thenReturn(10L);
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(89, 2, 8, 0, false));   // gap=2=pend
         assertThat(forceService.mirrorCheck(tpl(10L))).isFalse();
 
@@ -239,6 +240,7 @@ class StockReconcileServiceTest {
     @DisplayName("deep·白名单②不可领模板：破缺只告警（ALARM_ONLY），不修复")
     void deepNotReceivableAlarmsOnly() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(offlineTpl(10L)));
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(50, 0, 10, 0, false));   // sum=60≠100
 
         forceService.deepReconcileSync(1L, "test");
@@ -252,6 +254,7 @@ class StockReconcileServiceTest {
     @DisplayName("deep·在途未清：DEFERRED（修复会覆盖在途记账——推迟到下轮）")
     void deepPendingDefers() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 2, 10, 0, false));   // pend=2
 
         forceService.deepReconcileSync(1L, "test");
@@ -265,8 +268,8 @@ class StockReconcileServiceTest {
     @DisplayName("deep·账实矛盾（ic≠COUNT）：GUARD_FAILED 冻结一切自动动作（修复失去基准）")
     void deepGuardFailedFreezes() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
-        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
         when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
         when(userCouponRepository.countByTemplate(1L)).thenReturn(9L);   // ≠ SUM(used)=10 → GUARD_FAILED
 
         forceService.deepReconcileSync(1L, "test");
@@ -280,8 +283,8 @@ class StockReconcileServiceTest {
     @DisplayName("deep·Lua 栅栏中止（-2）：BARRIER_ABORT 落表（读数与执行间混入写）")
     void deepBarrierAborts() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
-        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
         when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
         when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
         when(stockBucketMapper.selectActive(1L)).thenReturn(java.util.List.of(bucketRow(0, 1, 100, 10)));
         when(stockGateway.conservationAll(eq(1L), anyLong())).thenReturn(
@@ -303,8 +306,8 @@ class StockReconcileServiceTest {
     @DisplayName("deep·不可能态（stk+dbi>total）：只告警（total 被调小/void 异常）")
     void deepImpossibleStateAlarms() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
-        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(95, 0, 10, 0, false));   // 95+10>100
         when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(95, 0, 10, 0, false));   // 95+10>100
         when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
 
         forceService.deepReconcileSync(1L, "test");
@@ -317,8 +320,8 @@ class StockReconcileServiceTest {
     @DisplayName("deep·囚禁告警：stk=0 无 so 且 dbi+void=total 且 dbi<total（重新上线未走协议）")
     void deepImprisonedAlarms() {
         when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
-        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(0, 0, 10, 90, false));   // 0+10+90=100
         when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(0, 0, 10, 90, false));   // 0+10+90=100
         when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
 
         forceService.deepReconcileSync(1L, "test");

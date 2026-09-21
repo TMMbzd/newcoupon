@@ -401,6 +401,12 @@ public class RedisStockGateway {
         return r != null && r == 1;
     }
 
+    /** 指定（桶,世代）的剩余量读数（null=键不存在）——批量重开的封账判定用 */
+    public Long bucketStock(long templateId, int bucket, long gen) {
+        String v = redis.opsForValue().get(stkKey(templateId, bucket, gen));
+        return v == null ? null : Long.parseLong(v);
+    }
+
     /** 活跃注册表只读（槽->当代世代，字符串形态）——孤儿桶重放/巡检辅助 */
     public java.util.Map<String, String> actEntries(long templateId) {
         return redis.<String, String>opsForHash().entries(actKey(templateId));

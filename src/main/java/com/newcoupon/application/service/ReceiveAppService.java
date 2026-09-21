@@ -130,7 +130,10 @@ public class ReceiveAppService {
             // 注意顺序：soldOutInDb(allocated>=total) 在夹缝态为真但差额未补——必须先给
             // tryOpenBucket 一次补建机会再判售罄（2026-09-19 夹缝用例回退实锤）。
             for (int attempt = 0; attempt < 3 && !d.success(); attempt++) {
-                boolean opened = stockBucketRouter.tryOpenBucket(req.templateId());
+                // 批量重开优先（一波封空代+补满槽——防大盘模板退化单行热点）；false 回退
+                // 单桶路径（它兼管孤儿重放/差额恢复这些边角）
+                boolean opened = stockBucketRouter.refillExhaustedBuckets(req.templateId())
+                        || stockBucketRouter.tryOpenBucket(req.templateId());
                 if (!opened && stockBucketRouter.soldOutInDb(req.templateId())) {
                     break;   // 真售罄（开不动且 DB 无差额可补）——不再自旋
                 }

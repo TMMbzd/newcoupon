@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.newcoupon.application.dto.ReceiveRequest;
 import com.newcoupon.application.dto.TemplateCreateRequest;
 import com.newcoupon.application.service.ReceiveAppService;
+import com.newcoupon.application.service.StockBucketRouter;
 import com.newcoupon.application.service.TemplateAppService;
 import com.newcoupon.common.BizException;
 import com.newcoupon.infrastructure.redis.RedisStockGateway;
@@ -201,6 +202,50 @@ class P2bFaultInjectionTest extends ShardedIntegrationTestSupport {
         var gc = stockGateway.conservationAll(tpl, 300);
         assertThat(gc.redisSum()).isEqualTo(gc.alloc()).isEqualTo(15L);   // E2 双平：无双重分配
         assertThat(gc.buckets().size()).as("复用槽位=世代叠加（2 初代+复用新代）").isGreaterThanOrEqualTo(3);
+    }
+
+    // ---------- 大盘模板批量重开（修"全桶耗尽后单桶补=单行热点"，2026-09-21） ----------
+
+    @Test
+    @Timeout(180)
+    @DisplayName("批量重开：25张/2槽/桶额5——每波耗尽后两槽同时换代（非一次一只），尾量5收官")
+    void megaTemplate_batchRefill_keepsParallelism() {
+        long tpl = createTemplate(25);   // 本类 props 桶额5×2槽：发布开 2 桶（5+5=10），余 15 未分配
+        // route() 是公开纯函数——离线按桶挑用户，精确 5:5 排空两桶且不提前触发 -10
+        // （连续用户 hash 不均会让后段提前撞 -10；perUserLimit=1，每波都要新用户）
+        java.util.List<Long> b0 = new java.util.ArrayList<>(), b1 = new java.util.ArrayList<>();
+        for (long uid = 1; uid <= 200_000 && (b0.size() < 15 || b1.size() < 15); uid++) {
+            int b = StockBucketRouter.route(uid, 2);
+            if (b == 0 && b0.size() < 15) { b0.add(uid); }
+            if (b == 1 && b1.size() < 15) { b1.add(uid); }
+        }
+        int seq = 0;
+        for (int i = 0; i < 5; i++) { assertThat(receiveQuietly(b0.get(i), "m0-" + seq++, tpl)).isEqualTo("OK"); }
+        for (int i = 0; i < 5; i++) { assertThat(receiveQuietly(b1.get(i), "m1-" + seq++, tpl)).isEqualTo("OK"); }
+        var act1 = redis.<String, String>opsForHash().entries("c:act:{" + tpl + "}");
+        assertThat(act1).containsEntry("0", "1").containsEntry("1", "1");   // 初代确认（未触发重开）
+
+        // 第 11 张：-10 → 批量重开应把两个槽**都**推到第 2 代（一次一只的旧实现只推槽 0）
+        assertThat(receiveQuietly(b0.get(5), "m-wave2", tpl)).isEqualTo("OK");
+        var act2 = redis.<String, String>opsForHash().entries("c:act:{" + tpl + "}");
+        assertThat(act2).as("批量重开：两槽同波换代（gen 都=2），并行度恢复而非单行热点")
+                .containsEntry("0", "2").containsEntry("1", "2");
+
+        // 第二波排干：重开额度 5+5，已用 1（m-wave2），剩 9——桶0 用户 5 个 + 桶1 用户 4 个
+        for (int i = 6; i < 11; i++) { assertThat(receiveQuietly(b0.get(i), "w2-0-" + i, tpl)).isEqualTo("OK"); }
+        for (int i = 6; i < 10; i++) { assertThat(receiveQuietly(b1.get(i), "w2-1-" + i, tpl)).isEqualTo("OK"); }
+        // 全部排干后的下一张：尾量 5 → 批量重开只开槽 0 第 3 代（额度分到只剩 5）
+        assertThat(receiveQuietly(b1.get(11), "m-wave3", tpl)).isEqualTo("OK");
+        var act3 = redis.<String, String>opsForHash().entries("c:act:{" + tpl + "}");
+        assertThat(act3.get("0")).as("第三波：尾量5落在槽0第3代").isEqualTo("3");
+
+        // 尾量剩 4：排干后第 26 张真售罄
+        for (int i = 12; i < 15; i++) { assertThat(receiveQuietly(b0.get(i), "w3-" + i, tpl)).isEqualTo("OK"); }
+        assertThat(receiveQuietly(b1.get(12), "w3-last", tpl)).isEqualTo("OK");
+        assertThat(receiveQuietly(b1.get(13), "m-soldout", tpl)).isEqualTo("3001");   // 25 张发完
+
+        var gc = stockGateway.conservationAll(tpl, 300);
+        assertThat(gc.redisSum()).as("E2a 全程双平").isEqualTo(gc.alloc()).isEqualTo(25L);
     }
 
     // ---------- helpers ----------

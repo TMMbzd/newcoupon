@@ -196,9 +196,9 @@ public class StockReconcileService {
         // P2b B簇换锚（v2 §6.3，治 CONS-1/USAB-1）：ic 已冻结为迁移快照——幻影判据换绑
         // Σdbi ↔ SUM(stock_bucket.used)（E3c，16 行求和廉价）。方向性不变：confirm 的 dbi+1
         // 严格晚于其事务的 used+1 提交，诚实态 used ≥ dbi 恒成立——dbi>used 才是幻影。
-        long usedSum = stockBucketMapper.sumUsed(t.getId());
+        long usedSum = stockBucketMapper.sumUsedBucketed(t.getId());
         if (r.dbi() > usedSum) {
-            long freshUsed = stockBucketMapper.sumUsed(t.getId());   // 主键重读新鲜值（同款惯例）
+            long freshUsed = stockBucketMapper.sumUsedBucketed(t.getId());   // 主键重读新鲜值（同款惯例）
             if (r.dbi() > freshUsed) {
                 log.error("PHANTOM CONFIRM: dbi({}) > SUM(used)({})——存在被抹掉的已提交事务（P0 Bug① 签名）"
                         + " → 立即叫醒级告警: templateId={}", r.dbi(), freshUsed, t.getId());

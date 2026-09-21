@@ -215,6 +215,73 @@ public class StockBucketRouter {
         }
     }
 
+    /**
+     * 批量重开（2026-09-21 修"大盘模板全桶耗尽后单桶补=单行热点"，用户实锤）：-10 触发时
+     * 一波完成"封所有空代 → 循环开桶直到额度分完或槽满"——单飞锁保护的是"一批只有一人执行"，
+     * 不是"一次只开一只"。封账判定看 Redis 余量（stk==0 的活跃代=卖完的真代；留有余量的不动）。
+     * 崩溃夹缝/孤儿桶仍由 tryOpenBucket 兜底（本方法 false 时调用方回退它）。
+     */
+    public boolean refillExhaustedBuckets(long templateId) {
+        String lockToken = gateway.grabOpenLock(templateId);
+        if (lockToken == null) {
+            return false;
+        }
+        try {
+            CouponTemplatePO t = templateMapper.selectById(templateId);
+            if (t == null || t.getAllocated() == null || t.getAllocated() >= t.getTotalCount()) {
+                return false;   // 真售罄/模板没了
+            }
+            long total = t.getTotalCount();
+            long allocated = t.getAllocated();
+            // ① 封账所有"余量为 0"的活跃代——腾出槽位（有余量的不动：-10 理论上不该发生，防御）
+            for (StockBucketPO row : bucketMapper.selectActive(templateId)) {
+                Long stk = gateway.bucketStock(templateId, row.getBucketNo(), row.getGeneration());
+                if (stk == null || stk == 0) {
+                    row.setStatus(1);
+                    bucketMapper.updateById(row);
+                    log.warn("exhausted gen sealed for batch refill: templateId={}, slot={}, gen={}, used={}",
+                            templateId, row.getBucketNo(), row.getGeneration(), row.getUsed());
+                }
+            }
+            // ② 循环开桶：额度分完或槽满为止（一波补满 16 槽——并行度恢复）
+            boolean opened = false;
+            while (allocated < total && activeSlotCount(templateId) < bucketCount) {
+                long n = Math.min(bucketSize, total - allocated);
+                if (templateMapper.casAllocate(templateId, n) == 0) {
+                    break;
+                }
+                // 故障缝：CAS 后建键前（与 tryOpenBucket 同款窗口——refill 一样会死在半路，
+                // 兜底靠下一轮 tryOpenBucket 的差额恢复）
+                com.newcoupon.infrastructure.testing.FaultHooks.fire(
+                        com.newcoupon.infrastructure.testing.FaultHooks.OPEN_BUCKET_SEAM, templateId);
+                int slot = pickFreeSlot(templateId);
+                int gen = bucketMapper.maxGen(templateId, slot) + 1;
+                StockBucketPO row = new StockBucketPO();
+                row.setTemplateId(templateId);
+                row.setBucketNo(slot);
+                row.setGeneration(gen);
+                row.setQuota(n);
+                row.setUsed(0L);
+                row.setStatus(0);
+                bucketMapper.insert(row);
+                gateway.openBucket(templateId, slot, gen, n);
+                allocated += n;
+                opened = true;
+                log.info("bucket opened (batch refill): templateId={}, slot={}, gen={}, quota={}",
+                        templateId, slot, gen, n);
+            }
+            return opened;
+        } finally {
+            gateway.releaseOpenLock(templateId, lockToken);
+        }
+    }
+
+    /** 活跃槽位数（不同 bucket_no 的 status=0 行数） */
+    private int activeSlotCount(long templateId) {
+        return (int) bucketMapper.selectActive(templateId).stream()
+                .map(StockBucketPO::getBucketNo).distinct().count();
+    }
+
     /** DB 侧售罄判定（v2 §6.3 换锚：ic 冻结后，售罄=allocated>=total——分类路径用） */
     public boolean soldOutInDb(long templateId) {
         CouponTemplatePO t = templateMapper.selectById(templateId);

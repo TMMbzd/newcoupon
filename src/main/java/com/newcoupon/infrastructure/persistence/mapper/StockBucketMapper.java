@@ -46,6 +46,14 @@ public interface StockBucketMapper extends BaseMapper<StockBucketPO> {
     @Select("SELECT COALESCE(SUM(used), 0) FROM stock_bucket WHERE template_id = #{tpl} AND status = 0")
     long sumUsedActive(@Param("tpl") long tpl);
 
+    /** 分桶世代已用求和（镜像臂精确口径，2026-09-21 随批量重开修正）：含已封账的真代
+     * （其 dbi 键在 c:gens 全世代名册里、两边对齐），只排除 V10 历史代 (0,0) 行
+     * （它没有 Redis 键，计入则 confirm-lost 永动）。status 口径不行——批量重开会封掉
+     * 已卖完的真代，status=0 求和会漏它们的 used 造成幻影误报 */
+    @Select("SELECT COALESCE(SUM(used), 0) FROM stock_bucket WHERE template_id = #{tpl} "
+            + "AND NOT (bucket_no = 0 AND generation = 0)")
+    long sumUsedBucketed(@Param("tpl") long tpl);
+
     /** 全局额度求和（不变量断言：SUM(quota) ≡ template.allocated——巡检 E3a 侧证） */
     @Select("SELECT COALESCE(SUM(quota), 0) FROM stock_bucket WHERE template_id = #{tpl}")
     long sumQuota(@Param("tpl") long tpl);
