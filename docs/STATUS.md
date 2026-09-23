@@ -33,7 +33,7 @@
 | 部署形态 | ❌ | 仅 dev compose（MySQL+Redis+应用本机起）；无生产形态 | L8 |
 | 压测/QPS 验证 | 🔶 | P2b 已有实测 QPS 报告（P2bQpsReportTest：2000 并发/19.3s=104 QPS，WSL2 同机=形状验证下限非容量）；阶梯加压/拐点/soak/容量评估表仍归 P4 | L9 |
 | 分库分表 | ❌ | user_coupon 单表 | L10 |
-| MQ/异步链路 | ❌ | 无（同步落库） | — |
+| MQ/异步链路 | 🔶 | **P2d 阶段一已实施（2026-09-23，ADR-0011）**：发件箱（coupon_outbox 与事件同事务双写）+投递器（1秒级/退避/死信+告警）+可插拔传输（LogEventPublisher 先行）——"库里有就必有消息"已成立。阶段二待做：RocketMQ 容器+真传输+消费端幂等+exporter | P2d-2 |
 | 热点分桶 | ✅ | **P2b 已实施（2026-09-19）**：三层结构（模板 allocated/stock_bucket 桶行/Redis 分代键 c:stk:{tpl}:{b}:{g}）+c:act/c:alloc/c:gens/c:fz 模板级键；开桶 CAS 单调递增；V10 存量回填+断言；故障注入三连（跨代迟到/夹缝自愈/惊群单飞）全绿；hash tag=tpl（Cluster 兼容注记在方案） | — |
 | 事件表查询/统计 | ❌ | 只写不读（"计"域未开始） | L11 |
 | 登录态/鉴权 | ❌ | userId 由请求携带（登记的阶段简化） | L12 |
