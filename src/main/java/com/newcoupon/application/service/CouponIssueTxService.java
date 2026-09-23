@@ -35,17 +35,20 @@ public class CouponIssueTxService {
     private final CouponEventRepository couponEventRepository;
     private final CouponExpireTaskGateway expireTaskGateway;
     private final com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper;
+    private final com.newcoupon.infrastructure.persistence.mapper.CouponOutboxMapper outboxMapper;
 
     public CouponIssueTxService(TemplateRepository templateRepository,
                                 UserCouponRepository userCouponRepository,
                                 CouponEventRepository couponEventRepository,
                                 CouponExpireTaskGateway expireTaskGateway,
-                                com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper) {
+                                com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper,
+                                com.newcoupon.infrastructure.persistence.mapper.CouponOutboxMapper outboxMapper) {
         this.templateRepository = templateRepository;
         this.userCouponRepository = userCouponRepository;
         this.couponEventRepository = couponEventRepository;
         this.expireTaskGateway = expireTaskGateway;
         this.stockBucketMapper = stockBucketMapper;
+        this.outboxMapper = outboxMapper;
     }
 
     /**
@@ -70,7 +73,25 @@ public class CouponIssueTxService {
         UserCoupon saved = userCouponRepository.save(
                 UserCoupon.issue(template, req.userId(), req.requestId(), (int) seq, now));
         // ③ 事实源
-        couponEventRepository.append(CouponEvent.issued(saved, now));
+        CouponEvent issuedEvent = CouponEvent.issued(saved, now);
+        couponEventRepository.append(issuedEvent);
+        // ⑤ 发件箱（ADR-0011，与事件同一事务）：事件表保持只追加，投递状态归 outbox 行。
+        //    payload 内嵌 event_no=消费方幂等锚点；JSON 手拼——字段即契约，消费方按名取值
+        com.newcoupon.infrastructure.persistence.po.CouponOutboxPO outbox =
+                new com.newcoupon.infrastructure.persistence.po.CouponOutboxPO();
+        outbox.setEventNo(issuedEvent.getEventNo());
+        outbox.setEventType(issuedEvent.getEventType().getCode());
+        outbox.setPayload("{\"eventNo\":\"" + issuedEvent.getEventNo()
+                + "\",\"type\":\"" + issuedEvent.getEventType().name()
+                + "\",\"userCouponId\":" + saved.getId()
+                + ",\"templateId\":" + saved.getTemplateId()
+                + ",\"userId\":" + saved.getUserId()
+                + ",\"requestId\":\"" + saved.getIdempotentKey()
+                + "\",\"occurredAt\":\"" + now + "\"}");
+        outbox.setStatus(com.newcoupon.infrastructure.persistence.po.CouponOutboxPO.STATUS_PENDING);
+        outbox.setRetryCount(0);
+        outbox.setNextScanTime(now);
+        outboxMapper.insert(outbox);
         // ④ L2：注册过期任务（同一事务——券和"它的死亡时间表"要么都在要么都没有；
         //    任何未来产生券的新路径必须复用本方法，禁止旁路直插）
         expireTaskGateway.register(saved.getId(), req.userId(), saved.getValidEnd());

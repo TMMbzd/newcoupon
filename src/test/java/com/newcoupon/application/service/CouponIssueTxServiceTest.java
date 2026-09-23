@@ -45,6 +45,8 @@ class CouponIssueTxServiceTest {
     private com.newcoupon.infrastructure.persistence.CouponExpireTaskGateway expireTaskGateway;
     @Mock
     private com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper;
+    @Mock
+    private com.newcoupon.infrastructure.persistence.mapper.CouponOutboxMapper outboxMapper;
 
     @InjectMocks
     private CouponIssueTxService service;
