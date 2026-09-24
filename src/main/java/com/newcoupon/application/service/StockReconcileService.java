@@ -235,6 +235,7 @@ public class StockReconcileService {
         long quotaSum = stockBucketMapper.sumQuota(t.getId());
         if (gc.redisSum() == gc.alloc() && gc.alloc() == quotaSum) {
             maybeAutoUnfreeze(t.getId());   // 2e-② 通道①：干净轮自动解冻（误冻 p100 ≤2 周期）
+            maybeSetSoldout(t.getId());       // P1 修复：真售罄重立牌（巡检侧——请求路径有竞态）
             driftRounds.remove(t.getId());
             return false;   // E2a+E2b 双平
         }
@@ -287,6 +288,20 @@ public class StockReconcileService {
         } catch (RuntimeException e) {
             log.warn("auto-unfreeze check failed: templateId={}", templateId, e);
         }
+    }
+
+    /** P1 修复（P2 终审）：真售罄重立牌——巡检侧（请求路径有竞态：allocated 已 CAS 但 Redis 桶未建好） */
+    private void maybeSetSoldout(long templateId) {
+        try {
+            if (stockGateway.isSoldout(templateId)) { return; }
+            var gc = stockGateway.conservationAll(templateId, Long.MAX_VALUE);   // 纯观测不清扫（TTL=MAX）
+            long stkSum = 0;
+            for (var b : gc.buckets()) { stkSum += b.stk(); }
+            if (stkSum == 0 && gc.alloc() == stockBucketMapper.sumQuota(templateId)) {
+                stockGateway.setSoldoutWithTtl(templateId, 10);
+                log.info("soldout flag re-set by patrol (all buckets empty, quota exhausted): templateId={}", templateId);
+            }
+        } catch (RuntimeException e) { /* 立牌失败不影响巡检 */ }
     }
 
     /** 人工维护豁免（c:maint 标记存在时不自动解——运维正在处理） */

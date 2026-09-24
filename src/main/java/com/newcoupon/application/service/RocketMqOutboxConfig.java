@@ -57,7 +57,13 @@ public class RocketMqOutboxConfig {
             try {
                 org.apache.rocketmq.common.message.Message msg = new org.apache.rocketmq.common.message.Message(
                         topic, "outbox", eventNo, payload.getBytes(StandardCharsets.UTF_8));
-                producer.send(msg);
+                org.apache.rocketmq.client.producer.SendResult r = producer.send(msg);
+                // P1 修复（终审）：FLUSH_DISK_TIMEOUT/SLAVE_NOT_AVAILABLE 不抛异常只返回状态——
+                // 不检查=消息可能丢但发件箱标记已投递，'消息永不丢'在这里破洞
+                if (r.getSendStatus() != org.apache.rocketmq.client.producer.SendStatus.SEND_OK) {
+                    throw new RuntimeException("rocketmq send status=" + r.getSendStatus()
+                            + " topic=" + topic + " eventNo=" + eventNo + "（走发件箱退避重试）");
+                }
             } catch (Exception e) {
                 throw new RuntimeException("rocketmq send failed: topic=" + topic + " eventNo=" + eventNo, e);
             }

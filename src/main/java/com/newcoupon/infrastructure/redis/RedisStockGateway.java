@@ -462,6 +462,11 @@ public class RedisStockGateway {
         return Boolean.TRUE.equals(redis.hasKey(soldoutKey(templateId)));
     }
 
+    /** 立售罄牌带 TTL（巡检重立用——10s 自续期防永久假死） */
+    public void setSoldoutWithTtl(long templateId, int ttlSeconds) {
+        redis.opsForValue().set(soldoutKey(templateId), "1", java.time.Duration.ofSeconds(ttlSeconds));
+    }
+
     public void freeze(long templateId) {
         redis.opsForValue().set(freezeKey(templateId), "1");
     }

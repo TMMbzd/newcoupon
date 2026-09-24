@@ -65,6 +65,8 @@ class ReceiveAppServiceTest {
     private CachedTemplateReader cachedTemplateReader;
     @Mock
     private ReceiveMetrics metrics;
+    @Mock
+    private org.springframework.data.redis.core.StringRedisTemplate redis;
 
     @org.junit.jupiter.api.BeforeEach
     void readerPassthrough() {

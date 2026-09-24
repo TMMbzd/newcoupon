@@ -18,6 +18,8 @@ public record ReceiveRequest(
 
         @NotBlank(message = "requestId 不能为空（网络重试时请复用同一个）")
         @Size(max = 64)
+        @jakarta.validation.constraints.Pattern(regexp = "[A-Za-z0-9_\\-]{1,64}",
+                message = "requestId 仅限字母/数字/下划线/连字符（outbox payload JSON 契约安全——终审 P2）")
         String requestId,
 
         @NotNull(message = "userId 不能为空")

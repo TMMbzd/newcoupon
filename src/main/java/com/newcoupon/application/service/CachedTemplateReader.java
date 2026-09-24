@@ -54,6 +54,11 @@ public class CachedTemplateReader {
         this.delegate = delegate;
         this.cache = Caffeine.newBuilder()
                 .maximumSize(MAX_ENTRIES)
+                .executor(java.util.concurrent.Executors.newFixedThreadPool(2, r -> {
+                    Thread t = new Thread(r, "template-cache-refresh");
+                    t.setDaemon(true);
+                    return t;
+                }))   // P2 终审：默认 commonPool 上跑阻塞 JDBC 会拖累全 JVM 并行流
                 .refreshAfterWrite(refreshMillis, TimeUnit.MILLISECONDS)   // 防击穿：越线后单人回源，余者取旧值
                 .recordStats()
                 .expireAfter(new Expiry<Long, Optional<CouponTemplate>>() {
