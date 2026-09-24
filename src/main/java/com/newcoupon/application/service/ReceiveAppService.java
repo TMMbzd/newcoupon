@@ -65,6 +65,7 @@ public class ReceiveAppService {
     private final StockDriftLogGateway driftLog;
     private final StockBucketRouter stockBucketRouter;
     private final CachedTemplateReader cachedTemplateReader;
+    private final ReceiveMetrics metrics;
 
     public ReceiveAppService(UserCouponRepository userCouponRepository,
                              TemplateRepository templateRepository,
@@ -73,7 +74,8 @@ public class ReceiveAppService {
                              StockReconcileService reconcileService,
                              StockDriftLogGateway driftLog,
                              StockBucketRouter stockBucketRouter,
-                             CachedTemplateReader cachedTemplateReader) {
+                             CachedTemplateReader cachedTemplateReader,
+                             ReceiveMetrics metrics) {
         this.userCouponRepository = userCouponRepository;
         this.templateRepository = templateRepository;
         this.issueTxService = issueTxService;
@@ -82,10 +84,31 @@ public class ReceiveAppService {
         this.driftLog = driftLog;
         this.stockBucketRouter = stockBucketRouter;
         this.cachedTemplateReader = cachedTemplateReader;
+        this.metrics = metrics;
     }
 
     public ReceiveResult receive(ReceiveRequest req) {
-        return doReceive(req, false);
+        var sample = metrics.start();
+        try {
+            ReceiveResult r = doReceive(req, false);
+            metrics.recordSuccess();
+            return r;
+        } catch (BizException e) {
+            recordOutcome(e);
+            throw e;
+        } finally {
+            metrics.stop(sample);
+        }
+    }
+
+    private void recordOutcome(BizException e) {
+        switch (e.getErrorCode()) {
+            case STOCK_OUT -> metrics.recordSoldOut();
+            case FROZEN -> metrics.recordFrozen();
+            case USER_LIMIT_EXCEEDED, DAILY_LIMIT_EXCEEDED -> metrics.recordUserLimit();
+            case DEGRADED -> metrics.recordDegraded();
+            default -> { }
+        }
     }
 
     /**
@@ -147,7 +170,7 @@ public class ReceiveAppService {
             }
         }
         if (!d.success()) {
-            return handleGateRejected(req, d);
+            return handleGateRejected(req, cmd, template, d);
         }
 
         // ③ DB 事务；任何失败都按分类取消记账（cancel 内部令牌门控保证幂等）。
@@ -247,7 +270,8 @@ public class ReceiveAppService {
      * Redis 闸门拒绝（-1/-2/-3/-6/-8，-3 含 soldout 标志短路）。注意：idem 键 TTL(10分钟)
      * 过期后的"陈旧重放"会走到限领/售罄分支——先查一次 DB 幂等键，命中则按重放处理。
      */
-    private ReceiveResult handleGateRejected(ReceiveRequest req, DeductResult d) {
+    private ReceiveResult handleGateRejected(ReceiveRequest req, DeductCommand cmd,
+                                          CouponTemplate template, DeductResult d) {
         if (d.code() == -8) {   // Redis 幂等命中
             return duplicatedOrConflict(req);
         }
@@ -255,6 +279,27 @@ public class ReceiveAppService {
         Optional<UserCoupon> old = userCouponRepository.findByIdempotentKey(req.userId(), req.requestId());
         if (old.isPresent()) {
             return toDuplicatedResult(old.get(), req);
+        }
+        if (d.code() == -3 && !stockGateway.isSoldout(req.templateId())) {
+            // 2e-③ 假售罄当场修：-3 但没立牌（Redis 碰巧排干/残留）→ DB 说还有额度 → 补开重试
+            if (!stockBucketRouter.soldOutInDb(req.templateId())
+                    && (stockBucketRouter.refillExhaustedBuckets(req.templateId())
+                        || stockBucketRouter.tryOpenBucket(req.templateId()))) {
+                backoffQuietly();
+                DeductResult d2 = stockGateway.deduct(cmd);
+                if (d2.success()) {
+                    metrics.recordFalseSelloutAid();
+                    try {
+                        UserCoupon issued = issueTxService.issue(req, template, d2.seq(),
+                                d2.bucket(), d2.gen(), LocalDateTime.now());
+                        confirmQuietly(cmd, d2);
+                        return ReceiveResult.of(issued, false);
+                    } catch (RuntimeException e) {
+                        // 补开的领取事务失败——走标准分类（不再嵌套急救）
+                        return recoverUncertainOutcome(req, cmd, d2, e);
+                    }
+                }
+            }
         }
         throw switch (d.code()) {
             case -3, -10 -> new BizException(ErrorCode.STOCK_OUT);   // -10=全桶耗尽且开桶失败=额度分完

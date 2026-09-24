@@ -111,9 +111,10 @@ class StockReconcileServiceTest {
 
 
     @Test
-    @DisplayName("守恒成立（stk+pend+dbi+void=total）：无事发生")
+    @DisplayName("守恒成立（E2a+E2b 双平）：无事发生")
     void conservationHolds() {
-        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(90, 2, 8, 0));   // Σ=100=E2双平
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(90, 2, 8, 0));   // Σ=100=alloc
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(100L);                       // E2b 平
 
         assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
 
@@ -121,24 +122,48 @@ class StockReconcileServiceTest {
     }
 
     @Test
-    @DisplayName("首轮守恒破缺：只疑似（等下轮复核——瞬态在途保护）")
-    void firstRoundOnlySuspects() {
-        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(89, 0, 8, 0));   // Σ=97≠alloc=100：E2a破
+    @DisplayName("三步确认·步1（快照旧）：首读破缺但新鲜 Σquota 追平——止步不升级")
+    void threeStep_staleSnapshot_stops() {
+        // 列表循环里的旧 quotaSum=97（gc 侧 alloc=100），但主键新鲜重读=100——E2b 只是快照旧
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(90, 2, 8, 0));   // Σ=100=alloc
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(97L, 100L);                 // 第一次(列表)97，新鲜重读100
 
         assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
-
         verify(driftLog, never()).record(any());
     }
 
     @Test
-    @DisplayName("连续两轮破缺：确认（提交 deep）")
-    void secondRoundConfirms() {
-        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(89, 0, 8, 0));
+    @DisplayName("三步确认·真漂移：两次读数均破缺——亚秒定罪+提交 deep（不再等 60 秒轮）")
+    void threeStep_genuineDrift_confirmsInline() {
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(89, 0, 8, 0));   // Σ=97≠alloc=100
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(100L);                       // E2b 平——破缺在 E2a
 
-        forceService.conservationCheckOne(tpl(8L));   // round 1
-        boolean confirmed = forceService.conservationCheckOne(tpl(8L));   // round 2 → deep
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isTrue();            // 当场定罪→deep
+        // 良性方向（Σ<alloc：钱被锁住）——不冻结
+        verify(stockGateway, never()).freeze(anyLong());
+    }
 
-        assertThat(confirmed).isTrue();
+    @Test
+    @DisplayName("三步确认·危险方向（Σ>alloc=超发面）：当场自动冻结（2e-②）")
+    void threeStep_dangerousDrift_freezesImmediately() {
+        // dbi=12 > Σquota 兑现的额度——Redis 比 DB 多钱=超发方向
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(88, 0, 12, 0));  // Σ=100=alloc 但... 
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(97L);                       // alloc(100)>Σquota(97)=E2b 危险向
+
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isTrue();
+        verify(stockGateway).freeze(1L);   // 危险方向：当场冻结（后续轮干净→自动解）
+    }
+
+    @Test
+    @DisplayName("干净轮自动解冻（2e-②通道①）：冻结态+守恒平+无维护标记→自动解")
+    void cleanRound_autoUnfreezes() {
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(90, 2, 8, 0));   // Σ=100=alloc
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(100L);
+        when(stockGateway.isFrozen(1L)).thenReturn(true);                            // 处于冻结态
+
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
+
+        verify(stockGateway).unfreeze(1L);   // 自动解冻
     }
 
     // ==================== 镜像：方向性两臂 ====================

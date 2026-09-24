@@ -38,7 +38,10 @@ public class RedisStockGateway {
             -- KEYS: 1 ul  2 uld  3 dly  4 idem  5 so  6 fz  7 act(hash)
             -- ARGV: 1 maxPerUser  2 pud  3 dl  4 dayTtl  5 idemTtl  6 pendMember  7 tpl  8 preferredBucket
             if redis.call('EXISTS', KEYS[6]) == 1 then return {-11, 0, 0, 0} end
-            if redis.call('EXISTS', KEYS[5]) == 1 then return {-3, 0, 0, 0} end
+            if redis.call('EXISTS', KEYS[5]) == 1 then
+              redis.call('EXPIRE', KEYS[5], 10)   -- 2e-④ 售罄牌自续期：清除消息丢失时 10s 自动放行
+              return {-3, 0, 0, 0}
+            end
             if redis.call('EXISTS', KEYS[4]) == 1 then return {-8, 0, 0, 0} end
             local dl = tonumber(ARGV[3])
             if dl > 0 and tonumber(redis.call('GET', KEYS[3]) or '0') >= dl then return {-1, 0, 0, 0} end
@@ -113,7 +116,7 @@ public class RedisStockGateway {
               end
             else
               redis.call('INCR', KEYS[6])       -- sold_out / offline：void 只退休这张令牌
-              redis.call('SET', KEYS[8], 1)
+              redis.call('SET', KEYS[8], 1, 'EX', 10)   -- 2e-④：10s 自续期（DEDUCT 命中时续）
             end
             redis.call('DEL', KEYS[4])
             return 1

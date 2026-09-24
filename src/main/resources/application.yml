@@ -72,7 +72,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info     # 最小暴露原则：只开健康检查，不多暴露一个端点
+        include: health,info,prometheus     # 2e-⑤ 加 Prometheus 抓取端点（指标不含敏感信息）
   endpoint:
     health:
       show-details: never        # 健康详情不对外暴露（含中间件拓扑，属于敏感信息）

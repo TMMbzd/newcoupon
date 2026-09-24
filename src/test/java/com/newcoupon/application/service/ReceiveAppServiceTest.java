@@ -63,6 +63,8 @@ class ReceiveAppServiceTest {
     private com.newcoupon.application.service.StockBucketRouter stockBucketRouter;
     @Mock
     private CachedTemplateReader cachedTemplateReader;
+    @Mock
+    private ReceiveMetrics metrics;
 
     @org.junit.jupiter.api.BeforeEach
     void readerPassthrough() {

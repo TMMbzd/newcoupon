@@ -210,10 +210,9 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
 
         Thread.sleep(400);   // 令牌过期（生产=180s：DB锁等待50s的3倍）
 
-        // 第一轮：清扫过期令牌 → sum=99≠100 → 只疑似（防一次性干扰）
-        assertThat(reconcileService.checkOne(tplId)).isFalse();
-        // 第二轮：仍在 → 确认 → deep：白名单全过 → FORCE 按业务状态推导（活跃态 stk=100,dbi=ic=0,void=0）
-        assertThat(reconcileService.checkOne(tplId)).isTrue();
+        // 2e-① 三步当场确认（亚秒定罪取代两轮 60 秒等待）：清扫 → 破缺 → 200ms 复读仍在 → 定罪
+        assertThat(reconcileService.checkOne(tplId))
+                .as("清扫后破缺当场定罪（不再等第二轮 60s）——3-step 确认").isTrue();
 
         awaitDeep();
         assertThat(stockGateway.remaining(tplId))
@@ -295,7 +294,8 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         String soBucket = soAct.keySet().iterator().next();
         redis.opsForValue().increment("c:stk:{" + tplId + "}:" + soBucket + ":" + soAct.get(soBucket), 5);
 
-        // u2 过闸（5>0）→ DB 条件扣账 0 行 → 分类先行：新快照 issued(1)>=total(1) → 售罄
+        // u2 过闸（5>0）→ DB 条件扣账 0 行 → 分类先行 → 售罄（2e-③ 假售罄急救不适用：
+        // allocated(1)>=total(1) 是 DB 认证的真售罄——急救判据不满足，正常走售罄路径）
         Res second = receive(u2, "so-2", tplId);
         assertThat(second.code()).isEqualTo("3001");
 
@@ -310,9 +310,10 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(stockGateway.userCount(tplId, u2))
                 .as("u2 过闸时被加的限领计数必须回滚").isZero();
         // FORCE 修复（retired 分支：so 存在 → stk=0, dbi=ic=1, void=total-ic=0——污染归零）
-        reconcileService.checkOne(tplId);   // round1 疑似
-        reconcileService.checkOne(tplId);   // round2 确认 → deep retired 分支
+        // 2e：三步确认会当场冻结（+5=危险方向）→ deep retired 修复 → 下一轮干净自动解冻
+        reconcileService.checkOne(tplId);   // 3-step 确认 + 危险方向冻结 + deep 提交
         awaitDeep();
+        reconcileService.checkOne(tplId);   // 干净轮 → 自动解冻（2e-② 通道①）
         assertThat(stockGateway.conservation(tplId, 300).sum() - 1L)
                 .as("FORCE retired 分支修复后守恒（stk=0+dbi=1+void=0）").isZero();
         assertThat(stockGateway.remaining(tplId)).as("污染的 5 被 FORCE 归零").isZero();

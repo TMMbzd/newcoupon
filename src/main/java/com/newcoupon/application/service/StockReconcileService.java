@@ -234,21 +234,68 @@ public class StockReconcileService {
         // 每轮假破缺；锚 DB 行和=镜像自检——c:alloc 必须等于已建桶的额度合计，篡改/双计现形）
         long quotaSum = stockBucketMapper.sumQuota(t.getId());
         if (gc.redisSum() == gc.alloc() && gc.alloc() == quotaSum) {
-            return false;   // E2a+E2b 双平（本轮清零由 deep 结果驱动——见 §5 修位）
+            maybeAutoUnfreeze(t.getId());   // 2e-② 通道①：干净轮自动解冻（误冻 p100 ≤2 周期）
+            driftRounds.remove(t.getId());
+            return false;   // E2a+E2b 双平
         }
         String breach = gc.redisSum() != gc.alloc()
                 ? "E2a(Σ四键=" + gc.redisSum() + " ≠ c:alloc=" + gc.alloc() + ")"
                 : "E2b(c:alloc=" + gc.alloc() + " ≠ Σquota=" + quotaSum + ")";
-        int rounds = driftRounds.merge(t.getId(), 1, (a, b) -> a + b);
-        if (rounds == 1) {
-            log.warn("conservation drift suspected (round 1): templateId={}, alloc={}, Σ四键={}, buckets={} "
-                    + "→ {} → 下轮复核", t.getId(), gc.alloc(), gc.redisSum(), gc.buckets().size(), breach);
+        // ==================== 2e-① 三步当场确认（发现 120 秒 → 亚秒）====================
+        // (1) 主键新鲜重读 DB 侧锚（滤"列表快照旧"——quotaSum 是列表循环里的旧值）
+        long freshQuota = stockBucketMapper.sumQuota(t.getId());
+        if (gc.redisSum() == gc.alloc() && gc.alloc() == freshQuota) {
+            return false;   // 新鲜读数追平——破缺只是快照旧，止步
+        }
+        quotaSum = freshQuota;
+        // (2) 短延迟第二次独立原子快照（滤"resetAll/批量重开等管理窗口"——正常流量是
+        //     恒等变换 Lua 不会改变两次读数，会变的只有管理操作，它们的窗口毫秒级）
+        try {
+            Thread.sleep(200);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
             return false;
         }
-        log.warn("CONSERVATION DRIFT confirmed: templateId={}, alloc={}, Σ四键={}, buckets={} → {} "
-                + "→ deep reconcile", t.getId(), gc.alloc(), gc.redisSum(), gc.buckets().size(), breach);
+        var gc2 = stockGateway.conservationAll(t.getId(), inflightTtlMs);
+        long quota2 = stockBucketMapper.sumQuota(t.getId());
+        if (gc2.redisSum() == gc2.alloc() && gc2.alloc() == quota2) {
+            return false;   // 第二次平了——管理窗口的瞬态破缺，止步
+        }
+        // (3) 仍破缺——真漂移。方向裁决：危险方向（Redis 比 DB 多钱=超发面）当场冻结；
+        //     良性方向（钱被锁住）只修不冻（清扫故意破缺日常发生，冻结=隔三差五自锁）
+        boolean dangerous = gc2.redisSum() > gc2.alloc() || gc2.alloc() > quota2;
+        if (dangerous) {
+            stockGateway.freeze(t.getId());
+            log.error("TEMPLATE FROZEN (auto, dangerous drift): templateId={} {} → 卖券暂停(-11)，"
+                    + "误冻自动解≤2 巡检周期，真冻待修复后自动解/人工", t.getId(), breach);
+        }
+        log.warn("CONSERVATION DRIFT confirmed (3-step, sub-second): templateId={}, alloc={}, Σ四键={}, "
+                + "buckets={} → {} (dangerous={}) → deep reconcile",
+                t.getId(), gc2.alloc(), gc2.redisSum(), gc2.buckets().size(), breach, dangerous);
         driftRounds.remove(t.getId());
-        return submitDeep(t.getId(), "conservation(" + breach + ")");
+        return submitDeep(t.getId(), "conservation(" + breach + ",dangerous=" + dangerous + ")");
+    }
+
+    /** 2e-② 通道①：干净轮自动解冻——只解"我们自动置的"（人工置的 c:fz 不在豁免名单，不动） */
+    private void maybeAutoUnfreeze(long templateId) {
+        try {
+            if (stockGateway.isFrozen(templateId)
+                    && !auxReadyOrMaint(templateId)) {
+                stockGateway.unfreeze(templateId);
+                log.info("template auto-UNFROZEN (patrol clean round): templateId={}", templateId);
+            }
+        } catch (RuntimeException e) {
+            log.warn("auto-unfreeze check failed: templateId={}", templateId, e);
+        }
+    }
+
+    /** 人工维护豁免（c:maint 标记存在时不自动解——运维正在处理） */
+    private boolean auxReadyOrMaint(long templateId) {
+        try {
+            return Boolean.TRUE.equals(aux().opsForValue().get("c:maint:" + templateId));
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     // ==================== 深对账（独立线程：白名单+分支推导+修复） ====================

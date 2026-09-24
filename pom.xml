@@ -49,6 +49,11 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
+    <!-- 2e-⑤ 最小可观测：Prometheus 指标端点（/actuator/prometheus） -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
 
     <!-- ORM：MyBatis-Plus（阶段2 分库分表时在底层叠加 ShardingSphere-JDBC） -->
     <dependency>
