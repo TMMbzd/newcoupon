@@ -56,6 +56,32 @@ services:
     ports:
       - "8280:8080"
 
+# ---------- P2d 阶段二：RocketMQ（ADR-0011 阶段二真传输） ----------
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.1.4
+    container_name: newcoupon-mqnamesrv
+    restart: unless-stopped
+    command: sh mqnamesrv
+    environment:
+      JAVA_OPT_EXT: "-Xms256m -Xmx256m"   # WSL2 内存预算（默认 1G+ 太奢）
+    ports:
+      - "9876:9876"
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.1.4
+    container_name: newcoupon-mqbroker
+    restart: unless-stopped
+    depends_on:
+      - rocketmq-namesrv
+    command: sh mqbroker -n rocketmq-namesrv:9876 -c /home/rocketmq/conf/broker.conf
+    environment:
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m"
+    volumes:
+      - ./docker/rocketmq/broker.conf:/home/rocketmq/conf/broker.conf:ro
+    ports:
+      - "10911:10911"
+      - "10909:10909"
+
 volumes:
   mysql-data:
   redis-data:

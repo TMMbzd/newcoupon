@@ -2,6 +2,7 @@ package com.newcoupon.application.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -10,6 +11,7 @@ import org.springframework.stereotype.Component;
  * 阶段二 RocketMQ 容器就绪后，本类退役为测试/降级通道，生产切 RocketMQEventPublisher。
  */
 @Component
+@ConditionalOnProperty(name = "coupon.outbox.transport", havingValue = "log", matchIfMissing = true)
 public class LogEventPublisher implements EventPublisher {
 
     private static final Logger log = LoggerFactory.getLogger(LogEventPublisher.class);

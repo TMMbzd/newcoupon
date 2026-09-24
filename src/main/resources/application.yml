@@ -55,6 +55,11 @@ coupon:
   # 生产必须用环境变量覆盖；完整 HMAC/防重放/双人复核在 P7
   admin:
     token: ${ADMIN_TOKEN:dev-admin-token}
+  # P2d 发件箱传输开关（ADR-0011）：log=日志传输（默认，测试/无MQ环境）；rocketmq=真传输
+  # （compose 起 rocketmq-namesrv/broker 后切换——生产用环境变量 OUTBOX_TRANSPORT 覆盖）
+  outbox:
+    transport: ${OUTBOX_TRANSPORT:log}
+    namesrv-addr: ${ROCKETMQ_NAMESRV:localhost:9876}
 
 mybatis-plus:
   configuration:
