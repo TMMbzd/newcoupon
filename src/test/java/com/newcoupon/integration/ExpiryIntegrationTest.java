@@ -237,4 +237,22 @@ class ExpiryIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(coupon.getStatus()).isEqualTo(CouponStatus.EXPIRED);
         assertThat(viewed.status()).isEqualTo("已过期");
     }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("L38·T+1 审计补注册通道可用：漏注册的过期券被补上任务（INSERT 带雪花 id）")
+    void dailyAuditReregistersMissingTask() {
+        long[] ids = freshCoupon("audit");
+        long couponId = ids[0];
+        // 模拟"有券无任务"的漏注册：删任务行 + 把券改成"待使用且已过期超 10 分钟"
+        jdbc.update("DELETE FROM coupon_expire_task WHERE coupon_id = ?", couponId);
+        jdbc.update("UPDATE user_coupon SET valid_end = NOW() - INTERVAL 20 MINUTE WHERE id = ?", couponId);
+
+        couponExpireService.dailyAudit();
+
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM coupon_expire_task WHERE coupon_id = ?", Integer.class, couponId))
+                .as("审计补注册必须成功写入（此前 INSERT 漏 id，分表主键无默认值=必然报错）")
+                .isEqualTo(1);
+    }
 }

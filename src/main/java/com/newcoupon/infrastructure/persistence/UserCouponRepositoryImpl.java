@@ -42,6 +42,11 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     }
 
     @Override
+    public long countTodayByUserAndTemplate(long userId, long templateId, java.time.LocalDateTime dayStart) {
+        return mapper.countTodayByUserAndTemplate(userId, templateId, dayStart);
+    }
+
+    @Override
     public long maxSeqByUserAndTemplate(long userId, long templateId) {
         return mapper.maxSeqByUserAndTemplate(userId, templateId);
     }

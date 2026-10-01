@@ -29,7 +29,10 @@ import org.springframework.web.filter.OncePerRequestFilter;
 @Order(Ordered.HIGHEST_PRECEDENCE + 10)   // TraceIdFilter 之后：被拒的请求也有 traceId 可查
 public class RiskControlFilter extends OncePerRequestFilter {
 
-    private static final String RECEIVE_PATH = "/receive";
+    /** 领券入口路径后缀（ReceiveController：@RequestMapping("/api/coupons") + @PostMapping("/receive")）。
+     * L38 修复（评审 P1-11）：此前与 "/receive" 全等比较，而 getServletPath() 返回完整路径
+     * "/api/coupons/receive"——判据永不匹配、IP 频控整体空转（过滤器单测直调故假绿）。 */
+    private static final String RECEIVE_PATH_SUFFIX = "/receive";
 
     private final IpRateGate ipRateGate;
 
@@ -41,11 +44,15 @@ public class RiskControlFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-        if ("POST".equals(request.getMethod()) && RECEIVE_PATH.equals(request.getServletPath())) {
+        if ("POST".equals(request.getMethod())
+                && request.getServletPath().endsWith(RECEIVE_PATH_SUFFIX)) {
             String ip = clientIp(request);
             if (!ipRateGate.allow(ip)) {
                 response.setStatus(429);
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                // L43（2026-09-29 教学演示实测）：不声明字符集时 Servlet 默认 ISO-8859-1，
+                // 手写的中文响应体变乱码（实测 {"code":7001,"message":"????????????"}）
+                response.setCharacterEncoding("UTF-8");
                 response.getWriter().write("{\"code\":7001,\"message\":\"触发风控频控，请稍后再试\"}");
                 return;
             }

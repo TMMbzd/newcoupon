@@ -207,12 +207,12 @@ class ReceiveAppServiceTest {
                 .thenReturn(new DeductResult(-7, 0))
                 .thenReturn(new DeductResult(0, 1));
         when(issueTxService.issue(any(), any(), eq(1L), anyInt(), anyLong(), any())).thenReturn(coupon(1L, 1));
-        when(stockBucketRouter.ensureActiveBuckets(1L)).thenReturn(true);
+        when(stockBucketRouter.ensureRegisteredBuckets(1L)).thenReturn(true);
 
         ReceiveResult r = service.receive(new ReceiveRequest("req-1", 42L, 1L));
 
         assertThat(r.duplicated()).isFalse();
-        verify(stockBucketRouter).ensureActiveBuckets(1L);   // P2b：ENSURE 按 DB 桶行重建（lazyRebuildStock 已退役）
+        verify(stockBucketRouter).ensureRegisteredBuckets(1L);   // P2b：ENSURE 按 DB 桶行重建（批 2：全世代口径）
     }
 
     // ---------- 事务成功与失败取消记账 ----------
@@ -293,6 +293,8 @@ class ReceiveAppServiceTest {
                 .thenThrow(new StockDeductRejectedException(1L));
         // 事务外分类重读：allocated >= total → 售罄（P2b B簇换锚：ic 已冻结）
         when(stockBucketRouter.soldOutInDb(1L)).thenReturn(true);
+        when(stockBucketRouter.bucketRowFull(anyLong(), anyInt(), anyLong())).thenReturn(true);  // L38：行确实用满
+        when(stockBucketRouter.noSellableRowInDb(1L)).thenReturn(true);                          // L38：DB 侧无可卖行
         when(templateRepository.findById(anyLong()))
                 .thenReturn(Optional.of(template(1)))                       // ① 入口读
                 .thenReturn(Optional.of(tplWithStatus(100L,                 // ② 分类重读

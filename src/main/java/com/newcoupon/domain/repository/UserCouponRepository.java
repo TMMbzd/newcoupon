@@ -20,6 +20,9 @@ public interface UserCouponRepository {
     /** L3 计数自愈：用户对模板的实际领取行数（DB 权威值，撞 uk_user_seq 时取） */
     long countByUserAndTemplate(long userId, long templateId);
 
+    /** L42①（2026-09-30）：当日已领行数（数据库权威值）——日限计数虚高时复核用 */
+    long countTodayByUserAndTemplate(long userId, long templateId, java.time.LocalDateTime dayStart);
+
     /** L3 自愈的序号来源：最大 seq（空洞免疫——下一序号必须大于全部现有） */
     long maxSeqByUserAndTemplate(long userId, long templateId);
 

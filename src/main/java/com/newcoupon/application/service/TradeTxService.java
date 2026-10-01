@@ -73,7 +73,7 @@ public class TradeTxService {
         if (!userCouponRepository.casLock(req.couponId(), req.userId())) {
             throw new TradeCasRejectedException("coupon-lock", req.couponId());
         }
-        String usageNo = req.orderNo() + ":" + req.couponId();
+        String usageNo = com.newcoupon.common.BoundedKey.usageNo(req.orderNo(), req.couponId());
         CouponUsage usage = couponUsageRepository.save(
                 CouponUsage.occupy(coupon, req.orderNo(), usageNo, now));        // 撞uk_usage_no→DuplicateKey
         couponEventRepository.append(CouponEvent.locked(coupon, usage, now));

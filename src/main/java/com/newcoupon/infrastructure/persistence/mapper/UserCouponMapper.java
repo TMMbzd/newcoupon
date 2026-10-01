@@ -40,6 +40,13 @@ public interface UserCouponMapper extends BaseMapper<UserCouponPO> {
      *  下一个序号必须 > 全部现有 seq。COUNT 只在无空洞时等于 MAX(seq)；补偿路径泄漏的
      *  在途计数（cancel 失败/探针失败）会制造持久空洞（如 {1,2,3,4,6}），此时 COUNT=5
      *  而 MAX=6——用 COUNT 自愈会让重试 seq=COUNT+1 撞在 MAX 行上，永久 3002 死循环 */
+    /** L42①（2026-09-30）：当日已领行数——日限计数可能虚高（令牌清扫不回滚计数），拒绝前用数据库复核。
+     *  等值双条件走 uk_user_seq 最左两列，create_time 在其上做过滤（单分片，无广播）。 */
+    @Select("SELECT COUNT(*) FROM user_coupon WHERE user_id = #{userId} AND template_id = #{templateId} "
+            + "AND create_time >= #{dayStart}")
+    long countTodayByUserAndTemplate(@Param("userId") long userId, @Param("templateId") long templateId,
+                                     @Param("dayStart") java.time.LocalDateTime dayStart);
+
     @Select("SELECT COALESCE(MAX(seq), 0) FROM user_coupon WHERE user_id = #{userId} AND template_id = #{templateId}")
     long maxSeqByUserAndTemplate(@Param("userId") long userId, @Param("templateId") long templateId);
 

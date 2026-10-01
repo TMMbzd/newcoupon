@@ -431,9 +431,16 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(stockGateway.remaining(tplId)).isEqualTo(100);
     }
 
-    /** 只删 stock key（保留 issued/pend 等记账 key）——精确模拟"额度 key 丢失"（N2） */
+    /** 只删各代的可领余量键（保留 dbi/pend/void 等记账键）——精确模拟"额度 key 丢失"（N2）。
+     *  L40①（2026-09-30）修正：旧实现删的是**已退役的单键** {@code c:stk:{tpl}}（分桶后根本不存在），
+     *  于是"清库风暴"用例永远绿、零验证——按全世代名册删每一代真正的 stk 键。 */
     private void redisFlushStock(long tplId) {
-        redis.delete("c:stk:{" + tplId + "}");   // key 规范属网关契约（docs/10 §10.2）
+        var gens = redis.opsForSet().members("c:gens:{" + tplId + "}");
+        org.assertj.core.api.Assertions.assertThat(gens)
+                .as("前置：名册里必须有世代（否则删了个寂寞，又是假用例）").isNotEmpty();
+        for (String member : gens) {
+            redis.delete("c:stk:{" + tplId + "}:" + member);   // member = "桶号:世代号"
+        }
     }
 
     /** P2b B簇换锚：ic 冻结后，发放权威读数 = SUM(stock_bucket.used)（E3c 锚） */

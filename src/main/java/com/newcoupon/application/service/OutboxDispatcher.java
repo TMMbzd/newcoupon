@@ -39,6 +39,8 @@ public class OutboxDispatcher {
     private final int batchSize;
     private final int maxRetry;
 
+    private static final String AUDIT_LOCK_KEY = "c:lock:outbox-audit";
+
     public OutboxDispatcher(CouponOutboxMapper outboxMapper,
                             EventPublisher publisher,
                             RedisScanLock scanLock,
@@ -96,6 +98,48 @@ public class OutboxDispatcher {
                 scanLock.unlock(LOCK_KEY, owner);
             } catch (RuntimeException ignore) {
                 // 解锁失败=锁已过期或 Redis 抖动——锁有 TTL 会自然释放，无需处理
+            }
+        }
+    }
+
+    /**
+     * T+1 审计（ADR-0011 承诺的守恒断言；2026-09-30 接上——此前查询方法 {@code issuedEventMinusOutbox}
+     * 写好了却**从未被调用**，等于承诺只落了一半）。
+     *
+     * <p>不变式：发放类事件行数 ≡ 发件箱行数——两者在同一事务里写入，行数不等说明有事务漏写、
+     * 或有行被删/被人工改过。差额**只告警不自动修**：修复要人工比对两表差异（正=事件多，负=发件箱多）。
+     */
+    @com.xxl.job.core.handler.annotation.XxlJob("couponOutboxAuditJob")
+    @Scheduled(cron = "${coupon.outbox.audit-cron:0 51 3 * * ?}", zone = "Asia/Shanghai")
+    public void outboxAudit() {
+        String owner = "outbox-audit-" + java.util.UUID.randomUUID();
+        boolean locked;
+        try {
+            locked = scanLock.tryLock(AUDIT_LOCK_KEY, owner, Duration.ofMinutes(10));
+        } catch (RuntimeException e) {
+            log.warn("outbox audit: lock acquisition failed — skip this round", e);
+            return;
+        }
+        if (!locked) {
+            return;
+        }
+        try {
+            long diff = outboxMapper.issuedEventMinusOutbox();
+            if (diff != 0) {
+                log.error("OUTBOX AUDIT MISMATCH: 发放事件行数 − 发件箱行数 = {}（应为 0——同事务双写的直接推论被破坏，"
+                        + "人工比对两表差异；正=事件多，负=发件箱多）", diff);
+                driftLog.record(new StockDriftLogGateway.DriftEvent(0, 0, 0, 0, 0, 0, null, null, 0,
+                        "OUTBOX_MISMATCH", "事件行数−发件箱行数=" + diff));
+            } else {
+                log.info("outbox audit clean: issued events ≡ outbox rows");
+            }
+        } catch (RuntimeException e) {
+            log.warn("outbox audit round failed (will rescan tomorrow)", e);
+        } finally {
+            try {
+                scanLock.unlock(AUDIT_LOCK_KEY, owner);
+            } catch (RuntimeException ignore) {
+                // 锁有 TTL，自然释放
             }
         }
     }

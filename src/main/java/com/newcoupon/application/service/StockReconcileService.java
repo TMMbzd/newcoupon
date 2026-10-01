@@ -67,6 +67,7 @@ public class StockReconcileService {
     private final StockDriftLogGateway driftLog;
     private final RedisScanLock scanLock;
     private final com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper;
+    private final com.newcoupon.infrastructure.persistence.mapper.TemplateMapper templateMapper;
     private final StockBucketRouter stockBucketRouter;
 
     private final long inflightTtlMs;
@@ -94,6 +95,7 @@ public class StockReconcileService {
                                 StockDriftLogGateway driftLog,
                                 RedisScanLock scanLock,
                                 com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper,
+                                com.newcoupon.infrastructure.persistence.mapper.TemplateMapper templateMapper,
                                 StockBucketRouter stockBucketRouter,
                                 @Value("${coupon.reconcile.inflight-ttl-ms:180000}") long inflightTtlMs,
                                 @Value("${coupon.reconcile.log-min-interval-ms:3600000}") long logMinIntervalMs,
@@ -106,6 +108,7 @@ public class StockReconcileService {
         this.driftLog = driftLog;
         this.scanLock = scanLock;
         this.stockBucketMapper = stockBucketMapper;
+        this.templateMapper = templateMapper;
         this.stockBucketRouter = stockBucketRouter;
         this.inflightTtlMs = inflightTtlMs;
         this.logMinIntervalMs = logMinIntervalMs;
@@ -230,25 +233,43 @@ public class StockReconcileService {
      */
     boolean conservationCheckOne(CouponTemplate t) {
         var gc = stockGateway.conservationAll(t.getId(), inflightTtlMs);
-        // E2b 锚 Σquota（2026-09-19 二次修正：total>槽位×桶额时部分分配是合法态，锚 total 会
-        // 每轮假破缺；锚 DB 行和=镜像自检——c:alloc 必须等于已建桶的额度合计，篡改/双计现形）
-        long quotaSum = stockBucketMapper.sumQuota(t.getId());
-        if (gc.redisSum() == gc.alloc() && gc.alloc() == quotaSum) {
+        // E2b 锚 = 镜像口径的额度合计（全量行 ∪ 封账真代，排除 V10 历史行——2026-09-28 评审批 2：
+        // (0,0) 历史行永远没有 Redis 键，计入会让存量模板永久误报）；E3a 锚 = 全量行合计
+        // （历史行的 quota 也在 allocated 里）。两个口径刻意分开，别混。
+        long quotaRegistered = stockBucketMapper.sumQuotaRegistered(t.getId());   // E2b 锚（镜像覆盖口径）
+        long quotaAll = stockBucketMapper.sumQuota(t.getId());                    // E3a 锚（全量行）
+        Long allocated = allocatedOf(t.getId());   // L37：第四条不变量 Σquota ≡ allocated
+        if (gc.redisSum() == gc.alloc() && gc.alloc() == quotaRegistered
+                && (allocated == null || allocated == quotaAll)) {
             maybeAutoUnfreeze(t.getId());   // 2e-② 通道①：干净轮自动解冻（误冻 p100 ≤2 周期）
-            maybeSetSoldout(t.getId());       // P1 修复：真售罄重立牌（巡检侧——请求路径有竞态）
+            maybeSetSoldout(t);               // P1 修复：真售罄重立牌（巡检侧——请求路径有竞态；L38 加"额度已分完"判据）
             driftRounds.remove(t.getId());
-            return false;   // E2a+E2b 双平
+            resetForceCount(t.getId());   // 批 3 P2-4："连续"熔断——干净轮清零
+            return false;   // E2a+E2b+E3a 全平
         }
-        String breach = gc.redisSum() != gc.alloc()
-                ? "E2a(Σ四键=" + gc.redisSum() + " ≠ c:alloc=" + gc.alloc() + ")"
-                : "E2b(c:alloc=" + gc.alloc() + " ≠ Σquota=" + quotaSum + ")";
+        String breach;
+        if (gc.redisSum() != gc.alloc()) {
+            breach = "E2a(Σ四键=" + gc.redisSum() + " ≠ c:alloc=" + gc.alloc() + ")";
+        } else if (gc.alloc() != quotaRegistered) {
+            breach = "E2b(c:alloc=" + gc.alloc() + " ≠ Σquota(镜像口径)=" + quotaRegistered + ")";
+        } else {
+            // L37：Σquota 与模板行 allocated 脱节。多了 = 同一段额度建了两行（超发方向，冻结）；
+            // 少了 = 已划出、还没建行（安全方向——可能是开桶动作正被暂停，也可能是补建没跑完）
+            breach = "E3a(Σquota=" + quotaAll + " ≠ allocated=" + allocated + ")";
+        }
         // ==================== 2e-① 三步当场确认（发现 120 秒 → 亚秒）====================
-        // (1) 主键新鲜重读 DB 侧锚（滤"列表快照旧"——quotaSum 是列表循环里的旧值）
-        long freshQuota = stockBucketMapper.sumQuota(t.getId());
-        if (gc.redisSum() == gc.alloc() && gc.alloc() == freshQuota) {
+        // (1) 主键新鲜重读 DB 侧锚（滤"列表快照旧"——quotaRegistered/quotaAll 是列表循环里的旧值）
+        long freshRegistered = stockBucketMapper.sumQuotaRegistered(t.getId());
+        long freshAll = stockBucketMapper.sumQuota(t.getId());
+        Long freshAllocated = allocatedOf(t.getId());
+        if (gc.redisSum() == gc.alloc() && gc.alloc() == freshRegistered
+                && (freshAllocated == null || freshAllocated == freshAll)) {
+            resetForceCount(t.getId());   // 本轮结论=无漂移——打断"连续"
             return false;   // 新鲜读数追平——破缺只是快照旧，止步
         }
-        quotaSum = freshQuota;
+        quotaRegistered = freshRegistered;
+        quotaAll = freshAll;
+        allocated = freshAllocated;
         // (2) 短延迟第二次独立原子快照（滤"resetAll/批量重开等管理窗口"——正常流量是
         //     恒等变换 Lua 不会改变两次读数，会变的只有管理操作，它们的窗口毫秒级）
         try {
@@ -258,15 +279,21 @@ public class StockReconcileService {
             return false;
         }
         var gc2 = stockGateway.conservationAll(t.getId(), inflightTtlMs);
-        long quota2 = stockBucketMapper.sumQuota(t.getId());
-        if (gc2.redisSum() == gc2.alloc() && gc2.alloc() == quota2) {
+        long quota2R = stockBucketMapper.sumQuotaRegistered(t.getId());
+        long quota2All = stockBucketMapper.sumQuota(t.getId());
+        Long allocated2 = allocatedOf(t.getId());
+        if (gc2.redisSum() == gc2.alloc() && gc2.alloc() == quota2R
+                && (allocated2 == null || allocated2 == quota2All)) {
+            resetForceCount(t.getId());   // 本轮结论=无漂移——打断"连续"
             return false;   // 第二次平了——管理窗口的瞬态破缺，止步
         }
         // (3) 仍破缺——真漂移。方向裁决：危险方向（Redis 比 DB 多钱=超发面）当场冻结；
         //     良性方向（钱被锁住）只修不冻（清扫故意破缺日常发生，冻结=隔三差五自锁）
-        boolean dangerous = gc2.redisSum() > gc2.alloc() || gc2.alloc() > quota2;
+        //     L37 补充：Σquota 超过 allocated 也是危险方向（同一段额度建了两行=超发面）
+        boolean dangerous = gc2.redisSum() > gc2.alloc() || gc2.alloc() > quota2R
+                || (allocated2 != null && quota2All > allocated2);
         if (dangerous) {
-            stockGateway.freeze(t.getId());
+            stockGateway.freeze(t.getId(), RedisStockGateway.FREEZE_SOURCE_AUTO);
             log.error("TEMPLATE FROZEN (auto, dangerous drift): templateId={} {} → 卖券暂停(-11)，"
                     + "误冻自动解≤2 巡检周期，真冻待修复后自动解/人工", t.getId(), breach);
         }
@@ -277,29 +304,43 @@ public class StockReconcileService {
         return submitDeep(t.getId(), "conservation(" + breach + ",dangerous=" + dangerous + ")");
     }
 
+    /** L37：读模板行的已划出额度 allocated（第四条不变量 E3a 的右侧）——读不到（行不存在）返回 null，跳过本臂 */
+    private Long allocatedOf(long templateId) {
+        var po = templateMapper.selectById(templateId);
+        return po == null ? null : po.getAllocated();
+    }
+
     /** 2e-② 通道①：干净轮自动解冻——只解"我们自动置的"（人工置的 c:fz 不在豁免名单，不动） */
+    /** 2e-② 通道①：干净轮自动解冻——只解"自动来源"的（人工置的牌绝不自动解） */
     private void maybeAutoUnfreeze(long templateId) {
         try {
             if (stockGateway.isFrozen(templateId)
+                    && stockGateway.isAutoFrozen(templateId)      // L38 补做：来源标记（auto 才自动解）
                     && !auxReadyOrMaint(templateId)) {
                 stockGateway.unfreeze(templateId);
-                log.info("template auto-UNFROZEN (patrol clean round): templateId={}", templateId);
+                log.info("template auto-UNFROZEN (patrol clean round, source=auto): templateId={}", templateId);
             }
         } catch (RuntimeException e) {
             log.warn("auto-unfreeze check failed: templateId={}", templateId, e);
         }
     }
 
-    /** P1 修复（P2 终审）：真售罄重立牌——巡检侧（请求路径有竞态：allocated 已 CAS 但 Redis 桶未建好） */
-    private void maybeSetSoldout(long templateId) {
+    /** P1 修复（P2 终审）：真售罄重立牌——巡检侧（请求路径有竞态：allocated 已 CAS 但 Redis 桶未建好）。
+     * L38 修复（评审 P1-3）：补"额度已分完"判据——部分分配模板（total>槽位数×桶额）在桶卖空但
+     * 仍有未分配额度时，绝不允许立牌（牌会把 -10 补开路径短路成终态 3001，剩余额度不可售）。 */
+    private void maybeSetSoldout(CouponTemplate t) {
         try {
-            if (stockGateway.isSoldout(templateId)) { return; }
-            var gc = stockGateway.conservationAll(templateId, Long.MAX_VALUE);   // 纯观测不清扫（TTL=MAX）
+            if (stockGateway.isSoldout(t.getId())) { return; }
+            Long allocated = allocatedOf(t.getId());
+            if (allocated == null || allocated < t.getTotalCount()) {
+                return;   // 额度没分完 = 还有桶可开——不是售罄
+            }
+            var gc = stockGateway.conservationAll(t.getId(), Long.MAX_VALUE);   // 纯观测不清扫（TTL=MAX）
             long stkSum = 0;
             for (var b : gc.buckets()) { stkSum += b.stk(); }
-            if (stkSum == 0 && gc.alloc() == stockBucketMapper.sumQuota(templateId)) {
-                stockGateway.setSoldoutWithTtl(templateId, 10);
-                log.info("soldout flag re-set by patrol (all buckets empty, quota exhausted): templateId={}", templateId);
+            if (stkSum == 0 && gc.alloc() == stockBucketMapper.sumQuota(t.getId())) {
+                stockGateway.setSoldoutWithTtl(t.getId(), 10);
+                log.info("soldout flag re-set by patrol (all buckets empty, quota exhausted): templateId={}", t.getId());
             }
         } catch (RuntimeException e) { /* 立牌失败不影响巡检 */ }
     }
@@ -399,6 +440,18 @@ public class StockReconcileService {
             }
             ic = freshUsed;   // 读偏斜止步：新鲜 SUM(used) 追平 COUNT，用新值继续后续推导
         }
+        // 批 3 P2-5（评审）：额度段破缺（Σquota≠allocated）deep 没有修复能力——per-gen REBUILD 动的是
+        // Redis 键，修不了"行与 allocated 脱节"。此前会照常重建并记 REPAIRED、还消耗 FORCE 熔断预算
+        // （两次后真漂移反被熔断）。现在只落 E3A_ALARM：不重建、不记 REPAIRED、不动熔断计数，
+        // 去向=开桶差额协议（Σquota<allocated）/ 人工（重复行须人工裁决）。
+        if (reason != null && reason.contains("E3a(")) {
+            log.error("E3A ALARM (deep 无修复能力，只告警)：额度段脱节（Σquota≠allocated）: templateId={}, {}",
+                    templateId, reason);
+            recordDrift(new DriftEvent(templateId, 0, r.dbi(), r.pend(), total, ic, couponCount, r.stk(),
+                    r.sum() - total, "E3A_ALARM", reason, r.voidRetired(), null));
+            driftRounds.remove(templateId);
+            return;
+        }
         // 只告警形态：total 被调小 / 活跃态 void 异常——仅对【活跃态】检查（so 已立或 ic≥total
         // 的退役态，污染余量正是 FORCE retired 分支要归零的对象，不得在此拦截——2026-09-16
         // 集成测试实锤：旧条件 stk+dbi>total 把售罄污染场景误判成只告警，FORCE 永远不被触达）
@@ -447,7 +500,9 @@ public class StockReconcileService {
             }
         }
         // P2b 桥接（step6 将重构为正式 E1/E2/E3 分代巡检）：分代 FORCE——推导锚=该代 used（CONS-3 正解）
-        var bucketRows = stockBucketMapper.selectActive(templateId);
+        // L44（2026-09-30）：输入改"全世代行"（活跃 + 封账真代，排除历史行）——与 ENSURE 同口径。
+        // 旧口径只重建活跃行：封账真代丢键时它的四键永远补不回来，E2a/E2b 永久破缺 → 熔断、不能自愈。
+        var bucketRows = stockBucketMapper.selectRegistered(templateId);
         var gc = stockGateway.conservationAll(templateId, inflightTtlMs);
         long aggStk = 0, aggDbi = 0, aggVoid = 0;
         int worstRet = 1;
@@ -460,10 +515,13 @@ public class StockReconcileService {
                 }
             }
             RebuildResult one = stockGateway.rebuildBucket(templateId, row.getBucketNo(),
-                    row.getGeneration(), mode, row.getQuota(), row.getUsed(), false,
+                    row.getGeneration(), mode, row.getQuota(), row.getUsed(),
+                    // L44：封账行必须按退役推导（旧代码恒传 false——配合"只遍历活跃行"侥幸不出错；
+                    // 改全世代口径后若仍传 false，会把"已封账但名册仍指向它"的行按活跃推导铸出可卖余量）
+                    row.getStatus() != null && row.getStatus() != 0,
                     inflightTtlMs, dbiObs, voidObs);
-            if (one.ret() == -1 || one.ret() == -2) {
-                worstRet = one.ret();   // 任一代被门/栅栏拦下即整体按其语义记录
+            if (one.ret() == -1 || one.ret() == -2 || one.ret() == -3) {
+                worstRet = one.ret();   // 任一代被门/栅栏/未注册护栏拦下即整体按其语义记录
                 break;
             }
             aggStk += one.stk();
@@ -482,8 +540,23 @@ public class StockReconcileService {
                     r.voidRetired(), null));
             return;
         }
+        if (res.ret() == -3) {
+            // 2026-09-28 评审批 2：世代未注册（行已提交、注册未执行/Redis 刚丢）——禁止按 retired
+            // 推导（会把新鲜额度写成 void）；不记 REPAIRED、不消耗 FORCE 熔断预算，交注册/ENSURE 路径。
+            recordDrift(new DriftEvent(templateId, 0, r.dbi(), r.pend(), total, ic, couponCount, r.stk(),
+                    0, "UNREGISTERED_GEN", "世代未注册（等注册协议/ENSURE，禁止 retired 推导）：" + reason,
+                    r.voidRetired(), null));
+            return;
+        }
         if ("force".equals(mode) && res.rebuilt() && res.stk() > 0) {
             stockGateway.clearSoldout(templateId);   // B4 清除协议（影子模式不动任何键）
+        }
+        if ("force".equals(mode) && res.rebuilt()) {
+            // L44：全部已注册世代重建成功 → 四键与数据库口径已逐一相等，镜像按数据库覆盖写。
+            // 修"镜像偏大无自动纠偏"（此前只能人工 SET；见 RESET_ALLOC_SCRIPT 注释）。
+            long mirrorQuota = stockBucketMapper.sumQuotaRegistered(templateId);
+            stockGateway.resetAlloc(templateId, mirrorQuota);
+            log.warn("alloc mirror reset (force): templateId={}, alloc={}", templateId, mirrorQuota);
         }
         String action = "shadow".equals(mode) ? "SHADOW_REPAIR" : "REPAIRED";
         recordDrift(new DriftEvent(templateId, 0, res.dbi(), r.pend(), total, ic, couponCount, res.stk(),
@@ -496,15 +569,6 @@ public class StockReconcileService {
         } else {
             log.warn("conservation SHADOW repair (derived only, no SET): templateId={}, 应为 stk={}, dbi={}, "
                     + "void={} ({})", templateId, res.stk(), res.dbi(), res.voidRetired(), reason);
-        }
-    }
-
-    // ==================== 懒重建（-7 领券可用性路径——总开关不拦） ====================
-
-    public void lazyRebuildStock(long templateId) {
-        // P2b：-7 懒重建改为 ENSURE——DB 活跃桶行是权威，Redis 注册表空时按行重建（SET 非累加）
-        if (stockBucketRouter.ensureActiveBuckets(templateId)) {
-            log.info("buckets ensured from DB (lazy rebuild NX 已退役): templateId={}", templateId);
         }
     }
 
@@ -730,6 +794,19 @@ public class StockReconcileService {
             if (c != null && c == 1L) {
                 aux().expire(key, Duration.ofHours(24));
             }
+        } catch (RuntimeException ignore) {
+        }
+    }
+
+    /** 熔断计数清零（批 3 P2-4，评审：计数只增不清 → 24h 内两次"修好了"的修复会把第三次真实漂移
+     * 误熔断）。语义改回"**连续** FORCE"：任何"本轮无确认漂移"的结论（干净轮/快照旧/瞬态止步）
+     * 都打断连续性——修好一次即清零。 */
+    private void resetForceCount(long templateId) {
+        if (!auxReady()) {
+            return;
+        }
+        try {
+            aux().delete(FORCE_COUNT_PREFIX + "{" + templateId + "}");
         } catch (RuntimeException ignore) {
         }
     }

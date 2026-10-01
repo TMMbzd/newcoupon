@@ -51,8 +51,11 @@ public class CouponExpireTaskGateway {
         mapper.backoff(couponId);
     }
 
-    /** 审计补注册（幂等）：漏注册的券补任务。nextScanTime 传券的有效期终点，已过期则立即到期可扫 */
+    /** 审计补注册（幂等）：漏注册的券补任务。nextScanTime 传券的有效期终点，已过期则立即到期可扫。
+     * L38 修复（评审 P1-10）：补 id——分表主键在 V6 已去掉 AUTO_INCREMENT，漏 id 的 INSERT
+     * 在严格模式下必然报错（T+1 自愈通道整体失效）。 */
     public void registerIfAbsent(long couponId, long userId, LocalDateTime validEnd) {
-        mapper.registerIfAbsent(couponId, userId, (int) (couponId % 16), validEnd.format(SQL_TIME));
+        mapper.registerIfAbsent(idGenerator.next(), couponId, userId, (int) (couponId % 16),
+                validEnd.format(SQL_TIME));
     }
 }

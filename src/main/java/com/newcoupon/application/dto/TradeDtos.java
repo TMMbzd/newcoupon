@@ -28,7 +28,7 @@ public final class TradeDtos {
     }
 
     public record ConfirmRequest(
-            @NotBlank(message = "usageNo 不能为空") @Size(max = 129) String usageNo,
+            @NotBlank(message = "usageNo 不能为空") @Size(max = 64, message = "usageNo 最长 64 字符（= 存储列宽）") String usageNo,
             @NotNull(message = "discountAmt 不能为空") @Min(value = 1, message = "抵扣金额必须为正（单位分）")
             Long discountAmt) {
     }
@@ -37,7 +37,7 @@ public final class TradeDtos {
     }
 
     public record ReleaseRequest(
-            @NotBlank(message = "usageNo 不能为空") @Size(max = 129) String usageNo,
+            @NotBlank(message = "usageNo 不能为空") @Size(max = 64, message = "usageNo 最长 64 字符（= 存储列宽）") String usageNo,
             @Size(max = 128) String reason) {
     }
 

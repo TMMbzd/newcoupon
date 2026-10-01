@@ -1,5 +1,7 @@
 package com.newcoupon.domain.coupon;
 
+import com.newcoupon.common.BoundedKey;
+
 import java.time.LocalDateTime;
 
 /**
@@ -47,7 +49,7 @@ public final class CouponEvent {
      */
     public static CouponEvent issued(UserCoupon coupon, LocalDateTime now) {
         return new CouponEvent(null,
-                "RCV:" + coupon.getUserId() + ":" + coupon.getIdempotentKey(),
+                BoundedKey.of("RCV:", coupon.getUserId() + ":" + coupon.getIdempotentKey()),
                 EventType.ISSUED, coupon.getTemplateId(), coupon.getId(), coupon.getUserId(),
                 null, null, now);
     }
@@ -59,7 +61,7 @@ public final class CouponEvent {
      */
     public static CouponEvent expired(UserCoupon coupon, CouponUsage usage, LocalDateTime now) {
         return new CouponEvent(null,
-                "EXP:" + coupon.getId(),
+                BoundedKey.of("EXP:", String.valueOf(coupon.getId())),
                 EventType.EXPIRED, coupon.getTemplateId(), coupon.getId(), coupon.getUserId(),
                 usage == null ? null : usage.getOrderNo(), null, now);
     }
@@ -70,7 +72,7 @@ public final class CouponEvent {
      */
     public static CouponEvent locked(UserCoupon coupon, CouponUsage usage, LocalDateTime now) {
         return new CouponEvent(null,
-                "LCK:" + usage.getUsageNo(), EventType.LOCKED,
+                BoundedKey.of("LCK:", usage.getUsageNo()), EventType.LOCKED,
                 coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
                 usage.getOrderNo(), null, now);
     }
@@ -78,7 +80,7 @@ public final class CouponEvent {
     /** 核销事件：amount = 本单实际抵扣金额（财务对账的金额事实源） */
     public static CouponEvent used(UserCoupon coupon, CouponUsage usage, long discountAmt, LocalDateTime now) {
         return new CouponEvent(null,
-                "USE:" + usage.getUsageNo(), EventType.USED,
+                BoundedKey.of("USE:", usage.getUsageNo()), EventType.USED,
                 coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
                 usage.getOrderNo(), discountAmt, now);
     }
@@ -86,7 +88,7 @@ public final class CouponEvent {
     /** 释放回退事件 */
     public static CouponEvent released(UserCoupon coupon, CouponUsage usage, LocalDateTime now) {
         return new CouponEvent(null,
-                "RLS:" + usage.getUsageNo(), EventType.RELEASED,
+                BoundedKey.of("RLS:", usage.getUsageNo()), EventType.RELEASED,
                 coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
                 usage.getOrderNo(), null, now);
     }
@@ -98,7 +100,7 @@ public final class CouponEvent {
      */
     public static CouponEvent lockTimeout(UserCoupon coupon, CouponUsage usage, LocalDateTime now) {
         return new CouponEvent(null,
-                "LKT:" + usage.getUsageNo(), EventType.LOCK_TIMEOUT,
+                BoundedKey.of("LKT:", usage.getUsageNo()), EventType.LOCK_TIMEOUT,
                 coupon.getTemplateId(), coupon.getId(), usage.getUserId(),
                 usage.getOrderNo(), null, now);
     }

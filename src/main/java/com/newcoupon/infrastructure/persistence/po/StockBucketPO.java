@@ -20,6 +20,7 @@ public class StockBucketPO {
     private Long templateId;
     private Integer bucketNo;
     private Integer generation;
+    private Long allocatedHi;     // 额度段上界：本行覆盖 allocated 的哪一段的末端（V13/L37）
     private Long quota;
     private Long used;
     private Integer status;       // 0活跃 1封账待GC 2已归档
@@ -34,6 +35,8 @@ public class StockBucketPO {
     public void setBucketNo(Integer bucketNo) { this.bucketNo = bucketNo; }
     public Integer getGeneration() { return generation; }
     public void setGeneration(Integer generation) { this.generation = generation; }
+    public Long getAllocatedHi() { return allocatedHi; }
+    public void setAllocatedHi(Long allocatedHi) { this.allocatedHi = allocatedHi; }
     public Long getQuota() { return quota; }
     public void setQuota(Long quota) { this.quota = quota; }
     public Long getUsed() { return used; }

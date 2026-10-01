@@ -45,11 +45,11 @@ public interface CouponExpireTaskMapper extends BaseMapper<CouponExpireTaskPO> {
 
     /** 审计补注册：不存在则插入；**死信(3)则复活**为待处理并清零重试（红队评审#1：INSERT IGNORE
      *  被死信行唯一键静默吞掉，"补注册"对死信永远做不到）。SET 求值顺序：retry_count 先判旧 status。 */
-    @Update("INSERT INTO coupon_expire_task (coupon_id, user_id, shard, next_scan_time, status, retry_count) "
-            + "VALUES (#{couponId}, #{userId}, #{shard}, #{nextScanTime}, 0, 0) "
+    @Update("INSERT INTO coupon_expire_task (id, coupon_id, user_id, shard, next_scan_time, status, retry_count) "
+            + "VALUES (#{id}, #{couponId}, #{userId}, #{shard}, #{nextScanTime}, 0, 0) "
             + "ON DUPLICATE KEY UPDATE "
             + "retry_count = IF(status = 3, 0, retry_count), "
             + "status = IF(status = 3, 0, status)")
-    int registerIfAbsent(@Param("couponId") long couponId, @Param("userId") long userId,
+    int registerIfAbsent(@Param("id") long id, @Param("couponId") long couponId, @Param("userId") long userId,
                          @Param("shard") int shard, @Param("nextScanTime") String nextScanTime);
 }

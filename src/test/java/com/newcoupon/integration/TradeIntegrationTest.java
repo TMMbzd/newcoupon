@@ -80,6 +80,20 @@ class TradeIntegrationTest extends ShardedIntegrationTestSupport {
         return r.couponId();
     }
 
+    @Test
+    @Timeout(120)
+    @DisplayName("L39·64 字符 orderNo（DTO 允许的最大值）：锁券应成功且单号 ≤64（旧行为：usage_no 超列宽 → 事务失败）")
+    void maxLengthOrderNo_doesNotBreakLock() {
+        long couponId = prepareCoupon();
+        long userId = userCouponRepository.findById(couponId).orElseThrow().getUserId();
+
+        LockResult lock = tradeAppService.lock(new LockRequest("O".repeat(64), userId, couponId));
+
+        assertThat(lock.usageNo()).as("占用单号必须不超列宽（VARCHAR(64)）")
+                .hasSizeLessThanOrEqualTo(64);
+        assertThat(lock.couponStatus()).isEqualTo("已锁定");
+    }
+
     private record Res(Object result, String code) {
     }
 

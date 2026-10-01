@@ -26,3 +26,9 @@ spring:
 mybatis-plus:
   configuration:
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+# dev 便利：本地管理面令牌（生产靠 ADMIN_TOKEN 环境变量；空=拒绝所有管理写，fail-closed）
+# L38 修复（评审 P1-12）：该值原先是 application.yml 的默认值，使 fail-closed 形同虚设——挪到这里。
+coupon:
+  admin:
+    token: dev-admin-token

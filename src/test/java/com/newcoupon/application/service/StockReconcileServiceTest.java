@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -56,6 +57,8 @@ class StockReconcileServiceTest {
     @Mock
     private com.newcoupon.infrastructure.persistence.mapper.StockBucketMapper stockBucketMapper;
     @Mock
+    private com.newcoupon.infrastructure.persistence.mapper.TemplateMapper templateMapper;
+    @Mock
     private StockBucketRouter stockBucketRouter;
 
     private StockReconcileService forceService;   // force 模式
@@ -64,11 +67,11 @@ class StockReconcileServiceTest {
     @BeforeEach
     void setUp() {
         forceService = new StockReconcileService(templateRepository, userCouponRepository,
-                couponUsageRepository, stockGateway, driftLog, scanLock, stockBucketMapper, stockBucketRouter,
-                1000L, 0L, "force", 500);
+                couponUsageRepository, stockGateway, driftLog, scanLock, stockBucketMapper, templateMapper,
+                stockBucketRouter, 1000L, 0L, "force", 500);
         shadowService = new StockReconcileService(templateRepository, userCouponRepository,
-                couponUsageRepository, stockGateway, driftLog, scanLock, stockBucketMapper, stockBucketRouter,
-                1000L, 0L, "shadow", 500);
+                couponUsageRepository, stockGateway, driftLog, scanLock, stockBucketMapper, templateMapper,
+                stockBucketRouter, 1000L, 0L, "shadow", 500);
     }
 
     /** 模板：total=100，issued 由参数定（可领态） */
@@ -115,6 +118,7 @@ class StockReconcileServiceTest {
     void conservationHolds() {
         when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(90, 2, 8, 0));   // Σ=100=alloc
         when(stockBucketMapper.sumQuota(1L)).thenReturn(100L);                       // E2b 平
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(100L);   // E2b 锚（镜像口径）
 
         assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
 
@@ -127,6 +131,7 @@ class StockReconcileServiceTest {
         // 列表循环里的旧 quotaSum=97（gc 侧 alloc=100），但主键新鲜重读=100——E2b 只是快照旧
         when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(90, 2, 8, 0));   // Σ=100=alloc
         when(stockBucketMapper.sumQuota(1L)).thenReturn(97L, 100L);                 // 第一次(列表)97，新鲜重读100
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(97L, 100L);   // E2b 锚（镜像口径）
 
         assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
         verify(driftLog, never()).record(any());
@@ -137,10 +142,11 @@ class StockReconcileServiceTest {
     void threeStep_genuineDrift_confirmsInline() {
         when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(89, 0, 8, 0));   // Σ=97≠alloc=100
         when(stockBucketMapper.sumQuota(1L)).thenReturn(100L);                       // E2b 平——破缺在 E2a
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(100L);   // E2b 锚（镜像口径）
 
         assertThat(forceService.conservationCheckOne(tpl(8L))).isTrue();            // 当场定罪→deep
         // 良性方向（Σ<alloc：钱被锁住）——不冻结
-        verify(stockGateway, never()).freeze(anyLong());
+        verify(stockGateway, never()).freeze(anyLong(), anyString());
     }
 
     @Test
@@ -149,9 +155,43 @@ class StockReconcileServiceTest {
         // dbi=12 > Σquota 兑现的额度——Redis 比 DB 多钱=超发方向
         when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(88, 0, 12, 0));  // Σ=100=alloc 但... 
         when(stockBucketMapper.sumQuota(1L)).thenReturn(97L);                       // alloc(100)>Σquota(97)=E2b 危险向
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(97L);   // E2b 锚（镜像口径）
 
         assertThat(forceService.conservationCheckOne(tpl(8L))).isTrue();
-        verify(stockGateway).freeze(1L);   // 危险方向：当场冻结（后续轮干净→自动解）
+        verify(stockGateway).freeze(1L, RedisStockGateway.FREEZE_SOURCE_AUTO);   // 危险方向：带 auto 来源冻结
+    }
+
+    @Test
+    @DisplayName("L37·E3a 危险方向（Σquota > allocated=重复建行）：三段确认后当场冻结")
+    void e3aQuotaExceedsAllocated_freezes() {
+        // Redis 侧与已建行合计一致（E2a/E2b 都平），但与模板行的 allocated 脱节：
+        // 已建行合计 100 > 已划出额度 95 —— 同一段额度建了两行 = 超发方向
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(100, 0, 0, 0));   // Σ=100=c:alloc
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(100L);                        // E2b 平
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(100L);   // E2b 锚（镜像口径）
+        var po = new com.newcoupon.infrastructure.persistence.po.CouponTemplatePO();
+        po.setId(1L);
+        po.setAllocated(95L);
+        when(templateMapper.selectById(1L)).thenReturn(po);
+
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isTrue();   // 亚秒定罪→deep
+        verify(stockGateway).freeze(1L, RedisStockGateway.FREEZE_SOURCE_AUTO);   // 危险方向：带 auto 来源冻结
+    }
+
+    @Test
+    @DisplayName("L37·E3a 安全方向（Σquota < allocated=已划出未建行）：只告警不冻结")
+    void e3aQuotaBelowAllocated_alarmOnly() {
+        // 已建行合计 95 < 已划出额度 100 —— 可能是开桶动作正被暂停/补建没跑完，安全方向
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(95, 0, 0, 0));    // Σ=95=c:alloc
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(95L);                         // E2b 平
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(95L);   // E2b 锚（镜像口径）
+        var po = new com.newcoupon.infrastructure.persistence.po.CouponTemplatePO();
+        po.setId(1L);
+        po.setAllocated(100L);
+        when(templateMapper.selectById(1L)).thenReturn(po);
+
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isTrue();   // 真破缺→deep 告警
+        verify(stockGateway, never()).freeze(anyLong(), anyString());                    // 安全方向：不冻结
     }
 
     @Test
@@ -159,11 +199,13 @@ class StockReconcileServiceTest {
     void cleanRound_autoUnfreezes() {
         when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(90, 2, 8, 0));   // Σ=100=alloc
         when(stockBucketMapper.sumQuota(1L)).thenReturn(100L);
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(100L);   // E2b 锚（镜像口径）
         when(stockGateway.isFrozen(1L)).thenReturn(true);                            // 处于冻结态
+        when(stockGateway.isAutoFrozen(1L)).thenReturn(true);                        // 且是自动来源
 
         assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
 
-        verify(stockGateway).unfreeze(1L);   // 自动解冻
+        verify(stockGateway).unfreeze(1L);   // 自动解冻（只解 auto 来源）
     }
 
     // ==================== 镜像：方向性两臂 ====================
@@ -213,7 +255,8 @@ class StockReconcileServiceTest {
         when(userCouponRepository.countByTemplate(1L)).thenReturn(t.getIssuedCount());
         when(stockBucketMapper.sumUsed(1L)).thenReturn(t.getIssuedCount());   // P2b：守卫④/deep ic 换锚
         // P2b 分代桥接路径：DB 行 + 分代读数 + 分代重建
-        when(stockBucketMapper.selectActive(1L)).thenReturn(java.util.List.of(bucketRow(0, 1, 100, 10)));
+        // L44（2026-09-30）：deep 的输入从"活跃行"改为"全世代行"（与 ENSURE 同口径）
+        when(stockBucketMapper.selectRegistered(1L)).thenReturn(java.util.List.of(bucketRow(0, 1, 100, 10)));
         when(stockGateway.conservationAll(eq(1L), anyLong())).thenReturn(
                 new com.newcoupon.infrastructure.redis.RedisStockGateway.GlobalConservation(
                         100, 100, false,
@@ -247,6 +290,50 @@ class StockReconcileServiceTest {
                 eq(100L), eq(10L), anyBoolean(), eq(1000L), eq(10L), eq(0L));
         verify(stockGateway).clearSoldout(1L);   // B4：修复恢复余量必清标志
         verify(driftLog).record(any());
+    }
+
+    @Test
+    @DisplayName("批3·L44：deep 全世代输入——封账真代按退役推导（retired=true），且重建成功后覆盖写分配镜像")
+    void deepRebuildsSealedGensAndResetsAllocMirror() {
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
+        when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
+        when(stockGateway.conservationAll(eq(1L), anyLong())).thenReturn(
+                new com.newcoupon.infrastructure.redis.RedisStockGateway.GlobalConservation(
+                        100, 100, false,
+                        java.util.List.of(new com.newcoupon.infrastructure.redis.RedisStockGateway.BucketReading(
+                                0, 1, 88, 0, 10, 0))));
+        // 全世代行：一行活跃（桶 0/代 1）+ 一行封账真代（桶 1/代 1）
+        var sealed = bucketRow(1, 1, 10, 10);
+        sealed.setStatus(1);
+        when(stockBucketMapper.selectRegistered(1L))
+                .thenReturn(java.util.List.of(bucketRow(0, 1, 100, 10), sealed));
+        when(stockGateway.rebuildBucket(eq(1L), anyInt(), anyLong(), any(), anyLong(), anyLong(),
+                anyBoolean(), anyLong(), anyLong(), anyLong()))
+                .thenReturn(new RebuildResult(1, 90, 10, 0));
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(110L);   // 100（活跃）+ 10（封账真代）
+
+        forceService.deepReconcileSync(1L, "test");
+
+        // 活跃行按活跃推导（retired=false），封账行按退役推导（retired=true）——
+        // 这钉住的是"改全世代口径后必须传行状态"这个前提（旧代码恒传 false）
+        verify(stockGateway).rebuildBucket(eq(1L), eq(0), eq(1L), anyString(), eq(100L), eq(10L),
+                eq(false), eq(1000L), eq(10L), eq(0L));
+        verify(stockGateway).rebuildBucket(eq(1L), eq(1), eq(1L), anyString(), eq(10L), eq(10L),
+                eq(true), eq(1000L), eq(0L), eq(0L));
+        // L44 核心：重建全部成功 → 分配镜像按数据库口径覆盖写（修"镜像偏大无自动纠偏"）
+        verify(stockGateway).resetAlloc(1L, 110L);
+    }
+
+    @Test
+    @DisplayName("批3·L44：影子模式绝不覆盖写镜像（影子只算不写）")
+    void deepShadowNeverResetsAllocMirror() {
+        givenDeepPassGates(tpl(10L));
+
+        shadowService.deepReconcileSync(1L, "test");
+
+        verify(stockGateway, never()).resetAlloc(anyLong(), anyLong());
     }
 
     @Test
@@ -311,7 +398,8 @@ class StockReconcileServiceTest {
         when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
         when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(88, 0, 10, 0, false));
         when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
-        when(stockBucketMapper.selectActive(1L)).thenReturn(java.util.List.of(bucketRow(0, 1, 100, 10)));
+        // L44：deep 的输入改为全世代行（与 ENSURE 同口径）
+        when(stockBucketMapper.selectRegistered(1L)).thenReturn(java.util.List.of(bucketRow(0, 1, 100, 10)));
         when(stockGateway.conservationAll(eq(1L), anyLong())).thenReturn(
                 new com.newcoupon.infrastructure.redis.RedisStockGateway.GlobalConservation(
                         100, 100, false,
@@ -354,5 +442,112 @@ class StockReconcileServiceTest {
         verify(stockGateway, never()).rebuildBucket(anyLong(), anyInt(), anyLong(), any(),
                 anyLong(), anyLong(), anyBoolean(), anyLong(), anyLong(), anyLong());
         verify(driftLog).record(any());
+    }
+
+    // ==================== L38 补丁（2026-09-27 评审批 1）====================
+
+    @Test
+    @DisplayName("L38·部分分配模板（allocated<total）全桶排空：不立售罄牌——还有桶可开（评审 P1-3）")
+    void partialAllocation_neverSetsSoldout() {
+        // allocated=95 < total=100：桶全空、镜像自洽，但额度没分完——立牌会把 -10 补开路径
+        // 短路成终态 3001，剩余 5 张永久不可售
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(0, 0, 95, 0));      // Σ=95=alloc
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(95L);                            // E2b 平
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(95L);   // E2b 锚（镜像口径）
+        var po = new com.newcoupon.infrastructure.persistence.po.CouponTemplatePO();
+        po.setId(1L);
+        po.setAllocated(95L);                                                            // 额度没分完
+        when(templateMapper.selectById(1L)).thenReturn(po);
+
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();                // 干净轮
+
+        verify(stockGateway, never()).setSoldoutWithTtl(anyLong(), anyInt());            // 绝不立牌
+    }
+
+    @Test
+    @DisplayName("L38·对照：额度已分完（allocated=total）且全桶排空——才允许重立售罄牌")
+    void fullAllocation_setsSoldoutWhenAllEmpty() {
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(0, 0, 100, 0));     // Σ=100=alloc
+        when(stockGateway.conservationAll(1L, Long.MAX_VALUE)).thenReturn(gc(0, 0, 100, 0));
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(100L);
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(100L);   // E2b 锚（镜像口径）
+        var po = new com.newcoupon.infrastructure.persistence.po.CouponTemplatePO();
+        po.setId(1L);
+        po.setAllocated(100L);                                                           // =total
+        when(templateMapper.selectById(1L)).thenReturn(po);
+
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
+
+        verify(stockGateway).setSoldoutWithTtl(1L, 10);                                  // 真售罄：重立牌
+    }
+
+    @Test
+    @DisplayName("L38·人工冻结（source=manual）不被干净轮自动解——只解 auto 来源（评审 P2-6/补做 238ff16）")
+    void manualFreeze_neverAutoUnfrozen() {
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(90, 2, 8, 0));      // Σ=100=alloc
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(100L);
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(100L);   // E2b 锚（镜像口径）
+        when(stockGateway.isFrozen(1L)).thenReturn(true);                                // 处于冻结态
+        when(stockGateway.isAutoFrozen(1L)).thenReturn(false);                           // 但来源是人工
+
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
+
+        verify(stockGateway, never()).unfreeze(anyLong());                               // 人工冻结：绝不自动解
+    }
+
+    // ==================== 批 3（2026-09-28 评审批 3）====================
+
+    /** 注入 aux Redis 桩（心跳/熔断计数/维护标记/修复环计数共用的那个 template） */
+    private org.springframework.data.redis.core.StringRedisTemplate auxStub() {
+        var aux = org.mockito.Mockito.mock(org.springframework.data.redis.core.StringRedisTemplate.class);
+        forceService.wireAuxRedis(aux);
+        return aux;
+    }
+
+    @Test
+    @DisplayName("批3·P2-4：干净轮清零『连续 FORCE』计数（修好一次即打断连续性——旧行为计数只增不清→误熔断）")
+    void cleanRound_resetsForceCount() {
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(90, 2, 8, 0));   // Σ=100=alloc
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(100L);
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(100L);
+        var aux = auxStub();
+
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
+
+        verify(aux).delete("c:frce:{1}");   // 无漂移结论 → 连续计数归零
+    }
+
+    @Test
+    @DisplayName("批3·P2-4：快照旧止步同样清零（『连续』被任何无漂移结论打断，不止干净轮）")
+    void staleSnapshotStop_resetsForceCount() {
+        when(stockGateway.conservationAll(1L, 1000L)).thenReturn(gc(90, 2, 8, 0));   // Σ=100=alloc
+        when(stockBucketMapper.sumQuota(1L)).thenReturn(97L, 100L);                  // 首次旧值→新鲜重读追平
+        when(stockBucketMapper.sumQuotaRegistered(1L)).thenReturn(97L, 100L);
+        var aux = auxStub();
+
+        assertThat(forceService.conservationCheckOne(tpl(8L))).isFalse();
+
+        verify(aux).delete("c:frce:{1}");
+    }
+
+    @Test
+    @DisplayName("批3·P2-5：deep 遇额度段破缺（E3a）只告警——不重建、不记 REPAIRED、不碰熔断计数")
+    void deepE3a_alarmOnly() {
+        when(templateRepository.findById(1L)).thenReturn(Optional.of(tpl(10L)));
+        when(stockBucketMapper.sumUsed(1L)).thenReturn(10L);
+        when(stockGateway.conservation(1L, 1000L)).thenReturn(reading(90, 0, 10, 0, false));
+        when(userCouponRepository.countByTemplate(1L)).thenReturn(10L);
+        var aux = auxStub();
+
+        forceService.deepReconcileSync(1L, "conservation(E3a(Σquota=105 ≠ allocated=100))");
+
+        // 额度段脱节 = 行与 allocated 的问题，per-gen REBUILD 修不了（旧行为=照常重建+记 REPAIRED+烧熔断预算）
+        verify(stockGateway, never()).rebuildBucket(anyLong(), anyInt(), anyLong(), any(),
+                anyLong(), anyLong(), anyBoolean(), anyLong(), anyLong(), anyLong());
+        var captor = org.mockito.ArgumentCaptor.forClass(StockDriftLogGateway.DriftEvent.class);
+        verify(driftLog).record(captor.capture());
+        assertThat(captor.getValue().action()).as("落 E3A_ALARM（不是 REPAIRED）").isEqualTo("E3A_ALARM");
+        assertThat(captor.getValue().detail()).contains("E3a(");
+        verify(aux, never()).opsForValue();   // 熔断计数完全不碰：不读、不增、不清
     }
 }

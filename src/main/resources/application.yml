@@ -52,9 +52,11 @@ coupon:
       window-seconds: 60
       max-per-window: 30
   # 管理面最小鉴权（L27）：POST /api/templates* 需 X-Admin-Token 与此一致；空=拒绝所有管理写（fail-closed）
-  # 生产必须用环境变量覆盖；完整 HMAC/防重放/双人复核在 P7
+  # L38 修复（评审 P1-12）：默认值改空——此前默认 dev-admin-token 使 fail-closed 分支不可达，
+  # 未设环境变量的部署等于管理面无鉴权（发布=铸造库存额度的入口）。dev 便利值挪 application-dev.yml。
+  # 生产必须用环境变量 ADMIN_TOKEN 覆盖；完整 HMAC/防重放/双人复核在 P7
   admin:
-    token: ${ADMIN_TOKEN:dev-admin-token}
+    token: ${ADMIN_TOKEN:}
   # P2d 发件箱传输开关（ADR-0011）：log=日志传输（默认，测试/无MQ环境）；rocketmq=真传输
   # （compose 起 rocketmq-namesrv/broker 后切换——生产用环境变量 OUTBOX_TRANSPORT 覆盖）
   outbox:

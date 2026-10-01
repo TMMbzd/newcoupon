@@ -133,11 +133,12 @@ public class ReceiveAppService {
                 LocalDate.now().format(DAY), DAY_TTL_SEC, IDEM_TTL_SEC,
                 stockBucketRouter.preferred(req.userId()));   // P2b 路由亲和（v2 §3）
         DeductResult d = stockGateway.deduct(cmd);
+        d = healLimitRejectIfCounterLeaked(req, cmd, d);   // L42①：限领计数虚高时先复核再拒
         if (d.code() == -7) {
             // A2'：注册表空（清库/Redis 灾难）。随机退避把"同时再击"摊开；
             // ENSURE 按 DB 权威行一次性重建（按 quota-used 推导铸 stk，幂等）。
             backoffQuietly();
-            stockBucketRouter.ensureActiveBuckets(req.templateId());
+            stockBucketRouter.ensureRegisteredBuckets(req.templateId());
             d = stockGateway.deduct(cmd);
             if (d.code() == -7 && stockBucketRouter.tryOpenBucket(req.templateId())) {
                 // 兜底（审查 P1）：DB 有额度但一行活跃桶都没有（如 V10 前形态/回填缺口）——
@@ -149,9 +150,18 @@ public class ReceiveAppService {
             }
         }
         if (d.code() == -10) {
+            // L47（2026-09-30 由修好的"清库风暴"用例实锤）：Redis 的**余量键**丢了、但活跃名册还在时，
+            // 闸门报的是 -10（不是 -7），下面的常规循环会一路走到"真售罄"——用户拿到 3001 假售罄，
+            // 而数据库里明明还有可卖的行。判据用数据库权威（存在"活跃且未用满"的行）：按行强制补键后重扣。
+            // 判据是"名册里的余量键真的缺了"（纯 Redis 读，一次 Lua）——不能用"数据库还有可卖行"：
+            // 正常惊群里尾量正被别人消费时它也成立，据它降级会把售罄风暴变成 5001 风暴（批 1 实锤）。
+            if (stockGateway.anyStkKeyMissing(req.templateId())
+                    && stockBucketRouter.rebuildMissingKeys(req.templateId())) {
+                d = stockGateway.deduct(cmd);
+            }
             // P2b v2 §5：全桶耗尽 → 开桶协议（single-flight+尾量+尾差恢复）。
             // 抢不到开桶锁≠售罄——别人正在开，短退避后重试（v2 §5 ①的原义，含夹缝自愈重放）；
-            // 有界两轮，防开桶风暴下请求自旋。真售罄（DB allocated>=total）直接走售罄。
+            // 有界三轮，防开桶风暴下请求自旋。真售罄（DB allocated>=total）直接走售罄。
             // 每轮：先试开桶（自己开/别人已开/差额补建均无害）→ 真售罄才退 → 退避 → 重扣。
             // 注意顺序：soldOutInDb(allocated>=total) 在夹缝态为真但差额未补——必须先给
             // tryOpenBucket 一次补建机会再判售罄（2026-09-19 夹缝用例回退实锤）。
@@ -161,14 +171,28 @@ public class ReceiveAppService {
                 boolean opened = stockBucketRouter.refillExhaustedBuckets(req.templateId())
                         || stockBucketRouter.tryOpenBucket(req.templateId());
                 if (!opened && stockBucketRouter.soldOutInDb(req.templateId())) {
-                    break;   // 真售罄（开不动且 DB 无差额可补）——不再自旋
+                    // L38 修复（评审 P2-1：终态判据三条件）——判"售罄"前必须排除两种"还在生产"：
+                    // ①有人正开着桶（锁被持有）：货可能马上到；②存在"已划出、未建行"的差额（含
+                    // 被暂停的开桶者的在途划款）。有生产迹象就退避后**再问一次门**（而不是结案）。
+                    if (stockGateway.openLockHeld(req.templateId())
+                            || stockBucketRouter.hasAllocationGap(req.templateId())) {
+                        backoffQuietly();
+                        d = stockGateway.deduct(cmd);
+                        continue;
+                    }
+                    d = stockGateway.deduct(cmd);   // 生产已停：门当场复核（可能已有货）
+                    break;                          // 复核结果即终局（成功→继续发券；-10→真售罄）
                 }
                 backoffQuietly();
                 d = stockGateway.deduct(cmd);
             }
-            if (d.code() == -10 && !stockBucketRouter.soldOutInDb(req.templateId())) {
-                // 审查 P1：重试预算(~0.5s)≪开桶锁 TTL(5s)——慢开桶/持有者死亡窗口内退出时，
-                // "开不动"≠"额度分完"。终态 STOCK_OUT 是谎报（3001 不可重试=等同丢单），改可重试降级码
+            if (d.code() == -10 && (!stockBucketRouter.soldOutInDb(req.templateId())
+                    || stockBucketRouter.hasAllocationGap(req.templateId()))) {
+                // 审查 P1 + L38：重试预算(~0.5s)≪开桶锁 TTL(5s)——重试耗尽时若"额度没分完"或
+                // 存在"已划出、未建行"的差额（被暂停开桶者的在途划款——生产确实没完成），
+                // 终态 STOCK_OUT 是谎报（3001 不可重试=等同丢单），改可重试降级码。
+                // 注意这里**不把"锁被持有"当生产信号**：高并发下大量请求只是抢锁试探（抢到发现
+                // 无桶可开即放），若据此判降级会把正常售罄风暴变成 5001 风暴（惊群用例实锤）。
                 throw new BizException(ErrorCode.DEGRADED, "库存补给中，请稍后重试");
             }
         }
@@ -268,6 +292,50 @@ public class ReceiveAppService {
     }
 
     // ---------- 闸门拒绝分类 ----------
+
+    /**
+     * L42①（2026-09-30）：限领计数可能**虚高**——令牌清扫删在途令牌时不回滚计数、取消失败同样会漏。
+     * 虚高的计数让闸门在 -2/-6 直接拒绝，而闸门拒绝发生在任何数据库动作之前，**不会自愈**：
+     * 用户明明还能领，却一直拿到 3002（典型的"错误拒绝"）。
+     *
+     * <p>处置与 L3 计数自愈同一原则：**数据库是权威**——拒绝前复核一次，虚高则把计数校准回真实值，
+     * 并当场重扣（用户无感）。复核失败（数据库也不通）时不改变结论——宁可少发一次，也不错发。
+     *
+     * <p>为什么把复核放在闸门之后而不是之前：多数请求在闸门就成功/被真限领挡住，只有 -2/-6 这一
+     * 条冷路径才多一次 COUNT，热路径零额外开销。
+     */
+    private DeductResult healLimitRejectIfCounterLeaked(ReceiveRequest req, DeductCommand cmd, DeductResult d) {
+        if (d.code() != -2 && d.code() != -6) {
+            return d;
+        }
+        try {
+            long actual;
+            long limit;
+            if (d.code() == -2) {   // 用户累计限领
+                actual = userCouponRepository.countByUserAndTemplate(req.userId(), req.templateId());
+                limit = cmd.maxPerUser();
+                if (actual >= limit) {
+                    return d;   // 真领满了：诚实拒绝，不做任何自愈
+                }
+                healUserCountQuietly(req, actual);   // 计数校准为真实张数
+            } else {                // 用户当日限领
+                actual = userCouponRepository.countTodayByUserAndTemplate(req.userId(), req.templateId(),
+                        LocalDate.now().atStartOfDay());
+                limit = cmd.perUserDaily();
+                if (actual >= limit) {
+                    return d;
+                }
+                stockGateway.setUserDailyCount(req.templateId(), req.userId(), cmd.day(), actual);
+            }
+            log.warn("limit counter leaked (redis said full, db says {}/{}): templateId={}, userId={}, code={}"
+                    + " — healed & retrying", actual, limit, req.templateId(), req.userId(), d.code());
+            return stockGateway.deduct(cmd);
+        } catch (RuntimeException e) {
+            log.error("limit counter verify failed (keep gate decision): templateId={}, userId={}",
+                    req.templateId(), req.userId(), e);
+            return d;
+        }
+    }
 
     /**
      * Redis 闸门拒绝（-1/-2/-3/-6/-8，-3 含 soldout 标志短路）。注意：idem 键 TTL(10分钟)
@@ -396,9 +464,16 @@ public class ReceiveAppService {
         }
         if (stockBucketRouter.soldOutInDb(req.templateId())) {
             // 售罄（P2b 换锚 v2 §6.3：allocated>=total——ic 已冻结为快照口径）：钉牌 + 退休令牌。
-            // Redis 余量已无意义——回加只会重启"过闸→被拒→回加"的自持环（N1）。
-            cancelQuietly(cmd, d, CancelCause.SOLD_OUT);
-            return new BizException(ErrorCode.STOCK_OUT);
+            // L38 修复（评审 P2-2）：钉模板级牌前复核两件事——①令牌所在桶行确实"用满"
+            // （被封账/瞬时拒绝不算，否则单桶异常会把全模板停流）；②全模板确实没有别的可卖余量。
+            // 两条都满足才立牌；否则按瞬时处理（回加不立牌——不把错误方向放大成全模板终态）。
+            if (stockBucketRouter.bucketRowFull(req.templateId(), d.bucket(), d.gen())
+                    && stockBucketRouter.noSellableRowInDb(req.templateId())) {
+                cancelQuietly(cmd, d, CancelCause.SOLD_OUT);
+                return new BizException(ErrorCode.STOCK_OUT);
+            }
+            cancelQuietly(cmd, d, CancelCause.TRANSIENT);
+            return new BizException(ErrorCode.DEGRADED, "库存扣账未成功，请稍后重试");
         }
         if (fresh.getApproveStatus() != ApproveStatus.APPROVED
                 || fresh.getPublishStatus() != PublishStatus.PUBLISHED) {

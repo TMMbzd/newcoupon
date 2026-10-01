@@ -30,6 +30,12 @@ public interface StockBucketMapper extends BaseMapper<StockBucketPO> {
                         @Param("bucket") int bucket,
                         @Param("gen") int gen);
 
+    /** 封账（定值 CAS）：只置 status，绝不回写 used/quota——整行回写会把并发已提交的扣账抹掉
+     * （L38 修复：评审 P1-9；与本类"涉及并发控制的写必须手写条件 SQL"的规矩对齐）。
+     * 返回 1=本次封上；0=已是封账/行不存在（幂等）。 */
+    @Update("UPDATE stock_bucket SET status = 1 WHERE id = #{id} AND status = 0")
+    int seal(@Param("id") long id);
+
     /** 同代精确读（分代镜像 E3b 的 DB 侧锚；主键新鲜重读用） */
     @Select("SELECT * FROM stock_bucket WHERE template_id = #{tpl} "
             + "AND bucket_no = #{bucket} AND generation = #{gen}")
@@ -54,9 +60,29 @@ public interface StockBucketMapper extends BaseMapper<StockBucketPO> {
             + "AND NOT (bucket_no = 0 AND generation = 0)")
     long sumUsedBucketed(@Param("tpl") long tpl);
 
-    /** 全局额度求和（不变量断言：SUM(quota) ≡ template.allocated——巡检 E3a 侧证） */
+    /** 全量额度求和（含 V10 历史行）——用途：开桶差额判据（历史行也是"已物化"，必须算进差额）
+     * 与巡检额度段检查（SUM(quota) ≡ template.allocated，历史行的 quota 也在 allocated 里）。 */
     @Select("SELECT COALESCE(SUM(quota), 0) FROM stock_bucket WHERE template_id = #{tpl}")
     long sumQuota(@Param("tpl") long tpl);
+
+    /** 镜像口径的额度求和：全量行 ∪ 封账真代，只排除 V10 历史行 (0,0)——巡检 E2b 的锚。
+     * 为什么与 sumQuota 分开（2026-09-28 评审批 2 修复）：(0,0) 历史行永远没有 Redis 键，
+     * 计入 E2b 会让所有存量在售模板（issued_count>0）永久误报守恒破缺（E2a/E2b 是"镜像覆盖"
+     * 口径，sumUsedBucketed 排除 (0,0) 是同一先例）。 */
+    @Select("SELECT COALESCE(SUM(quota), 0) FROM stock_bucket WHERE template_id = #{tpl} "
+            + "AND NOT (bucket_no = 0 AND generation = 0)")
+    long sumQuotaRegistered(@Param("tpl") long tpl);
+
+    /** 仍"可卖"的活跃行数（used<quota 且 status=0）——L38（评审 P2-2）钉售罄牌前的 DB 侧权威判据
+     * （不用 Redis 余量：污染场景下 Redis 会谎报有货，而 DB 行是权威） */
+    @Select("SELECT COUNT(*) FROM stock_bucket WHERE template_id = #{tpl} AND status = 0 AND used < quota")
+    long countSellableRows(@Param("tpl") long tpl);
+
+    /** 进入 Redis 镜像口径的全部行（活跃+封账真代，排除 V10 历史行 (0,0)）——ENSURE 灾后重建的输入
+     * （2026-09-28 评审批 2：只重建活跃行会让封账真代的 dbi/void 键缺失 → E2b/镜像永久破缺） */
+    @Select("SELECT * FROM stock_bucket WHERE template_id = #{tpl} "
+            + "AND NOT (bucket_no = 0 AND generation = 0) ORDER BY bucket_no, generation")
+    List<StockBucketPO> selectRegistered(@Param("tpl") long tpl);
 
     /** 活跃桶行清单（开桶选址/巡检遍历用）。同桶多代按代序——ENSURE 重建取 maxGen 的前提（审查 P2 修复） */
     @Select("SELECT * FROM stock_bucket WHERE template_id = #{tpl} AND status = 0 "

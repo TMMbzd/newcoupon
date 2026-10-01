@@ -160,6 +160,9 @@ public class RedisStockGateway {
     public static final String OPEN_BUCKET_SCRIPT = """
             -- KEYS: 1 act(hash)  2 alloc  3 gens(set)   ARGV: 1 tpl  2 bucket  3 gen  4 quota
             local cur = redis.call('HGET', KEYS[1], ARGV[2])
+            if cur and tonumber(cur) and tonumber(cur) > tonumber(ARGV[3]) then
+              return -1                                        -- 名册上已是更新的世代：拒绝回退
+            end                                                -- （被暂停的开桶者恢复执行时不得把 act 指回旧代）
             if cur == ARGV[3] and redis.call('EXISTS', 'c:stk:{' .. ARGV[1] .. '}:' .. ARGV[2] .. ':' .. ARGV[3]) == 1 then
               return 0
             end
@@ -179,25 +182,41 @@ public class RedisStockGateway {
      * 按 DB 权威行一次性重建注册表+各代四键+alloc=Σquota（SET 非累加——崩溃残余不叠加）。
      */
     public static final String ENSURE_BUCKETS_SCRIPT = """
-            -- KEYS: 1 act(hash)  2 alloc  3 gens(set)   ARGV: 1 tpl  2 b1  3 g1  4 q1  5 u1  6 b2 ...（四元组 b,g,quota,used）
-            if redis.call('HLEN', KEYS[1]) > 0 then return 0 end
+            -- KEYS: 1 act(hash)  2 alloc  3 gens(set)
+            -- ARGV: 1 force(0/1)  2 tpl  3 b1 4 g1 5 q1 6 u1 7 r1  8 b2 ...（五元组 b,g,quota,used,retired(0/1)）
+            -- 2026-09-28 评审批 2：输入改"全世代行（活跃+封账真代，排除 V10 历史行）"——
+            -- 只重建活跃行会让封账真代的 dbi/void 键缺失 → E2b/镜像方向检查永久破缺、修复熔断。
+            -- force=1（2026-09-30 L47）：跳过"名册非空就不动"的门——用于"名册还在、某些代的键丢了"的
+            -- 修复（缺的键按行补回；已存在的键一律不覆盖，见下面的 EXISTS 判定）
+            local force = ARGV[1] == '1'
+            if (not force) and redis.call('HLEN', KEYS[1]) > 0 then return 0 end
             local total = 0
-            for i = 2, #ARGV, 4 do
+            local created = 0    -- 实际补了几代（0 = 一个都不缺）
+            for i = 3, #ARGV, 5 do
               local b, g = ARGV[i], ARGV[i + 1]
               local q, u = tonumber(ARGV[i + 2]), tonumber(ARGV[i + 3])
-              redis.call('HSET', KEYS[1], b, g)
-              redis.call('SADD', KEYS[3], b .. ':' .. g)
-              local base = 'c:stk:{' .. ARGV[1] .. '}:' .. b .. ':' .. g
+              local retired = ARGV[i + 4] == '1'
+              if not retired then redis.call('HSET', KEYS[1], b, g) end   -- act 只登记活跃代（槽→当代）
+              redis.call('SADD', KEYS[3], b .. ':' .. g)                  -- 全世代名册：活跃+封账真代
+              local base = 'c:stk:{' .. ARGV[2] .. '}:' .. b .. ':' .. g
               if redis.call('EXISTS', base) == 0 then
-                -- 按 quota-used 推导铸 stk（审查 P2：全额铸=凭空回补已卖量）；dbi 同步落 used
-                redis.call('SET', base, math.max(0, q - u))
-                redis.call('SET', 'c:dbi:{' .. ARGV[1] .. '}:' .. b .. ':' .. g, u)
-                redis.call('SET', 'c:void:{' .. ARGV[1] .. '}:' .. b .. ':' .. g, 0)
+                created = created + 1
+                if retired then
+                  -- 封账真代：按退役推导（stk=0、dbi=used、void=quota−used——与 REBUILD retired 分支同式）
+                  redis.call('SET', base, 0)
+                  redis.call('SET', 'c:dbi:{' .. ARGV[2] .. '}:' .. b .. ':' .. g, u)
+                  redis.call('SET', 'c:void:{' .. ARGV[2] .. '}:' .. b .. ':' .. g, math.max(0, q - u))
+                else
+                  -- 活跃代：按 quota-used 推导铸 stk（审查 P2：全额铸=凭空回补已卖量）；dbi 同步落 used
+                  redis.call('SET', base, math.max(0, q - u))
+                  redis.call('SET', 'c:dbi:{' .. ARGV[2] .. '}:' .. b .. ':' .. g, u)
+                  redis.call('SET', 'c:void:{' .. ARGV[2] .. '}:' .. b .. ':' .. g, 0)
+                end
               end
               total = total + q
             end
             redis.call('SET', KEYS[2], total)
-            return 1
+            return created     -- 补了几代（0 = 全部已存在；调用方据此免日志）
             """;
 
     /**
@@ -230,10 +249,24 @@ public class RedisStockGateway {
             if dbiNow ~= tonumber(ARGV[9]) or voidNow ~= tonumber(ARGV[10]) then
               return {-2, 0, 0, 0}
             end
+            -- 未注册世代护栏（2026-09-28 评审批 2）：名册里没有该桶、或登记的世代比本代更旧——
+            -- 说明本代还没走注册协议（行已提交、注册未执行/Redis 刚丢）；此时按 retired 推导
+            -- 会把新鲜额度写成 void（不可卖）→ 拒绝执行，交还调用方走注册/ENSURE 路径。
+            local cur = redis.call('HGET', KEYS[6], ARGV[3])
+            local curNum = cur and tonumber(cur) or nil
+            local dbRetired = tonumber(ARGV[7]) == 1
+            -- 未注册世代护栏（2026-09-28 评审批 2；2026-09-30 L46 收窄）：
+            -- 只拦"数据库还活跃、但名册没有此桶/世代更旧"的行——那种情况按 retired 推导会把
+            -- 新鲜额度写成 void（不可卖）。**封账真代必须放行**：它本来就该按退役形态补键，
+            -- 而清库重建后 ENSURE 只把活跃代写进名册，封账真代所在桶在名册里没有字段——
+            -- 旧写法会让这类模板的 deep 修复整体放弃（-3 直接跳出循环），永远不能自愈。
+            if not dbRetired and (curNum == nil or curNum < tonumber(ARGV[4])) then
+              return {-3, 0, 0, 0}
+            end
             local used = tonumber(ARGV[6])
             -- 当代门（审查 P2）：该桶注册当代≠本代=旧代——按 retired 处理（防 void 复活/误删售罄牌）
-            local isCurrentGen = redis.call('HGET', KEYS[6], ARGV[3]) == ARGV[4]
-            local retired = tonumber(ARGV[7]) == 1 or redis.call('EXISTS', KEYS[5]) == 1 or not isCurrentGen
+            local retired = dbRetired or redis.call('EXISTS', KEYS[5]) == 1
+                            or (curNum ~= nil and curNum > tonumber(ARGV[4]))
             local stkV, dbiV, voidV
             if retired then
               stkV = 0; dbiV = used; voidV = tonumber(ARGV[5]) - used
@@ -381,27 +414,110 @@ public class RedisStockGateway {
         return conservationAll(templateId, inflightTtlMs).aggregate();
     }
 
-    /** 开桶 Redis 侧（v2 §5 ④）。返回 false=幂等命中（该代已开，alloc 未双计） */
-    public boolean openBucket(long templateId, int bucket, long gen, long quota) {
+    /** 开桶 Redis 侧（v2 §5 ④）。返回 1=本次执行；0=幂等命中（该代已开，alloc 未双计）；
+     * -1=名册上已是更新的世代（拒绝回退——被暂停的开桶者恢复执行时的护栏，什么都不写） */
+    public int openBucket(long templateId, int bucket, long gen, long quota) {
         Long r = redis.execute(openBucketScript,
                 List.of(actKey(templateId), allocKey(templateId), gensKey(templateId)),
                 String.valueOf(templateId), String.valueOf(bucket), String.valueOf(gen), String.valueOf(quota));
+        return r == null ? 0 : r.intValue();
+    }
+
+    /** 开桶锁是否被持有（判定"真售罄"前排除"有人正在开桶"） */
+    public boolean openLockHeld(long templateId) {
+        return Boolean.TRUE.equals(redis.hasKey(openingKey(templateId)));
+    }
+
+    /**
+     * 该代是否"确已终结"（可安全封账）：在途令牌为空 且 余量归零（一个 Lua 原子判）。
+     * 2026-09-28 评审批 3（P2-3）：封账判定必须看在途——stk==0 但有令牌在 pend 里时封账，
+     * 会把还没提交的合法领取打成"DB status 守卫拒绝"（自伤）；判据原子化后，通过检查的瞬间
+     * 起既不会有新令牌（新令牌要求 stk&gt;0）也不会有取消回加（回加要求有令牌）——状态冻结，可封。
+     */
+    /**
+     * 分配镜像重置（2026-09-30，教学追问检出 L44）：把 c:alloc 覆盖写为"数据库口径的额度合计"。
+     * 只在"deep 已把全部已注册世代重建成功"之后调用——那时 Redis 的 Σ四键 与 Σquota（镜像口径）
+     * 已经逐一相等，覆盖写让 E2a/E2b 同时恢复一致。
+     * 补的是什么洞：写 c:alloc 的原本只有开桶脚本（累加）与 ENSURE（覆盖写，但门是"名册为空"）——
+     * "名册非空 + 镜像偏大"这个组合此前无任何自动纠偏路径（冻结后请求在闸门首行被 -11 挡回，
+     * -7→ENSURE 不可达），只能人工。
+     */
+    /**
+     * 是否存在"名册里有、但余量键缺失"的世代（2026-09-30 L47 的精确判据）。
+     * 与"数据库还有可卖行"的区别：后者在**正常惊群**里也成立（尾量正被别人消费），据它降级会把
+     * 正常售罄风暴变成 5001 风暴（批 1 评审实锤 73 例误降级）。这里查的是"Redis 真的缺数据"。
+     */
+    private static final String ANY_STK_MISSING_SCRIPT = """
+            -- KEYS: 1 gens(set)   ARGV: 1 tpl
+            for _, bg in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+              if redis.call('EXISTS', 'c:stk:{' .. ARGV[1] .. '}:' .. bg) == 0 then
+                return 1
+              end
+            end
+            return 0
+            """;
+    private final DefaultRedisScript<Long> anyStkMissingScript =
+            new DefaultRedisScript<>(ANY_STK_MISSING_SCRIPT, Long.class);
+
+    /** 名册里是否有世代的余量键缺失（L47：据它决定要不要按数据库行强制补键） */
+    public boolean anyStkKeyMissing(long templateId) {
+        Long r = redis.execute(anyStkMissingScript, List.of(gensKey(templateId)), String.valueOf(templateId));
         return r != null && r == 1;
     }
 
-    /** Redis 侧灾难恢复：act 为空时按 DB 行重建（三元组 b,g,quota 平铺传入） */
+    private static final String RESET_ALLOC_SCRIPT = """
+            -- KEYS: 1 alloc   ARGV: 1 目标值（= SumQuota 镜像口径，由调用方按数据库行算好）
+            redis.call('SET', KEYS[1], tonumber(ARGV[1]))
+            return 1
+            """;
+    private final DefaultRedisScript<Long> resetAllocScript = new DefaultRedisScript<>(RESET_ALLOC_SCRIPT, Long.class);
+
+    /** 分配镜像覆盖写（仅 deep 全世代重建成功后调用——见脚本注释的适用前提） */
+    public void resetAlloc(long templateId, long alloc) {
+        redis.execute(resetAllocScript, List.of(allocKey(templateId)), String.valueOf(alloc));
+    }
+
+    private static final String SETTLED_SCRIPT = """
+            -- KEYS: 1 pend(zset)  2 stk
+            if redis.call('ZCARD', KEYS[1]) > 0 then return 0 end
+            if tonumber(redis.call('GET', KEYS[2]) or '0') > 0 then return 0 end
+            return 1
+            """;
+    private final DefaultRedisScript<Long> settledScript = new DefaultRedisScript<>(SETTLED_SCRIPT, Long.class);
+
+    public boolean generationSettled(long templateId, int bucket, long gen) {
+        Long r = redis.execute(settledScript,
+                List.of(pendKey(templateId, bucket, gen), stkKey(templateId, bucket, gen)));
+        return r != null && r == 1;
+    }
+
+    /** Redis 侧灾难恢复：act 为空时按 DB 行重建（五元组 b,g,quota,used,retired 平铺传入） */
     public boolean ensureBuckets(long templateId, List<long[]> bucketGenQuota) {
+        return ensureBuckets(templateId, bucketGenQuota, false);
+    }
+
+    /** L47（2026-09-30）：强制重建——跳过"名册非空就不动"的门，用于"名册还在、某些代的键丢了"的修复。
+     *  幂等由脚本内的"该代 stk 键已存在就不动"保证：只补缺的，绝不覆盖已有的。 */
+    public boolean ensureBucketsForce(long templateId, List<long[]> bucketGenQuota) {
+        return ensureBuckets(templateId, bucketGenQuota, true);
+    }
+
+    private boolean ensureBuckets(long templateId, List<long[]> bucketGenQuota, boolean force) {
         List<String> keys = List.of(actKey(templateId), allocKey(templateId), gensKey(templateId));
         List<String> argv = new ArrayList<>();
+        argv.add(force ? "1" : "0");
         argv.add(String.valueOf(templateId));
-        for (long[] bgqu : bucketGenQuota) {
-            argv.add(String.valueOf(bgqu[0]));
-            argv.add(String.valueOf(bgqu[1]));
-            argv.add(String.valueOf(bgqu[2]));
-            argv.add(String.valueOf(bgqu[3]));
+        for (long[] bgqur : bucketGenQuota) {
+            argv.add(String.valueOf(bgqur[0]));   // 桶号
+            argv.add(String.valueOf(bgqur[1]));   // 世代
+            argv.add(String.valueOf(bgqur[2]));   // quota
+            argv.add(String.valueOf(bgqur[3]));   // used
+            argv.add(String.valueOf(bgqur[4]));   // retired（0/1）——批 2 起五元组，别漏（漏=ARGV 错位、脚本 u 为 nil）
         }
         Long r = redis.execute(ensureBucketsScript, keys, argv.toArray(new String[0]));
-        return r != null && r == 1;
+        // 返回值 = 实际补建的代数（0 = 一个都不缺，例如名册已被并发请求抢先补好）——
+        // 调用方据此免掉重复日志（清库风暴下 50 个并发各调一次，逐条打日志会刷屏）
+        return r != null && r > 0;
     }
 
     /** 指定（桶,世代）的剩余量读数（null=键不存在）——批量重开的封账判定用 */
@@ -467,8 +583,13 @@ public class RedisStockGateway {
         redis.opsForValue().set(soldoutKey(templateId), "1", java.time.Duration.ofSeconds(ttlSeconds));
     }
 
-    public void freeze(long templateId) {
-        redis.opsForValue().set(freezeKey(templateId), "1");
+    /** 冻结牌取值标记：自动来源（巡检判危险方向）——只有这种来源允许"干净轮自动解冻" */
+    public static final String FREEZE_SOURCE_AUTO = "auto";
+    /** 冻结牌取值标记：人工来源（运维介入）——绝不自动解 */
+    public static final String FREEZE_SOURCE_MANUAL = "manual";
+
+    public void freeze(long templateId, String source) {
+        redis.opsForValue().set(freezeKey(templateId), source);
     }
 
     public void unfreeze(long templateId) {
@@ -477,6 +598,11 @@ public class RedisStockGateway {
 
     public boolean isFrozen(long templateId) {
         return Boolean.TRUE.equals(redis.hasKey(freezeKey(templateId)));
+    }
+
+    /** 是否"自动来源"冻结——巡检只自动解自己置的牌，人工冻结一律不动 */
+    public boolean isAutoFrozen(long templateId) {
+        return FREEZE_SOURCE_AUTO.equals(redis.opsForValue().get(freezeKey(templateId)));
     }
 
     /** 对账余量读数（聚合各活跃代；非原子——观测/测试用，巡检走 conservationAll）。
@@ -522,6 +648,12 @@ public class RedisStockGateway {
     public void setUserCount(long templateId, long userId, long count) {
         redis.opsForValue().set(ulKey(templateId, userId), String.valueOf(count),
                 java.time.Duration.ofSeconds(604800));
+    }
+
+    /** L42①（2026-09-30）：无条件把用户"当日"计数重置为 DB 权威值（TTL 对齐 deduct 的 48h 节奏） */
+    public void setUserDailyCount(long templateId, long userId, String day, long count) {
+        redis.opsForValue().set(uldKey(day, templateId, userId), String.valueOf(count),
+                java.time.Duration.ofSeconds(172800));
     }
 
     // ---------- key helpers（hash tag 一律 {tpl}——见类注释 §6.3.5） ----------

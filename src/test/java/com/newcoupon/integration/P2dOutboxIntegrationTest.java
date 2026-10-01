@@ -48,11 +48,21 @@ class P2dOutboxIntegrationTest extends ShardedIntegrationTestSupport {
     private CouponOutboxMapper outboxMapper;
     @Autowired
     private DataSource dataSource;
+    @Autowired
+    private com.newcoupon.application.service.IssueEventHandler issueEventHandler;
 
     private static final AtomicLong USER = new AtomicLong(800_000);
 
     @Test
     @Timeout(120)
+    @DisplayName("L40④·消费幂等：同一 eventNo 第二次处理是 no-op（此前只有门控的 MQ 接线用例覆盖）")
+    void consumerIdempotency_secondHandleIsNoop() {
+        String eventNo = "RCV:idem-" + java.util.UUID.randomUUID();
+        assertThat(issueEventHandler.handle("topic-x", eventNo, "{}")).as("首次：真正处理").isTrue();
+        assertThat(issueEventHandler.handle("topic-x", eventNo, "{}")).as("重复投递：跳过").isFalse();
+    }
+
+    @Test
     @DisplayName("同事务双写：领券成功→发件箱行待投递；领券回滚（撞限领）→无行——原子性证明")
     void outbox_writtenInSameTx() {
         long tpl = createTemplate();
@@ -77,12 +87,30 @@ class P2dOutboxIntegrationTest extends ShardedIntegrationTestSupport {
 
         dispatcher.dispatch();   // 手动触发一轮（不等 1 秒调度）
 
+        // L40④ 附带修正（2026-09-30）：本用例共享**整张**发件箱表，而应用里还有一个每秒跑一轮的
+        // 背景投递器（@Scheduled）——两者会抢同一行：被背景线程先搬走的行会离开"待投递"集合，
+        // 而抢输/重试会让断言看到中间态。改成对**最终状态**断言（轮询，最多 10 秒）：
+        // 不变式是"这张券的事件最终被投递出去"，不是"谁在哪一刻搬的"。
+        Integer status = null;
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        while (System.nanoTime() < deadline) {
+            status = new JdbcTemplate(dataSource).queryForObject(
+                    "SELECT status FROM coupon_outbox WHERE event_no LIKE '%:ob-d1'", Integer.class);
+            if (status != null && status == CouponOutboxPO.STATUS_DISPATCHED) {
+                break;
+            }
+            dispatcher.dispatch();   // 再推一轮（幂等：已投递的行不会再被选中）
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        assertThat(status).as("最终必须已投递（status=1）").isEqualTo(CouponOutboxPO.STATUS_DISPATCHED);
         List<CouponOutboxPO> pending = outboxMapper.selectDispatchable(LocalDateTime.now().plusMinutes(1), 10);
         assertThat(pending.stream().filter(r -> r.getPayload().contains("\"requestId\":\"ob-d1\"")))
-                .as("投递后不再待投递").isEmpty();
-        Integer status = new JdbcTemplate(dataSource).queryForObject(
-                "SELECT status FROM coupon_outbox WHERE event_no LIKE '%:ob-d1'", Integer.class);
-        assertThat(status).as("已投递").isEqualTo(CouponOutboxPO.STATUS_DISPATCHED);
+                .as("已投递的行不得再出现在待投递集合").isEmpty();
     }
 
     private long createTemplate() {

@@ -39,8 +39,9 @@ public class ShardingDataSourceConfig {
                 url: __DB_URL__
                 username: __DB_USER__
                 password: __DB_PASS__
-                maximumPoolSize: 20
-                minimumIdle: 2
+                maximumPoolSize: __POOL_MAX__
+                minimumIdle: __POOL_MIN__
+                connectionTimeout: __POOL_TIMEOUT__
             rules:
             - !SHARDING
               tables:
@@ -106,6 +107,18 @@ public class ShardingDataSourceConfig {
     @Value("${coupon.sharding.sql-show:false}")
     private boolean sqlShow;
 
+    /** L31（2026-09-30）：连接池参数外部化——池子大小就是并发上限（Little 定律：并发 ≈ QPS × RT），
+     *  必须能按环境/压测配平，不能硬编码在代码内模板里。默认值维持原状（20/2/3000ms）。 */
+    @Value("${coupon.sharding.pool.max-size:20}")
+    private int poolMaxSize;
+
+    @Value("${coupon.sharding.pool.min-idle:2}")
+    private int poolMinIdle;
+
+    /** 拿不到连接等待上限：宁可快速失败，也不让请求线程堆积（配合降级码给用户"稍后重试"） */
+    @Value("${coupon.sharding.pool.connection-timeout-ms:3000}")
+    private long poolConnectionTimeoutMs;
+
     @Bean
     @Primary
     public DataSource shardingDataSource() throws IOException {
@@ -126,6 +139,9 @@ public class ShardingDataSourceConfig {
                 .replace("__DB_USER__", username)
                 .replace("__DB_PASS__", password)
                 .replace("__SQL_SHOW__", String.valueOf(sqlShow))
+                .replace("__POOL_MAX__", String.valueOf(poolMaxSize))
+                .replace("__POOL_MIN__", String.valueOf(poolMinIdle))
+                .replace("__POOL_TIMEOUT__", String.valueOf(poolConnectionTimeoutMs))
                 .replace("__SCHEMA__", schema);
         Path tmp = Files.createTempFile("newcoupon-sharding-", ".yaml");
         Files.writeString(tmp, yaml, StandardCharsets.UTF_8);
