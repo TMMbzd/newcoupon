@@ -32,3 +32,11 @@ mybatis-plus:
 coupon:
   admin:
     token: dev-admin-token
+  # S1 开放平台：接入方密钥（SK）的加密主密钥（Base64 的 32 字节 = AES-256）。
+  # **只在 dev 有默认值**：生产必须用环境变量 OPEN_SECRET_MASTER_KEY 注入——
+  # application.yml 里该配置默认为空，SecretCipher 遇到空值直接启动失败（fail-fast）：
+  # 静默用一个内置默认密钥，等于"所有人拿到代码就能解开你库里的 SK"。
+  # 教训（2026-10-01 实测）：fail-fast 的代价是"所有没配这个值的环境都起不来"——
+  # 新增的必填配置必须同批更新每一套环境，否则本地开发会当场炸（被 P2cAdminAuthTest 抓出）。
+  open:
+    secret-master-key: ${OPEN_SECRET_MASTER_KEY:KcRJ6SHXoWwxU2BdyAv7tahGxVJPzzS4ynA4ixVIxcA=}

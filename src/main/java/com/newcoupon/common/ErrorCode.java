@@ -14,7 +14,13 @@ package com.newcoupon.common;
  *   3xxx   领券域（发）
  *   4xxx   用券域（用：锁券/核销/回退）
  *   5xxx   系统与依赖（计/控）
+ *   6xxx   接入域（S1 新增：签名/配额/幂等/版本/越权——"还没进业务就被拦下"）
+ *   7xxx   安全域（风控频控 7001 / 管理令牌 7002）
  * </pre>
+ *
+ * <p><b>为什么 6xxx 要单独一段</b>：它表示"请求连业务逻辑都没跑到就被接入层拒了"——
+ * 排障时看到 6xxx 就不该去翻业务日志，看监控时它能和"业务内失败"分开统计。
+ * 把接入失败混进 1xxx，这两种截然不同的现场就会被搅在一起。
  */
 public enum ErrorCode {
 
@@ -46,7 +52,22 @@ public enum ErrorCode {
     SYSTEM_ERROR(5000, "系统繁忙，请稍后重试"),
     DEGRADED(5001, "系统降级中，请稍后重试"),
     /** P2b v2 §7（USAB-2）：冻结专用降级码——可重试语义，响应体禁止泄漏内部负数码（-11） */
-    FROZEN(5002, "活动暂停发放，请稍后重试");
+    FROZEN(5002, "活动暂停发放，请稍后重试"),
+
+    // ---- 6xxx 接入域（S1）----
+    // HTTP 状态映射见 docs/S1-开放接入层-需求与设计-2026-10-01.md §4.10：
+    //   6001~6005 → 401；6006/6007 → 429；6008/6009 → 409；6010 → 400；6011 → 403
+    SIGN_MISSING(6001, "签名头缺失或格式错误"),
+    APP_INVALID(6002, "应用不存在或已停用"),
+    SIGN_MISMATCH(6003, "签名不匹配"),
+    TIMESTAMP_OUT_OF_WINDOW(6004, "时间戳超出允许窗口"),
+    NONCE_REPLAYED(6005, "请求已被处理过（nonce 重放）"),
+    QPS_LIMIT_EXCEEDED(6006, "请求过于频繁，请稍后重试"),
+    DAILY_QUOTA_EXCEEDED(6007, "今日调用配额已用尽"),
+    CLIENT_TOKEN_CONFLICT(6008, "clientToken 重复但请求参数不一致"),
+    CLIENT_TOKEN_PROCESSING(6009, "相同 clientToken 的请求正在处理中，请稍后重试"),
+    API_VERSION_UNSUPPORTED(6010, "不支持的接口版本"),
+    RESOURCE_FORBIDDEN(6011, "无权访问该资源");
 
     private final int code;
     private final String message;

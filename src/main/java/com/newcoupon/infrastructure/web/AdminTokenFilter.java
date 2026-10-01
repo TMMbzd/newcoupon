@@ -24,8 +24,11 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * "铸造 DB allocated 配额 + 开桶"——无鉴权等于把"凭空造额度"的入口敞着。完整体系
  * （HMAC 签名/防重放/双人复核）仍按计划在 P7 管理面，这里先落最小版。
  *
- * <p>规则：POST /api/templates 开头的写操作必须带 X-Admin-Token 且与配置一致。
+ * <p>规则：POST /api/templates、/api/apps 开头的写操作必须带 X-Admin-Token 且与配置一致。
  * GET 查询不设防（只读面）。配置为空时 fail-closed（拒绝所有管理写——钱的方向宁严勿松）。
+ *
+ * <p>S1 扩展（2026-10-01）：接入方管理（/api/apps）纳入防线——注册应用会签发出可用于
+ * 调用的密钥，与"铸造库存额度"同级，必须同样挡在令牌后面。
  * 比对用 {@link MessageDigest#isEqual}（恒定时间）——防时序侧信道逐字节猜令牌。
  *
  * <p>拒绝形态：401 + 错误码 7002（7xxx 安全域，与 IP 频控的 7001 同族）。
@@ -36,7 +39,9 @@ import org.springframework.web.filter.OncePerRequestFilter;
 public class AdminTokenFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(AdminTokenFilter.class);
-    private static final String ADMIN_PATH_PREFIX = "/api/templates";
+
+    /** 受保护的管理面路径前缀：模板管理 + 接入方管理（S1） */
+    private static final String[] ADMIN_PATH_PREFIXES = {"/api/templates", "/api/apps"};
     private static final String TOKEN_HEADER = "X-Admin-Token";
 
     private final String adminToken;
@@ -49,7 +54,7 @@ public class AdminTokenFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
-        if ("POST".equals(request.getMethod()) && request.getServletPath().startsWith(ADMIN_PATH_PREFIX)) {
+        if ("POST".equals(request.getMethod()) && isAdminPath(request.getServletPath())) {
             String provided = request.getHeader(TOKEN_HEADER);
             if (!StringUtils.hasText(adminToken)) {
                 log.error("ADMIN BLOCKED (fail-closed): 管理令牌未配置（coupon.admin.token 为空）——拒绝所有管理写操作");
@@ -65,6 +70,16 @@ public class AdminTokenFilter extends OncePerRequestFilter {
             log.info("ADMIN ALLOWED: path={}（管理令牌校验通过）", request.getServletPath());
         }
         chain.doFilter(request, response);
+    }
+
+    /** 是否属于受保护的管理面写路径（前缀匹配；注意用 getServletPath 而非 getRequestURI） */
+    private static boolean isAdminPath(String servletPath) {
+        for (String prefix : ADMIN_PATH_PREFIXES) {
+            if (servletPath.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void reject(HttpServletResponse response, String message) throws IOException {
