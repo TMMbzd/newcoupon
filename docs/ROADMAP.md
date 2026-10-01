@@ -1,5 +1,8 @@
 # 技术路线图 v4（2026-09-17 结构重排）
 
+> ⚠️ **里程碑顺序已被取代（2026-09-30）**：业务优先 + 对标大厂的新路线见 [ROADMAP-V2](ROADMAP-V2.md)。**以后者为准**；本文档保留作为历史（P1/P2 已完成；原 P3~P9 的内容被重新编排进 V2 的 S1~S7 与"后置清单"，不丢失）。
+
+
 > 取代 v3。v3 是按"正确性→可观测→规模→吞吐→平台化"线性排列——被用户正确批评为"该重构的留到最后大改、阶段之间脱节"。
 > **v4 核心变化：结构性变更前置（schema 一次定版 + 分桶 + MQ 提前），观测和验证建在终态上。**
 > 重排原则：**不要在明知要拆的地基上盖楼。**
@@ -89,10 +92,13 @@
   Redis：c:stk:{tpl}:{bucket}:{gen} 四族键按（桶,世代）拆分
         c:alloc 镜像（开桶 Lua 原子同步）/ c:opening 单飞锚 / c:fz 冻结牌
 
-三条可判定等式（治 v1 层2自相矛盾）：
-  E1 分代桶内：stk+pend+dbi+void ≡ bucket_total（纯 Redis 原子）
-  E2 Redis 全局：Σ(活跃代四键和)+c:alloc ≡ total（纯 Redis 原子）
-  E3 镜像（方向判据）：c:alloc↔allocated ｜ 分代 dbi↔stock_bucket.used ｜ Σdbi↔SUM(used)，deep 权威=COUNT
+五条可判定等式（治 v1 层2自相矛盾；2026-09-19 E2 改两段式、2026-09-27 L37 补 E3a；对应教学文档 11a 的"五项检查"表）：
+  E1 分代桶内：stk+pend+dbi+void ≡ 该代 bucket_quota（纯 Redis 原子）
+  E2a Redis 内部：Σ(全世代四键和) ≡ c:alloc
+  E2b 分配侧：c:alloc ≡ Σquota（镜像口径 sumQuotaRegistered——全量行∪封账真代，排除 V10 历史行 (0,0)）
+  E3a 额度段：Σquota（全量行）≡ coupon_template.allocated（多了=重复建行/超发方向，少了=已划出未建行/安全方向）
+  E3 镜像（方向判据）：c:alloc↔allocated ｜ 分代 dbi↔stock_bucket.used ｜ Σdbi↔SUM(used)，deep 权威=SUM(stock_bucket.used)
+说明：E2b 与 E3a 用**两个口径**（镜像覆盖口径 vs 全量行口径），刻意分开——历史行的 quota 在 allocated 里但永无 Redis 键。
 
 关键裁决（A-G 七簇）：stock_bucket 保红线｜ic 冻结换锚｜epoch 世代隔离（迟到 cancel 落旧代 void）
 ｜开桶 single-flight+尾量 min()｜V10 存量回填+quiesce 切流+回滚协议｜平移资损被 DB 封顶+单调差分检测
@@ -136,7 +142,7 @@
 - ② **模板冻结标志 c:fz:{tpl}**（从 P3-⑥ 提前）：DEDUCT Lua 首行加冻结短路键（与售罄牌同款机制），后续请求全部 Redis 层挡住（-11 冻结码）。**冻结只绑危险方向**：sum>total（超发方向）或幻影 dbi>新鲜ic 才冻结；sum<total（清扫故意破缺/崩溃残留——日常发生）**不冻结**只走 deep 慢修，卖券不中断。与镜像臂方向性判据同构：不是"不相等就动作"，是"朝哪个方向不相等才动作"。
   **管理操作顺序铁律：先 DB 后 Redis**——窗口期偏差永远落在良性方向（sum<total），冻结永不被管理窗口误触发。**假阳性代价有界**：下一轮巡检干净且无修复动作则自动解冻（误冻结最多挡 60 秒）。破坏性修复（FORCE）仍走两轮确认——粗动作快、精修复慢
 - ③ **假售罄当场修**（从 P3-⑫ 提前）：领券发现 -3 且无售罄牌 → 当场查 DB → 有货即重建重试，用户零感知
-- ④ **售罄牌短 TTL**（从 P3-⑬ 同批提前）：EXPIRE so 10 秒自续期（DEDUCT 命中时续期）——防清除消息丢失导致永久假死
+- ④ **售罄牌短 TTL**（从 P3-⑬ 同批提前）：EXPIRE so 10 秒自续期（DEDUCT 命中时续期）——防清除消息丢失导致模板被牌锁死（有额度却卖不出去）
 - ⑤ Micrometer + 基础指标：QPS / RT / 错误率 / 库存余量 gauge（按桶） / 分桶命中率 / MQ lag——只够"看得见改对了没有"，不做完整大盘
 
 **P2 验收标准**：
