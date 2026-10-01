@@ -10,6 +10,7 @@ import com.newcoupon.application.dto.TradeDtos.ReleaseRequest;
 import com.newcoupon.application.dto.TradeDtos.ReleaseResult;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
+import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.domain.coupon.CouponStatus;
 import com.newcoupon.domain.coupon.CouponUsage;
 import com.newcoupon.domain.coupon.UsageStatus;
@@ -47,6 +48,7 @@ public class TradeAppService {
     }
 
     public LockResult lock(LockRequest req) {
+        RequestContext.current().user(req.userId());   // S1 治理插槽：内部面自动 no-op
         // 幂等快查（与领券同构）：锁券的幂等证据在占用单（usageNo 唯一），不在券状态上——
         // 必须在进事务前先查，否则事务层对券状态的内存快检会先抛冲突（E2E 抓到的真实Bug）
         String usageNo = req.orderNo() + ":" + req.couponId();

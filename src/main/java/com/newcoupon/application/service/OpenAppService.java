@@ -45,15 +45,18 @@ public class OpenAppService {
 
     private final OpenAppRepository repository;
     private final SecretCipher cipher;
+    private final CachedOpenAppReader authReader;
 
     /** 轮换期长度（默认 7 天）：新密钥生效后，旧密钥还能用多久 */
     private final Duration rotationWindow;
 
     public OpenAppService(OpenAppRepository repository,
                           SecretCipher cipher,
+                          CachedOpenAppReader authReader,
                           @Value("${coupon.open.secret-rotation-hours:168}") long rotationHours) {
         this.repository = repository;
         this.cipher = cipher;
+        this.authReader = authReader;
         this.rotationWindow = Duration.ofHours(rotationHours);
     }
 
@@ -90,6 +93,7 @@ public class OpenAppService {
             throw new BizException(ErrorCode.PARAM_ERROR, "appId 已存在：" + appId);
         }
         repository.insertSecret(appId, cipher.encrypt(secret), SecretRecord.STATUS_CURRENT, null);
+        authReader.invalidate(appId);   // 让认证缓存立刻看到新密钥（不等 TTL）
 
         return new AppWithSecret(appId, appName, secret, OpenApp.STATUS_ENABLED, qpsLimit, dailyQuota);
     }
@@ -118,6 +122,8 @@ public class OpenAppService {
         if (!repository.updateStatus(appId, status)) {
             throw new BizException(ErrorCode.PARAM_ERROR, "应用不存在：" + appId);
         }
+        // 停用必须立刻生效——"等 60 秒 TTL 自然过期"意味着这 60 秒里被停用的接入方还能调
+        authReader.invalidate(appId);
     }
 
     /** 密钥轮换：签发新 SK，旧 SK 进入轮换期（默认 7 天）。返回**新 SK 明文（只此一次）** */
@@ -141,6 +147,8 @@ public class OpenAppService {
         repository.demoteCurrentToRotation(appId, expireAt);
         String secret = SecretCipher.newSecret();
         repository.insertSecret(appId, cipher.encrypt(secret), SecretRecord.STATUS_CURRENT, null);
+        // 轮换后缓存里还是旧密钥集合：必须立刻失效，否则新密钥要等 TTL 才能用
+        authReader.invalidate(appId);
 
         return new AppWithSecret(app.appId(), app.appName(), secret,
                 app.status(), app.qpsLimit(), app.dailyQuota());

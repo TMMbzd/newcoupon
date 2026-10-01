@@ -4,6 +4,7 @@ import com.newcoupon.application.dto.ReceiveRequest;
 import com.newcoupon.application.dto.ReceiveResult;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
+import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.domain.coupon.ApproveStatus;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.PublishStatus;
@@ -91,6 +92,7 @@ public class ReceiveAppService {
     }
 
     public ReceiveResult receive(ReceiveRequest req) {
+        tagGovernanceContext(req);   // S1 治理插槽：补齐 userId 与热点维度（内部面自动 no-op）
         var sample = metrics.start();
         try {
             ReceiveResult r = doReceive(req, false);
@@ -102,6 +104,24 @@ public class ReceiveAppService {
         } finally {
             metrics.stop(sample);
         }
+    }
+
+    /**
+     * 把"谁、打哪个热门资源"写进请求上下文（S1 治理插槽①）。
+     *
+     * <p>为什么在应用服务里补而不是在 Filter 里：Filter 阶段只知道 URL，不知道 body 里的
+     * userId/templateId；而<b>这两者正是限流与热点探测真正需要的维度</b>。
+     *
+     * <p>内部面（/api/**）没有上下文，{@code RequestContext.current()} 返回 EMPTY，
+     * 所有写入自动 no-op——所以这段代码对现有链路零影响。
+     *
+     * <p>{@code template} 维度的用途：S2 的<b>热点参数限流</b>要按"哪个模板被抢得最凶"做统计，
+     * 那个统计的 key 就是这里补出来的 {@code coupons/receive:template:2001}。
+     */
+    private static void tagGovernanceContext(ReceiveRequest req) {
+        RequestContext ctx = RequestContext.current();
+        ctx.user(req.userId());
+        ctx.dimension("template", req.templateId());
     }
 
     private void recordOutcome(BizException e) {
