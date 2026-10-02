@@ -67,7 +67,8 @@ public enum ErrorCode {
     CLIENT_TOKEN_CONFLICT(6008, "clientToken 重复但请求参数不一致"),
     CLIENT_TOKEN_PROCESSING(6009, "相同 clientToken 的请求正在处理中，请稍后重试"),
     API_VERSION_UNSUPPORTED(6010, "不支持的接口版本"),
-    RESOURCE_FORBIDDEN(6011, "无权访问该资源");
+    RESOURCE_FORBIDDEN(6011, "无权访问该资源"),
+    CLIENT_TOKEN_MISSING(6012, "缺少 clientToken（写接口必须携带 X-Client-Token 头）");
 
     private final int code;
     private final String message;
