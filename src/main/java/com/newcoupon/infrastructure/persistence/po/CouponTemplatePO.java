@@ -52,6 +52,7 @@ public class CouponTemplatePO {
      * 只加注解不配拦截器 = 乐观锁静默失效，没有任何报错——这是 MyBatis-Plus 最经典的暗坑。
      */
     @Version
+    private String appId;      // S1：归属接入方（V14）
     private Integer version;
 
     private LocalDateTime createTime;
@@ -97,6 +98,9 @@ public class CouponTemplatePO {
     public void setApproveStatus(Integer approveStatus) { this.approveStatus = approveStatus; }
     public Integer getPublishStatus() { return publishStatus; }
     public void setPublishStatus(Integer publishStatus) { this.publishStatus = publishStatus; }
+    public String getAppId() { return appId; }
+    public void setAppId(String appId) { this.appId = appId; }
+
     public Integer getVersion() { return version; }
     public void setVersion(Integer version) { this.version = version; }
     public LocalDateTime getCreateTime() { return createTime; }

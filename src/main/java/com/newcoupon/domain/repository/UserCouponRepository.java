@@ -36,7 +36,14 @@ public interface UserCouponRepository {
     Optional<UserCoupon> findByIdForUser(long id, long userId);
 
     /** 查用户的券列表（status 为 null 查全部）："我的券包"接口用 */
-    List<UserCoupon> findByUser(long userId, CouponStatus status);
+    /**
+     * 券包列表。
+     *
+     * @param appId 归属应用；{@code null} = 不过滤（内部面/运营视角）。
+     *              开放面必须传调用方 appId —— 这是"用户 A 的券"与"应用 X 的券"
+     *              两重作用域的**物理落实点**：不同应用传相同 userId 是不同的人。
+     */
+    List<UserCoupon> findByUser(long userId, CouponStatus status, String appId);
 
     /** 新建用户券，回填主键 */
     UserCoupon save(UserCoupon userCoupon);

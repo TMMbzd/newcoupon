@@ -75,6 +75,7 @@ public class TemplateAppService {
                 .validStart(req.validStart())
                 .validEnd(req.validEnd())
                 .validDays(req.validDays())
+                .appId(AppOwnership.ownerForNewResource())   // S1：开放面=调用方，内部面=内置应用
                 .build());
         CouponTemplate saved = templateRepository.save(template);
         log.info("template created: id={}, code={}, name={}, totalCount={}",
@@ -90,6 +91,7 @@ public class TemplateAppService {
     public void publish(long id) {
         CouponTemplate template = templateRepository.findById(id)
                 .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + id));
+        AppOwnership.assertAccessible(template.getAppId(), "template:" + id);   // S1 越权防线
         template.checkPublishable();
         boolean updated = templateRepository.casUpdatePublishStatus(
                 id, PublishStatus.UNPUBLISHED, PublishStatus.PUBLISHED);
@@ -119,6 +121,7 @@ public class TemplateAppService {
     public TemplateResponse get(long id) {
         CouponTemplate t = templateRepository.findById(id)
                 .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + id));
+        AppOwnership.assertAccessible(t.getAppId(), "template:" + id);   // S1 越权防线
         return TemplateResponse.from(t);
     }
 

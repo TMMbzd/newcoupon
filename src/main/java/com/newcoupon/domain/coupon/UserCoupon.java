@@ -30,11 +30,13 @@ public final class UserCoupon {
     private final LocalDateTime receiveTime;
     private final String idempotentKey;
     private final int seq;   // 同用户同模板内的发放序号(1..N)，来自 Redis 计数——uk_user_seq 唯一索引的物理载体
+    /** S1：归属接入方（领取时从模板冗余，此后免疫模板归属变更） */
+    private final String appId;
 
     private UserCoupon(Long id, long userId, long templateId, String templateCode,
                        long faceValue, long threshold, Long discountCap,
                        LocalDateTime validEnd, CouponStatus status,
-                       LocalDateTime receiveTime, String idempotentKey, int seq) {
+                       LocalDateTime receiveTime, String idempotentKey, int seq, String appId) {
         this.id = id;
         this.userId = userId;
         this.templateId = templateId;
@@ -47,6 +49,7 @@ public final class UserCoupon {
         this.receiveTime = receiveTime;
         this.idempotentKey = idempotentKey;
         this.seq = seq;
+        this.appId = appId;
     }
 
     /**
@@ -61,7 +64,8 @@ public final class UserCoupon {
         require(seq >= 1, "发放序号必须>=1（来自Redis用户计数）");
         return new UserCoupon(null, userId, template.getId(), template.getTemplateCode(),
                 template.getFaceValue(), template.getThreshold(), template.getDiscountCap(),
-                resolveValidEnd(template, now), CouponStatus.USABLE, now, idempotentKey, seq);
+                resolveValidEnd(template, now), CouponStatus.USABLE, now, idempotentKey, seq,
+                template.getAppId());   // S1：券的归属 = 模板的归属（写时冗余，读时不 join）
     }
 
     /**
@@ -78,18 +82,29 @@ public final class UserCoupon {
     }
 
     /** 从数据库复活：不重跑领取校验，全部字段以 DB 行为准 */
+    /** 兼容重载（不带归属）：默认内置应用——供不关心多租户的构造场景（单测、工具）使用 */
     public static UserCoupon reconstitute(Long id, long userId, long templateId, String templateCode,
                                           long faceValue, long threshold, Long discountCap,
                                           LocalDateTime validEnd, CouponStatus status,
                                           LocalDateTime receiveTime, String idempotentKey, int seq) {
+        return reconstitute(id, userId, templateId, templateCode, faceValue, threshold, discountCap,
+                validEnd, status, receiveTime, idempotentKey, seq,
+                com.newcoupon.domain.open.OpenApp.BUILTIN_APP_ID);
+    }
+
+    public static UserCoupon reconstitute(Long id, long userId, long templateId, String templateCode,
+                                          long faceValue, long threshold, Long discountCap,
+                                          LocalDateTime validEnd, CouponStatus status,
+                                          LocalDateTime receiveTime, String idempotentKey, int seq,
+                                          String appId) {
         return new UserCoupon(id, userId, templateId, templateCode, faceValue, threshold,
-                discountCap, validEnd, status, receiveTime, idempotentKey, seq);
+                discountCap, validEnd, status, receiveTime, idempotentKey, seq, appId);
     }
 
     /** insert 成功后回填主键 */
     public UserCoupon withId(long id) {
         return new UserCoupon(id, userId, templateId, templateCode, faceValue, threshold,
-                discountCap, validEnd, status, receiveTime, idempotentKey, seq);
+                discountCap, validEnd, status, receiveTime, idempotentKey, seq, appId);
     }
 
     private static void require(boolean condition, String message) {
@@ -110,4 +125,7 @@ public final class UserCoupon {
     public LocalDateTime getReceiveTime() { return receiveTime; }
     public String getIdempotentKey() { return idempotentKey; }
     public int getSeq() { return seq; }
+
+    /** S1：归属接入方（多租户隔离维度） */
+    public String getAppId() { return appId; }
 }

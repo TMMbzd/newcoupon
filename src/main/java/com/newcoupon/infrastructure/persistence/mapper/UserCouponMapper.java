@@ -21,11 +21,15 @@ public interface UserCouponMapper extends BaseMapper<UserCouponPO> {
     UserCouponPO selectByIdempotentKey(@Param("userId") long userId,
                                        @Param("idempotentKey") String idempotentKey);
 
-    /** 券包列表（status 为 null 查全部），走 idx_user_status 覆盖 */
+    /** 券包列表（status 为 null 查全部），走 idx_user_status 覆盖。
+     *  S1：appId 非空时只返回该应用的券（多租户隔离）——内部面传 null 即"看全部"，
+     *  两条路径共用一个 SQL，避免"过滤条件写两遍、改一处漏一处"。 */
     @Select("SELECT * FROM user_coupon WHERE user_id = #{userId} "
-            + "AND (#{status} IS NULL OR status = #{status}) ORDER BY id DESC")
+            + "AND (#{status} IS NULL OR status = #{status}) "
+            + "AND (#{appId} IS NULL OR app_id = #{appId}) ORDER BY id DESC")
     java.util.List<UserCouponPO> selectByUser(@Param("userId") long userId,
-                                              @Param("status") Integer status);
+                                              @Param("status") Integer status,
+                                              @Param("appId") String appId);
 
     /** 按模板数券（ADR-0008 第二不变式）：issued_count ↔ COUNT(user_coupon) 互证，修复守卫用 */
     @Select("SELECT COUNT(*) FROM user_coupon WHERE template_id = #{templateId}")

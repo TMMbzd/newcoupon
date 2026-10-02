@@ -28,6 +28,7 @@ public final class UserCouponPOConverter {
         p.setReceiveTime(receiveTime);
         p.setIdempotentKey(d.getIdempotentKey());
         p.setSeq(d.getSeq());
+        p.setAppId(d.getAppId());   // S1 多租户归属（写时从模板冗余）
         return p;
     }
 
@@ -36,6 +37,6 @@ public final class UserCouponPOConverter {
                 p.getId(), p.getUserId(), p.getTemplateId(), p.getTemplateCode(),
                 p.getFaceValue(), p.getThreshold(), p.getDiscountCap(),
                 p.getValidEnd(), CouponStatus.of(p.getStatus()),
-                p.getReceiveTime(), p.getIdempotentKey(), p.getSeq());
+                p.getReceiveTime(), p.getIdempotentKey(), p.getSeq(), p.getAppId());
     }
 }

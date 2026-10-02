@@ -47,6 +47,8 @@ public final class CouponTemplate {
     private final ApproveStatus approveStatus;
     private final PublishStatus publishStatus;
     private final long issuedCount;
+    /** S1：归属接入方（多租户隔离维度）。内部面创建 = 内置应用；券行写入时从这里冗余 */
+    private final String appId;
 
     private CouponTemplate(Creation c, ApproveStatus approveStatus, PublishStatus publishStatus) {
         this.id = null;
@@ -68,6 +70,7 @@ public final class CouponTemplate {
         this.approveStatus = approveStatus;
         this.publishStatus = publishStatus;
         this.issuedCount = 0L;   // 新建模板已发放量为 0
+        this.appId = c.appId();
     }
 
     private CouponTemplate(CouponTemplate src, Long id) {
@@ -94,6 +97,7 @@ public final class CouponTemplate {
         this.validDays = src.validDays;
         this.approveStatus = src.approveStatus;
         this.publishStatus = src.publishStatus;
+        this.appId = src.appId;
     }
 
     /**
@@ -264,6 +268,11 @@ public final class CouponTemplate {
         return issuedCount;
     }
 
+    /** S1：归属接入方（多租户隔离维度） */
+    public String getAppId() {
+        return appId;
+    }
+
     public int getPerUserLimit() {
         return perUserLimit;
     }
@@ -319,7 +328,9 @@ public final class CouponTemplate {
             ValidType validType,
             LocalDateTime validStart,
             LocalDateTime validEnd,
-            Integer validDays) {
+            Integer validDays,
+            /** S1：归属接入方（多租户隔离维度）。默认内置应用——内部面与既有代码无需显式传 */
+            String appId) {
 
         /** 手写 Builder：15 个字段的长构造器可读性极差（"第 7 个参数是啥"），测试里只改一个字段的写法依赖它 */
         public static CreationBuilder builder() {
@@ -342,6 +353,8 @@ public final class CouponTemplate {
             private LocalDateTime validStart;
             private LocalDateTime validEnd;
             private Integer validDays;
+            /** 默认归属内置应用：内部面创建与单元测试不传也合法（S1 多租户隔离的兼容策略） */
+            private String appId = com.newcoupon.domain.open.OpenApp.BUILTIN_APP_ID;
 
             private CreationBuilder() {
             }
@@ -361,11 +374,12 @@ public final class CouponTemplate {
             public CreationBuilder validStart(LocalDateTime v) { this.validStart = v; return this; }
             public CreationBuilder validEnd(LocalDateTime v) { this.validEnd = v; return this; }
             public CreationBuilder validDays(Integer v) { this.validDays = v; return this; }
+            public CreationBuilder appId(String v) { this.appId = v; return this; }
 
             public Creation build() {
                 return new Creation(templateCode, activityId, name, couponType, faceValue,
                         discountCap, threshold, totalCount, perUserLimit, dailyLimit,
-                        perUserDailyLimit, validType, validStart, validEnd, validDays);
+                        perUserDailyLimit, validType, validStart, validEnd, validDays, appId);
             }
         }
     }

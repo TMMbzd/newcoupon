@@ -25,11 +25,40 @@ public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
-    /** 业务失败：预期内，WARN 级别（不触发告警响铃） */
+    /**
+     * 业务失败：预期内，WARN 级别（不触发告警响铃）。
+     *
+     * <p><b>S1（2026-10-02）：6xxx 接入域的错误要映射成真实的 HTTP 状态码。</b>
+     * 其余段（1~5xxx）保持"HTTP 200 + 业务码"的老约定不动——那是全站既有契约，
+     * 改它等于把所有调用方的错误处理推倒重来。
+     *
+     * <p>为什么 6xxx 要特殊：它表示"接入层就拦下了"，语义上属于 HTTP 层面的事
+     * （越权=403、冲突=409、配额=429）。接入方用标准 HTTP 客户端时，
+     * 靠状态码分流比解析业务码更自然（重试中间件、网关规则也都按状态码配）。
+     */
     @ExceptionHandler(BizException.class)
-    public Result<Void> handleBiz(BizException e) {
+    public Result<Void> handleBiz(BizException e, jakarta.servlet.http.HttpServletResponse response) {
         log.warn("biz error: {}", e.getMessage());
+        int httpStatus = httpStatusOf(e.getErrorCode());
+        if (httpStatus != 200) {
+            response.setStatus(httpStatus);
+        }
         return Result.fail(e.getErrorCode(), detailOf(e));
+    }
+
+    /** 6xxx 接入域 → HTTP 状态（与 docs/S1-开放接入层-需求与设计-2026-10-01.md §4.10 的表一致） */
+    private static int httpStatusOf(ErrorCode code) {
+        int c = code.getCode();
+        if (c < 6000 || c >= 7000) {
+            return 200;                      // 非接入域：维持既有约定
+        }
+        return switch (c) {
+            case 6006, 6007 -> 429;          // 配额
+            case 6008, 6009 -> 409;          // 幂等冲突
+            case 6011 -> 403;                // 越权
+            case 6010, 6012 -> 400;          // 版本 / 缺 clientToken
+            default -> 401;                  // 6001~6005：签名与身份
+        };
     }
 
     /** 参数校验失败：JSR-303 注解校验不通过时，把所有字段错误拼出来一次性返回 */

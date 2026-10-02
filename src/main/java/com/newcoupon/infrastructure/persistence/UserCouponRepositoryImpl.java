@@ -71,8 +71,8 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     }
 
     @Override
-    public List<UserCoupon> findByUser(long userId, CouponStatus status) {
-        return mapper.selectByUser(userId, status == null ? null : status.getCode()).stream()
+    public List<UserCoupon> findByUser(long userId, CouponStatus status, String appId) {
+        return mapper.selectByUser(userId, status == null ? null : status.getCode(), appId).stream()
                 .map(UserCouponPOConverter::toDomain)
                 .toList();
     }

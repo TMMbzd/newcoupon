@@ -27,6 +27,7 @@ public class UserCouponPO {
     private LocalDateTime receiveTime;
     private String idempotentKey;
     private Integer seq;
+    private String appId;      // S1：归属接入方（V14，写时从模板冗余）
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 
@@ -53,6 +54,8 @@ public class UserCouponPO {
     public String getIdempotentKey() { return idempotentKey; }
     public void setIdempotentKey(String idempotentKey) { this.idempotentKey = idempotentKey; }
     public Integer getSeq() { return seq; }
+    public String getAppId() { return appId; }
+    public void setAppId(String appId) { this.appId = appId; }
     public void setSeq(Integer seq) { this.seq = seq; }
     public LocalDateTime getCreateTime() { return createTime; }
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }

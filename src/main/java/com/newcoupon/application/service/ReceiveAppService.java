@@ -142,6 +142,9 @@ public class ReceiveAppService {
         //    需要"事务外新快照"的路径仍直读 repository，绝不走缓存）
         CouponTemplate template = cachedTemplateReader.get(req.templateId())
                 .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + req.templateId()));
+        // S1 越权防线：开放面只能领自己应用的券。**放在"可领性"校验之前**——
+        // 越权者不该从错误码里看出"这个模板是否在领取期"（那是别人的运营信息）
+        AppOwnership.assertAccessible(template.getAppId(), "template:" + req.templateId());
         template.assertReceivable(LocalDateTime.now());
 
         // ② Redis Lua 闸门——幂等检查内置于脚本（EXISTS 幂等key → -8 回 DB 确认）。

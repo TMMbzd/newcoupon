@@ -49,6 +49,10 @@ public class TradeAppService {
 
     public LockResult lock(LockRequest req) {
         RequestContext.current().user(req.userId());   // S1 治理插槽：内部面自动 no-op
+        // S1 越权防线：先确认这张券属于调用方。查不到券时不在这里报错——交给下面的原有逻辑报 4001，
+        // 免得把"券不存在"和"券不属于你"变成两条不同的早期分支
+        userCouponRepository.findById(req.couponId())
+                .ifPresent(c -> AppOwnership.assertAccessible(c.getAppId(), "coupon:" + c.getId()));
         // 幂等快查（与领券同构）：锁券的幂等证据在占用单（usageNo 唯一），不在券状态上——
         // 必须在进事务前先查，否则事务层对券状态的内存快检会先抛冲突（E2E 抓到的真实Bug）
         String usageNo = req.orderNo() + ":" + req.couponId();
@@ -101,6 +105,7 @@ public class TradeAppService {
     }
 
     public ConfirmResult confirm(ConfirmRequest req) {
+        assertUsageAccessible(req.usageNo());   // S1 越权防线（占用单只带 usageNo，需经券取归属）
         try {
             return tradeTxService.confirm(req, LocalDateTime.now());
         } catch (TradeCasRejectedException e) {
@@ -124,6 +129,7 @@ public class TradeAppService {
     }
 
     public ReleaseResult release(ReleaseRequest req) {
+        assertUsageAccessible(req.usageNo());   // S1 越权防线
         try {
             return tradeTxService.release(req, LocalDateTime.now());
         } catch (TradeCasRejectedException e) {
@@ -132,10 +138,24 @@ public class TradeAppService {
         }
     }
 
+    /**
+     * 占用单的越权校验：占用单本身不带归属列（V14 只给模板与券加了 app_id），
+     * 所以要从 usage → user_coupon 取一次归属。**这是刻意的取舍**：
+     * 给分片的 coupon_usage 再加一列要动 64 张物理表，而核销/释放是低频操作，
+     * 多一跳主键查询的代价远小于一次跨表 DDL 的风险。
+     *
+     * <p>占用单不存在时不在这里报错——交给原有逻辑报 4003，保持错误语义不变。
+     */
+    private void assertUsageAccessible(String usageNo) {
+        couponUsageRepository.findByUsageNo(usageNo).ifPresent(usage ->
+                userCouponRepository.findById(usage.getUserCouponId()).ifPresent(coupon ->
+                        AppOwnership.assertAccessible(coupon.getAppId(), "usage:" + usageNo)));
+    }
+
     /** 券包列表（status 可选过滤） */
     public MyCouponList myCoupons(long userId, CouponStatus status) {
         LocalDateTime now = LocalDateTime.now();
-        return new MyCouponList(userCouponRepository.findByUser(userId, status).stream()
+        return new MyCouponList(userCouponRepository.findByUser(userId, status, AppOwnership.currentAppId()).stream()
                 .map(c -> new MyCoupon(c.getId(), c.getTemplateCode(), c.getFaceValue(),
                         c.getThreshold(), c.getDiscountCap(), c.getValidEnd(),
                         effectiveStatusDesc(c, now)))

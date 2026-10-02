@@ -39,6 +39,7 @@ public final class TemplatePOConverter {
         p.setValidDays(d.getValidDays());
         p.setApproveStatus(d.getApproveStatus().getCode());
         p.setPublishStatus(d.getPublishStatus().getCode());
+        p.setAppId(d.getAppId());   // S1 多租户归属
         p.setVersion(0);
         return p;
     }
@@ -67,6 +68,7 @@ public final class TemplatePOConverter {
                         .validStart(p.getValidStart())
                         .validEnd(p.getValidEnd())
                         .validDays(p.getValidDays())
+                        .appId(p.getAppId())
                         .build(),
                 p.getIssuedCount(),
                 ApproveStatus.of(p.getApproveStatus()),
