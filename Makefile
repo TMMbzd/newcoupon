@@ -1,4 +1,4 @@
-.PHONY: up down test red-contract run package
+.PHONY: up down test red-contract run package demo negative
 
 # 本地常用命令统一入口（大厂惯例：新人 clone 后看一眼 Makefile/README 就能跑起来）
 up:            ## 启动本地 MySQL + Redis
@@ -18,3 +18,9 @@ run:           ## 启动应用（需先 make up）
 
 package:       ## 打包（跳过测试的打包仅用于本地调试，CI 中禁止）
 	mvn -q package -DskipTests
+
+demo:          ## 开放接口全链路演示（需先 make up && make run）
+	bash scripts/open-api/demo.sh
+
+negative:      ## 开放接口反例演示：签名错/超窗/重放/缺token/越权/超配额（需先 make up && make run）
+	bash scripts/open-api/negative.sh
