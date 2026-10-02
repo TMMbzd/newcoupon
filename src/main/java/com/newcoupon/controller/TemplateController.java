@@ -5,6 +5,8 @@ import com.newcoupon.application.dto.TemplateResponse;
 import com.newcoupon.application.service.TemplateAppService;
 import com.newcoupon.common.Result;
 import com.newcoupon.common.context.OpenResource;
+import com.newcoupon.common.context.SwitchGuard;
+import com.newcoupon.application.service.SwitchKey;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -41,6 +43,7 @@ public class TemplateController {
     /** 发布（未发布 → 已发布，条件更新防并发重复发布） */
     @PostMapping("/{id}/publish")
     @OpenResource("templates/publish")
+    @SwitchGuard(SwitchKey.TEMPLATE_PUBLISH)
     public Result<Void> publish(@PathVariable long id) {
         templateAppService.publish(id);
         return Result.success();

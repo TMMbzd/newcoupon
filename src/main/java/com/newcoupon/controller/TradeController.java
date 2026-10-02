@@ -10,6 +10,8 @@ import com.newcoupon.application.dto.TradeDtos.ConfirmResult;
 import com.newcoupon.application.service.TradeAppService;
 import com.newcoupon.common.Result;
 import com.newcoupon.common.context.OpenResource;
+import com.newcoupon.common.context.SwitchGuard;
+import com.newcoupon.application.service.SwitchKey;
 import com.newcoupon.domain.coupon.CouponStatus;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -38,6 +40,7 @@ public class TradeController {
     /** 下单锁券 */
     @PostMapping("/lock")
     @OpenResource("coupons/lock")
+    @SwitchGuard(SwitchKey.TRADE_LOCK)
     public Result<LockResult> lock(@Valid @RequestBody LockRequest req) {
         return Result.success(tradeAppService.lock(req));
     }
@@ -45,6 +48,7 @@ public class TradeController {
     /** 支付成功核销 */
     @PostMapping("/confirm")
     @OpenResource("coupons/confirm")
+    @SwitchGuard(SwitchKey.TRADE_CONFIRM)
     public Result<ConfirmResult> confirm(@Valid @RequestBody ConfirmRequest req) {
         return Result.success(tradeAppService.confirm(req));
     }
@@ -52,6 +56,7 @@ public class TradeController {
     /** 订单取消/超时释放 */
     @PostMapping("/release")
     @OpenResource("coupons/release")
+    @SwitchGuard(SwitchKey.TRADE_RELEASE)
     public Result<ReleaseResult> release(@Valid @RequestBody ReleaseRequest req) {
         return Result.success(tradeAppService.release(req));
     }

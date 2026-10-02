@@ -23,6 +23,10 @@ public final class Result<T> {
     }
 
     public static <T> Result<T> success(T data) {
+        // S1 审计：把响应码记进请求上下文——开放面的调用审计要记"这次调用最终是什么结果"，
+        // 而响应体在过滤器阶段已经提交、读不到（见设计文档 §9-4），所以在源头记一笔。
+        // 非 HTTP 线程里 current() 返回 EMPTY，写入自动 no-op。
+        com.newcoupon.common.context.RequestContext.current().resultCode(ErrorCode.SUCCESS.getCode());
         return new Result<>(ErrorCode.SUCCESS.getCode(), ErrorCode.SUCCESS.getMessage(), data);
     }
 
@@ -31,10 +35,12 @@ public final class Result<T> {
     }
 
     public static <T> Result<T> fail(ErrorCode errorCode) {
+        com.newcoupon.common.context.RequestContext.current().resultCode(errorCode.getCode());
         return new Result<>(errorCode.getCode(), errorCode.getMessage(), null);
     }
 
     public static <T> Result<T> fail(ErrorCode errorCode, String detail) {
+        com.newcoupon.common.context.RequestContext.current().resultCode(errorCode.getCode());
         // detail 是补充信息（如"券当前状态=已核销"），拼接在标准 message 之后
         return new Result<>(errorCode.getCode(), errorCode.getMessage() + ": " + detail, null);
     }

@@ -14,14 +14,18 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 public class WebMvcConfig implements WebMvcConfigurer {
 
     private final OpenApiResourceInterceptor openApiResourceInterceptor;
+    private final SwitchGuardInterceptor switchGuardInterceptor;
 
-    public WebMvcConfig(OpenApiResourceInterceptor openApiResourceInterceptor) {
+    public WebMvcConfig(OpenApiResourceInterceptor openApiResourceInterceptor,
+                        SwitchGuardInterceptor switchGuardInterceptor) {
         this.openApiResourceInterceptor = openApiResourceInterceptor;
+        this.switchGuardInterceptor = switchGuardInterceptor;
     }
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(openApiResourceInterceptor)
-                .addPathPatterns("/open/**");
+        // 开关守卫挂全路径：开关是运维手段，不该出现"开放面关了、内部面还能打"的漏洞
+        registry.addInterceptor(switchGuardInterceptor).addPathPatterns("/**");
+        registry.addInterceptor(openApiResourceInterceptor).addPathPatterns("/open/**");
     }
 }

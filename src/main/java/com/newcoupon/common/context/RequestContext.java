@@ -37,6 +37,7 @@ public final class RequestContext {
     private final boolean deadlineExplicit;
 
     private Long userId;
+    private Integer resultCode;   // 本次请求最终的响应码（由 Result 工厂写入，审计用）
     private String resource;
     private final Map<String, String> dimensions = new LinkedHashMap<>();
 
@@ -118,6 +119,18 @@ public final class RequestContext {
         if (guard()) {
             this.userId = id;
         }
+    }
+
+    /** 记录本次请求的响应码——写在 {@code Result} 的工厂里，成功与失败两条路径都能覆盖 */
+    public void resultCode(Integer code) {
+        if (guard()) {
+            this.resultCode = code;
+        }
+    }
+
+    /** 本次请求的响应码；未记录时为 null（非 HTTP 路径、或响应不是 Result） */
+    public Integer resultCode() {
+        return resultCode;
     }
 
     public void resource(String name) {

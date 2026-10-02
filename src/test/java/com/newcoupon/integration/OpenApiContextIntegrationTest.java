@@ -4,12 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
-import ch.qos.logback.core.read.ListAppender;
+import ch.qos.logback.core.AppenderBase;
 import com.newcoupon.application.service.OpenAppService;
 import com.newcoupon.application.service.OpenAppService.CreateAppRequest;
 import com.newcoupon.common.crypto.OpenApiSignature;
 import com.newcoupon.infrastructure.web.OpenApiAuthFilter;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -118,19 +119,48 @@ class OpenApiContextIntegrationTest extends ShardedIntegrationTestSupport {
      */
     private String captureAccessLog(Runnable action) {
         Logger filterLogger = (Logger) LoggerFactory.getLogger(OpenApiAuthFilter.class);
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        SyncListAppender appender = new SyncListAppender();
         appender.start();
         filterLogger.addAppender(appender);
         try {
             action.run();
+            // **"请求返回"不等于"服务端日志已写"**：响应在过滤器链内部就被 flush 给客户端
+            // （见设计文档 §9-4），而访问日志写在之后的 finally 里——两者之间是一个真实的竞态窗口。
+            // 断言服务端日志必须轮询等待（detach 之前等，否则日志会写到已摘除的 appender 上）。
+            long deadline = System.currentTimeMillis() + 3_000;
+            while (appender.messages.stream().noneMatch(m -> m.startsWith("open-api:"))
+                    && System.currentTimeMillis() < deadline) {
+                try {
+                    Thread.sleep(20);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
         } finally {
             filterLogger.detachAppender(appender);
         }
-        return appender.list.stream()
-                .map(ILoggingEvent::getFormattedMessage)
+        return appender.messages.stream()
                 .filter(m -> m.startsWith("open-api:"))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("没有找到开放面访问日志"));
+    }
+
+    /**
+     * 线程安全的日志收集器。
+     *
+     * <p><b>为什么不用 logback 自带的 {@code ListAppender}</b>：它内部是普通 {@code ArrayList}——
+     * 而这里**写日志的是 http-nio 线程、读日志的是测试主线程**，跨线程读一个非同步集合
+     * 没有 happens-before 保证，读到空是合法的（实测：同一个类里两条用例稳定通过、
+     * 一条稳定读到空，日志在服务端明明打出来了）。<b>测试基建自己也要讲并发正确性。</b>
+     */
+    private static final class SyncListAppender extends AppenderBase<ILoggingEvent> {
+        private final List<String> messages = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        @Override
+        protected void append(ILoggingEvent event) {
+            messages.add(event.getFormattedMessage());
+        }
     }
 
     private ResponseEntity<String> call(HttpMethod method, String path, String query, String body, Long timeoutMs) {
@@ -151,8 +181,14 @@ class OpenApiContextIntegrationTest extends ShardedIntegrationTestSupport {
         if (timeoutMs != null) {
             headers.set("X-Timeout-Ms", String.valueOf(timeoutMs));
         }
+        if (method == HttpMethod.POST) {
+            // S1 第 6 步起，写接口必须带 clientToken（幂等过滤器强制）——
+            // 本类写于第 5 步，第 6 步之后没跑它，这个回归潜伏了两步才被回归发现
+            headers.set("X-Client-Token", "ctx-token-" + nonce);
+        }
 
         String url = query == null || query.isEmpty() ? path : path + "?" + query;
-        return rest.exchange(url, method, new HttpEntity<>(body, headers), String.class);
+        HttpEntity<String> entity = new HttpEntity<>(body, headers);
+        return rest.exchange(url, method, entity, String.class);
     }
 }

@@ -8,6 +8,7 @@ import com.newcoupon.common.Result;
 import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.common.crypto.OpenApiAuthHeader;
 import com.newcoupon.common.crypto.OpenApiSignature;
+import com.newcoupon.infrastructure.persistence.OpenApiAuditRecorder;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -80,13 +81,16 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
     private final CachedOpenAppReader appReader;
     private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
+    private final OpenApiAuditRecorder auditRecorder;
 
     public OpenApiAuthFilter(CachedOpenAppReader appReader,
                              StringRedisTemplate redis,
-                             ObjectMapper objectMapper) {
+                             ObjectMapper objectMapper,
+                             OpenApiAuditRecorder auditRecorder) {
         this.appReader = appReader;
         this.redis = redis;
         this.objectMapper = objectMapper;
+        this.auditRecorder = auditRecorder;
     }
 
     @Override
@@ -97,71 +101,108 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
+        long start = System.currentTimeMillis();
         String path = request.getServletPath();
+        String declaredAppId = null;     // 头里声明的 appId（验签前不可信，仅供审计"谁在敲门"）
+        boolean verified = false;
+        Integer rejectedCode = null;     // 被接入层拦下时的错误码（审计用）
 
-        // 第 1 步：版本（未实现的版本直接拒——404 无法区分"版本不存在"和"接口写错"）
-        if (!path.startsWith(V1_PREFIX)) {
-            reject(response, 400, ErrorCode.API_VERSION_UNSUPPORTED);
-            return;
-        }
-
-        // body 一次性读入内存：验签要算它的哈希，而 Servlet 的流只能读一次（读完了 Controller 就没得读）
-        CachedBodyRequestWrapper wrapped = new CachedBodyRequestWrapper(request);
-
-        // 第 2 步：签名头
-        OpenApiAuthHeader header = OpenApiAuthHeader.parse(wrapped.getHeader(AUTH_HEADER));
-        if (header == null) {
-            reject(response, 401, ErrorCode.SIGN_MISSING);
-            return;
-        }
-
-        // 第 3 步：应用与密钥（走本地缓存，命中时不触库；停用视为不存在）
-        Optional<AppAuth> found = appReader.find(header.appId());
-        if (found.isEmpty() || !found.get().enabled() || !found.get().hasUsableSecret()) {
-            log.warn("OPEN-API 拒绝：应用不可用 appId={} path={}", header.appId(), path);
-            reject(response, 401, ErrorCode.APP_INVALID);
-            return;
-        }
-        AppAuth app = found.get();
-
-        // 第 4 步：时间窗
-        long now = System.currentTimeMillis();
-        if (Math.abs(now - header.timestamp()) > WINDOW_MS) {
-            reject(response, 401, ErrorCode.TIMESTAMP_OUT_OF_WINDOW);
-            return;
-        }
-
-        // 第 5 步：验签（对每一把可用密钥试——轮换期内新旧并存）
-        String canonical = OpenApiSignature.canonicalString(
-                request.getMethod(),
-                path,
-                OpenApiSignature.canonicalQuery(request.getQueryString()),
-                OpenApiSignature.bodySha256(wrapped.cachedBody()),
-                header.appId(), header.timestamp(), header.nonce());
-        boolean signed = app.secrets().stream()
-                .anyMatch(secret -> OpenApiSignature.verify(secret, canonical, header.signature()));
-        if (!signed) {
-            log.warn("OPEN-API 拒绝：签名不匹配 appId={} path={}", header.appId(), path);
-            reject(response, 401, ErrorCode.SIGN_MISMATCH);
-            return;
-        }
-
-        // 第 6 步：nonce 防重放（必须在验签之后！）
-        if (!consumeNonce(header.appId(), header.nonce(), response)) {
-            return;
-        }
-
-        // 认证通过：建立请求上下文
-        RequestContext ctx = new RequestContext(
-                header.appId(), MDC.get(TraceIdFilter.TRACE_ID), deadline(request), hasTimeoutHeader(request));
-        ctx.resource(path.substring(V1_PREFIX.length()));   // 如 coupons/receive（维度由应用服务补）
-        RequestContext.set(ctx);
         try {
+            // 第 1 步：版本（未实现的版本直接拒——404 无法区分"版本不存在"和"接口写错"）
+            if (!path.startsWith(V1_PREFIX)) {
+                rejectedCode = reject(response, 400, ErrorCode.API_VERSION_UNSUPPORTED);
+                return;
+            }
+
+            // body 一次性读入内存：验签要算它的哈希，而 Servlet 的流只能读一次（读完了 Controller 就没得读）
+            CachedBodyRequestWrapper wrapped = new CachedBodyRequestWrapper(request);
+
+            // 第 2 步：签名头
+            OpenApiAuthHeader header = OpenApiAuthHeader.parse(wrapped.getHeader(AUTH_HEADER));
+            if (header == null) {
+                rejectedCode = reject(response, 401, ErrorCode.SIGN_MISSING);
+                return;
+            }
+            declaredAppId = header.appId();
+
+            // 第 3 步：应用与密钥（走本地缓存，命中时不触库；停用视为不存在）
+            Optional<AppAuth> found = appReader.find(header.appId());
+            if (found.isEmpty() || !found.get().enabled() || !found.get().hasUsableSecret()) {
+                log.warn("OPEN-API 拒绝：应用不可用 appId={} path={}", header.appId(), path);
+                rejectedCode = reject(response, 401, ErrorCode.APP_INVALID);
+                return;
+            }
+            AppAuth app = found.get();
+
+            // 第 4 步：时间窗
+            long now = System.currentTimeMillis();
+            if (Math.abs(now - header.timestamp()) > WINDOW_MS) {
+                rejectedCode = reject(response, 401, ErrorCode.TIMESTAMP_OUT_OF_WINDOW);
+                return;
+            }
+
+            // 第 5 步：验签（对每一把可用密钥试——轮换期内新旧并存）
+            String canonical = OpenApiSignature.canonicalString(
+                    request.getMethod(),
+                    path,
+                    OpenApiSignature.canonicalQuery(request.getQueryString()),
+                    OpenApiSignature.bodySha256(wrapped.cachedBody()),
+                    header.appId(), header.timestamp(), header.nonce());
+            boolean signed = app.secrets().stream()
+                    .anyMatch(secret -> OpenApiSignature.verify(secret, canonical, header.signature()));
+            if (!signed) {
+                log.warn("OPEN-API 拒绝：签名不匹配 appId={} path={}", header.appId(), path);
+                rejectedCode = reject(response, 401, ErrorCode.SIGN_MISMATCH);
+                return;
+            }
+
+            // 第 6 步：nonce 防重放（必须在验签之后！）
+            Integer nonceReject = consumeNonce(header.appId(), header.nonce(), response);
+            if (nonceReject != null) {
+                rejectedCode = nonceReject;
+                return;
+            }
+
+            // 认证通过：建立请求上下文
+            verified = true;
+            RequestContext ctx = new RequestContext(
+                    header.appId(), MDC.get(TraceIdFilter.TRACE_ID), deadline(request), hasTimeoutHeader(request));
+            ctx.resource(path.substring(V1_PREFIX.length()));   // 如 coupons/receive（维度由应用服务补）
+            RequestContext.set(ctx);
+
             chain.doFilter(wrapped, response);
         } finally {
-            exposeContext(ctx, request, response);
+            // 收尾三件事，**成功失败都会执行**：审计 → 访问日志 → 清上下文
+            recordAudit(request, response, declaredAppId, verified, rejectedCode, start);
+            if (RequestContext.current().appId() != null) {
+                exposeContext(RequestContext.current(), request, response);
+            }
             RequestContext.clear();   // 线程池复用，必须清（与 MDC 同一个道理）
         }
+    }
+
+    /**
+     * 调用审计：一行 = 一次调用。
+     *
+     * <p><b>成功与失败都落</b>——失败调用往往是排查里最有价值的那一半
+     * （谁在敲门、敲了多少次、是签名错还是配额超）。未验签通过时记的是**声明值**，
+     * 由 {@code verified} 列区分"谁在敲门"与"谁进了门"。
+     */
+    private void recordAudit(HttpServletRequest request, HttpServletResponse response,
+                             String declaredAppId, boolean verified, Integer rejectedCode, long start) {
+        RequestContext ctx = RequestContext.current();
+        auditRecorder.record(new OpenApiAuditRecorder.AuditEntry(
+                MDC.get(TraceIdFilter.TRACE_ID),
+                declaredAppId,
+                verified,
+                ctx.resourceName(),
+                request.getMethod(),
+                request.getServletPath(),
+                response.getStatus(),
+                verified ? ctx.resultCode() : rejectedCode,
+                (int) (System.currentTimeMillis() - start),
+                RiskControlFilter.clientIp(request),
+                ctx.userId()));
     }
 
     /**
@@ -189,23 +230,21 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
     /**
      * 消费 nonce。
      *
-     * @return true=首次使用（放行）；false=已拒绝并写好响应（重放 或 Redis 故障）
+     * @return {@code null}=首次使用（放行）；否则返回已写好的错误码（重放 或 Redis 故障）
      */
-    private boolean consumeNonce(String appId, String nonce, HttpServletResponse response) throws IOException {
+    private Integer consumeNonce(String appId, String nonce, HttpServletResponse response) throws IOException {
         String key = NONCE_KEY_PREFIX + appId + ":" + nonce;
         try {
             Boolean fresh = redis.opsForValue().setIfAbsent(key, "1", NONCE_TTL);
             if (!Boolean.TRUE.equals(fresh)) {
                 log.warn("OPEN-API 拒绝：nonce 重放 appId={} nonce={}", appId, nonce);
-                reject(response, 401, ErrorCode.NONCE_REPLAYED);
-                return false;
+                return reject(response, 401, ErrorCode.NONCE_REPLAYED);
             }
-            return true;
+            return null;   // 通过
         } catch (RuntimeException e) {
             // fail-closed：nonce 是安全防线。但归因必须是"系统故障"而非"你在重放"
             log.error("OPEN-API nonce 检查失败（Redis 不可用）——拒绝请求 appId={}", appId, e);
-            reject(response, 503, ErrorCode.SYSTEM_ERROR);
-            return false;
+            return reject(response, 503, ErrorCode.SYSTEM_ERROR);
         }
     }
 
@@ -231,10 +270,12 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
         return System.currentTimeMillis() + budget;
     }
 
-    private void reject(HttpServletResponse response, int httpStatus, ErrorCode code) throws IOException {
+    /** @return 该错误码——调用方带回去记进审计（接入层的拒绝也要留痕） */
+    private int reject(HttpServletResponse response, int httpStatus, ErrorCode code) throws IOException {
         response.setStatus(httpStatus);
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.setCharacterEncoding("UTF-8");   // L43：不声明则中文提示变乱码
         response.getWriter().write(objectMapper.writeValueAsString(Result.fail(code)));
+        return code.getCode();
     }
 }

@@ -2,14 +2,14 @@
 
 > **维护纪律**：每次代码提交后同步更新本文件；与代码冲突时以代码为准、当场修本文件。**"声称已修"必须附可核证据**（测试方法名 / 命令 / 实测数字）——2026-09-27 评审查出两条"提交信息与 STATUS 都声称修好、git 全历史零实现"的虚假完成记录（报告 §3-1），此后每条修复的登记一律按此格式。
 > 创建：2026-09-05；2026-09-07 经六视角全面审计修正（26 agent，20 项确认发现全部修复，详见 §4.5）。
-> **测试基线**：**214 例（2026-09-30 全量实测：207 绿 + 1 红 + 6 例门控跳过；唯一红是 `P2bQpsReportTest`，环境/压力敏感，已按 L42② 改为只钉正确性）**。**S1 新增 56 例**（`OpenAppRegistryIntegrationTest` 18 + `OpenApiSignatureTest` 5 + `OpenApiAuthIntegrationTest` 9 + `RequestContextTest` 6 + `OpenApiContextIntegrationTest` 3 + `OpenApiIdempotentIntegrationTest` 4 + `OpenApiQuotaIntegrationTest` 4 + `OpenApiOwnershipIntegrationTest` 7），全部跑绿；受影响的既有用例已按批回归绿（`P2cAdminAuthTest` 4、`ReceiveIntegrationTest` 6、`TradeIntegrationTest` 7）；**S1 全量复跑留到 S1 收尾**。`mvn clean test` **必须 clean**——防"增量假绿"也防 **IDE 后台构建污染导致的"假红"**（2026-10-01 实测）。
+> **测试基线**：**214 例（2026-09-30 全量实测：207 绿 + 1 红 + 6 例门控跳过；唯一红是 `P2bQpsReportTest`，环境/压力敏感，已按 L42② 改为只钉正确性）**。**S1 新增 66 例**（`OpenAppRegistryIntegrationTest` 18 + `OpenApiSignatureTest` 5 + `OpenApiAuthIntegrationTest` 9 + `RequestContextTest` 6 + `OpenApiContextIntegrationTest` 3 + `OpenApiIdempotentIntegrationTest` 4 + `OpenApiQuotaIntegrationTest` 4 + `OpenApiOwnershipIntegrationTest` 7 + `SwitchCenterIntegrationTest` 4 + `OpenApiAuditIntegrationTest` 3），全部跑绿；受影响的既有用例已按批回归绿（`P2cAdminAuthTest` 4、`ReceiveIntegrationTest` 6、`TradeIntegrationTest` 7）；**S1 全量复跑留到 S1 收尾**。`mvn clean test` **必须 clean**——防"增量假绿"也防 **IDE 后台构建污染导致的"假红"**（2026-10-01 实测）。
 > **测试数字口径（§3-3 说明）**：本文件记录的数字对应**未提交的工作区状态**——L37/L38 的全部改动都悬在工作区（9 个源文件 + V13 迁移 + 8 个测试文件 + 文档），git 提交被会话权限拦截；复算命令即上面那条。
 > **P2 已正式关闭（2026-09-24）**；**L37 补丁已关闭（2026-09-27）**：开桶锁过期后的重复建行——V13 额度段唯一键 + 巡检第四条检查（E3a）+ 封账挪到建行之后。
 > **L38 三条批次全部关闭（2026-09-29）**：2026-09-27 全工作多领域专家评审（36 条确认 = P1 编号 12 条 + P2 编号 6 条；另 93 条未核实登记、160 条已清）的处置——批 1（11 个条目并作 8 项修复，09-28，报告 §7.1）、批 2（4 项，09-28，§7.2）、批 3（3 项 + 账本批次，09-29，§7.3）全部"先红后绿"落地，**P1×12 + P2×6 共 18 条编号项全部覆盖关闭**；报告：docs/审查-全工作多领域专家评审-2026-09-27.md。
 > 全链路：2a Schema→2b 分桶（含批量重开）→2c 缓存+鉴权→2d 发件箱+RocketMQ→2e 实时性+指标→终审处置→L37 补丁→L38 三批处置。
 > **2026-09-30 路线重排**：P2 可靠性体系**封版**（除新业务引入的正确性问题外不再加码）；L28/L29/L32/L35 **冻结不修**（止损清单）；重心转向业务面（V2 的 S1~S7）。
 > 🧭 **交接快照（2026-10-01 傍晚更新；压缩/换会话后先读这里）**
-> **当前阶段**：ROADMAP V2 的 **S1（开放接入层与契约）实施中**——设计文档已批准（[S1-开放接入层-需求与设计](S1-开放接入层-需求与设计-2026-10-01.md)，含 6 个决策点的裁决、12 步计划、**§9 七条实施期实测发现**）；**第 1~8 步已完成**（V14 迁移 / 应用注册 / 密钥轮换 / 签名核心 / 认证链 + 治理插槽 / 幂等 / 配额 / **越权防线**），**下一步 = 第 9 步：开关中心**（`SwitchService` + 关键路径埋点 + 读取接口；默认全开、关闭走 5001 降级）。
+> **当前阶段**：ROADMAP V2 的 **S1（开放接入层与契约）实施中**——设计文档已批准（[S1-开放接入层-需求与设计](S1-开放接入层-需求与设计-2026-10-01.md)，含 6 个决策点的裁决、12 步计划、**§9 七条实施期实测发现**）；**第 1~10 步已完成**（V14 迁移 / 应用注册 / 密钥轮换 / 签名核心 / 认证链 + 治理插槽 / 幂等 / 配额 / 越权防线 / **开关中心** / **调用审计**），**下一步 = 第 11~12 步：demo 脚本 + 接入方文档 + 教学文档**，随后跑 S1 全量验收收尾。
 > **工作区**：本快照提交后应为干净（`git status` 无改动）；若不干净，先看 `git log --oneline -5` 与 `git status` 再动手。
 > **压缩后恢复状态的三步**：① 读本文件（债台账 + 测试基线 + 下一步）；② 读 [ROADMAP-V2](ROADMAP-V2.md) 与上述 S1 设计文档（§5 有逐步状态表、§9 有实施期实测发现）；③ 读 `study/工作日志.md` 最近三条（含每次决策的"为什么"）。三份都没提到的事，默认"未做"，先去代码/测试里核实再动手。
 > **三个长期约定**：① 每条修复/新功能**先红后绿**（红灯证据留档）；② 收尾三件套 = git 提交 + 本文件同步 + 工作日志追加；③ **改动公共配置或新增必填项后，必须跑一遍受影响的既有用例**（2026-10-01 教训：`SecretCipher` 的 fail-fast 让本地 dev 直接起不来，靠既有用例 `P2cAdminAuthTest` 抓出）。
@@ -50,8 +50,9 @@
 | 事件表查询/统计 | ❌ | 只写不读（"计"域未开始） | L11 |
 | 登录态/鉴权 | ❌ | userId 由请求携带（登记的阶段简化） | L12 |
 | **领取入口风控（IP 频控）** | ✅ | **最小版已实施（2026-09-16，docs/11 §6）**：RiskControlFilter 只拦 POST /receive；IpRateGate 固定窗口（INCR+EXPIRE，默认 60s/30 次，可配置）；代理头提 IP（XFF 首跳→X-Real-IP→remoteAddr）；429+7001（7xxx 风控域新段）；**fail-open**（频控=可用性防线，Redis 故障不误杀全量；资损另有独立防线）；设备维度头透传位已留（M6 人机识别接上） | — |
-| **开放接入层（S1）** | 🔶 | **实施中（2026-10-02，第 1~8 步）**：V14 三张新表 + 模板与 64 张券分表加 `app_id` 归属列；接入方注册/启停/密钥轮换（AES-GCM、多版本共存、`/api/apps`）；签名协议（canonical + HMAC + 恒定时间验签 + 注入防护 + 黄金用例）；**认证链**（版本→签名头→应用→时间窗→验签→nonce；nonce **先验签再写**；Redis 故障 fail-closed 但归因 5000）；**治理插槽三件**（`RequestContext` + `@OpenResource` 资源命名 `接口[:维度[:值]]` + 访问日志含 appId/resource/deadline）；**接入层幂等**（`X-Client-Token`：同 token 同参→逐字节同响应 + `X-Idempotent-Replay`、异参 6008、处理中 6009；5xxx 不缓存；Redis 故障 fail-open 由业务层幂等兜底）；**配额**（`RateLimiter` 端口 + 固定窗口：appId 维度 QPS/日配额 → 429 + `Retry-After`，0=不限）；Controller 双前缀。**越权防线**（`AppOwnership`：内部面=管理员例外放行、开放面按 `app_id` 过滤；模板读/发布/领券/锁券/券包五条路径；6xxx→HTTP 状态映射）**
-**待做**：开关中心（第 9 步）、调用审计（第 10 步） | L48~L52 |
+| **开放接入层（S1）** | 🔶 | **实施中（2026-10-02，第 1~10 步；仅剩 demo 脚本/接入方文档与教学文档）**：V14 三张新表 + 模板与 64 张券分表加 `app_id` 归属列；接入方注册/启停/密钥轮换（AES-GCM、多版本共存、`/api/apps`）；签名协议（canonical + HMAC + 恒定时间验签 + 注入防护 + 黄金用例）；**认证链**（版本→签名头→应用→时间窗→验签→nonce；nonce **先验签再写**；Redis 故障 fail-closed 但归因 5000）；**治理插槽三件**（`RequestContext` + `@OpenResource` 资源命名 `接口[:维度[:值]]` + 访问日志含 appId/resource/deadline）；**接入层幂等**（`X-Client-Token`：同 token 同参→逐字节同响应 + `X-Idempotent-Replay`、异参 6008、处理中 6009；5xxx 不缓存；Redis 故障 fail-open 由业务层幂等兜底）；**配额**（`RateLimiter` 端口 + 固定窗口：appId 维度 QPS/日配额 → 429 + `Retry-After`，0=不限）；Controller 双前缀。**越权防线**（`AppOwnership`：内部面=管理员例外放行、开放面按 `app_id` 过滤；模板读/发布/领券/锁券/券包五条路径；6xxx→HTTP 状态映射）**
+**开关中心**（`SwitchKey` 清单 + `SwitchService` + `@SwitchGuard` 注解+拦截器，业务零侵入；`GET /api/switches` 读接口）**
+**调用审计**（`open_api_audit` 每次 /open 调用一行：成功失败都落、未验签记声明值且 `verified=0`、含 traceId/资源名/业务码/耗时/IP；同步落表登记 L48） | L48~L52 |
 
 ## 2. 演进史与代码变更记录（防考古）
 

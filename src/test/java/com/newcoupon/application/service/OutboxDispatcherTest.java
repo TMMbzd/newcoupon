@@ -19,6 +19,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import com.newcoupon.application.service.SwitchService;
 
 /**
  * L40④（2026-09-30）：发件箱的**退避与死信**此前零覆盖（默认套件只测了"同事务双写"与"投递闭环"）。
@@ -35,7 +36,8 @@ class OutboxDispatcherTest {
     private final RedisScanLock scanLock = mock(RedisScanLock.class);
     private final StockDriftLogGateway driftLog = mock(StockDriftLogGateway.class);
     private final OutboxDispatcher dispatcher =
-            new OutboxDispatcher(mapper, publisher, scanLock, driftLog, 100, 8);
+            new OutboxDispatcher(mapper, publisher, scanLock, driftLog,
+                    new SwitchService(new org.springframework.core.env.StandardEnvironment()), 100, 8);
 
     private CouponOutboxPO row(int retryCount) {
         CouponOutboxPO po = new CouponOutboxPO();

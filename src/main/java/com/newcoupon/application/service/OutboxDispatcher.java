@@ -36,6 +36,7 @@ public class OutboxDispatcher {
     private final EventPublisher publisher;
     private final RedisScanLock scanLock;
     private final StockDriftLogGateway driftLog;
+    private final SwitchService switchService;
     private final int batchSize;
     private final int maxRetry;
 
@@ -45,12 +46,14 @@ public class OutboxDispatcher {
                             EventPublisher publisher,
                             RedisScanLock scanLock,
                             StockDriftLogGateway driftLog,
+                            SwitchService switchService,
                             @Value("${coupon.outbox.batch-size:100}") int batchSize,
                             @Value("${coupon.outbox.max-retry:8}") int maxRetry) {
         this.outboxMapper = outboxMapper;
         this.publisher = publisher;
         this.scanLock = scanLock;
         this.driftLog = driftLog;
+        this.switchService = switchService;
         this.batchSize = batchSize;
         this.maxRetry = maxRetry;
     }
@@ -59,6 +62,11 @@ public class OutboxDispatcher {
     @com.xxl.job.core.handler.annotation.XxlJob("couponOutboxDispatchJob")
     @Scheduled(fixedDelay = 1_000, initialDelay = 3_000)
     public void dispatch() {
+        // 开关关闭 → 本轮直接跳过（连锁都不抢）：消息留在 outbox 里，恢复后照常补投——
+        // 这是"暂停投递"而不是"丢弃消息"，两者的差别决定了运维敢不敢按这个开关
+        if (!switchService.isOn(SwitchKey.OUTBOX_DISPATCH)) {
+            return;
+        }
         String owner = "outbox-" + java.util.UUID.randomUUID();
         boolean locked;
         try {
