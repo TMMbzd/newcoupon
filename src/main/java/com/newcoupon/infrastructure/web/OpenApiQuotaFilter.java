@@ -2,6 +2,8 @@ package com.newcoupon.infrastructure.web;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.newcoupon.application.service.CachedOpenAppReader;
+import com.newcoupon.application.service.TenantConfigKey;
+import com.newcoupon.application.service.TenantConfigService;
 import com.newcoupon.application.service.CachedOpenAppReader.AppAuth;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.Result;
@@ -58,13 +60,16 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     private final CachedOpenAppReader appReader;
     private final RateLimiter rateLimiter;
     private final ObjectMapper objectMapper;
+    private final TenantConfigService tenantConfigService;
 
     public OpenApiQuotaFilter(CachedOpenAppReader appReader,
                               RateLimiter rateLimiter,
-                              ObjectMapper objectMapper) {
+                              ObjectMapper objectMapper,
+                              TenantConfigService tenantConfigService) {
         this.appReader = appReader;
         this.rateLimiter = rateLimiter;
         this.objectMapper = objectMapper;
+        this.tenantConfigService = tenantConfigService;
     }
 
     @Override
@@ -97,7 +102,8 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         chain.doFilter(request, response);
     }
 
-    private boolean withinQps(String appId, int limit, HttpServletResponse response) throws IOException {
+    private boolean withinQps(String appId, int registeredLimit, HttpServletResponse response) throws IOException {
+        int limit = resolveLimit(appId, TenantConfigKey.RATE_LIMIT_QPS, registeredLimit);
         if (limit <= 0) {
             return true;
         }
@@ -109,7 +115,8 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         return false;
     }
 
-    private boolean withinDailyQuota(String appId, int limit, HttpServletResponse response) throws IOException {
+    private boolean withinDailyQuota(String appId, int registeredLimit, HttpServletResponse response) throws IOException {
+        int limit = resolveLimit(appId, TenantConfigKey.RATE_LIMIT_DAILY_QUOTA, registeredLimit);
         if (limit <= 0) {
             return true;
         }
@@ -124,6 +131,20 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
                 LocalDate.now().plusDays(1).atStartOfDay()).getSeconds();
         reject(response, ErrorCode.DAILY_QUOTA_EXCEEDED, String.valueOf(Math.max(1, secondsUntilTomorrow)));
         return false;
+    }
+
+    /**
+     * 阈值来源：**租户配置优先，未配置回落登记表**（S2 第 3 步）。
+     *
+     * <p>必须区分"未配置"与"显式配 0"——前者用 {@link TenantConfigService#get} 返回 null 判定，
+     * 后者是"明确要求不限"。混为一谈会让"想给某租户放开限制"变成一个做不到的操作。
+     */
+    private int resolveLimit(String appId, TenantConfigKey key, int registeredLimit) {
+        String configured = tenantConfigService.get(appId, key);
+        if (configured == null || configured.isBlank()) {
+            return registeredLimit;   // 未配置 → 回落登记表（保持 S1 的既有入口）
+        }
+        return tenantConfigService.getInt(appId, key);
     }
 
     /** fail-open：限流器抛异常时放行（配额是可用性防线，不因中间件故障误杀全量接入方） */

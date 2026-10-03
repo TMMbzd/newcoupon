@@ -54,7 +54,7 @@ public class AdminTokenFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
-        if ("POST".equals(request.getMethod()) && isAdminPath(request.getServletPath())) {
+        if (isWriteMethod(request.getMethod()) && isAdminPath(request.getServletPath())) {
             String provided = request.getHeader(TOKEN_HEADER);
             if (!StringUtils.hasText(adminToken)) {
                 log.error("ADMIN BLOCKED (fail-closed): 管理令牌未配置（coupon.admin.token 为空）——拒绝所有管理写操作");
@@ -70,6 +70,18 @@ public class AdminTokenFilter extends OncePerRequestFilter {
             log.info("ADMIN ALLOWED: path={}（管理令牌校验通过）", request.getServletPath());
         }
         chain.doFilter(request, response);
+    }
+
+    /**
+     * 是否是需要保护的管理面写方法。
+     *
+     * <p><b>S2 修复（2026-10-04）</b>：原先只拦 POST。S2 要给租户配置加一个 PUT 接口——
+     * 那个接口会绕过令牌检查。<b>"只拦 POST"是一个会随接口演进而失效的判据</b>：
+     * 新增一个写方法就多一个缺口。改成列举"什么是写方法"，漏掉的可能就小得多。
+     */
+    private static boolean isWriteMethod(String method) {
+        return "POST".equals(method) || "PUT".equals(method)
+                || "DELETE".equals(method) || "PATCH".equals(method);
     }
 
     /** 是否属于受保护的管理面写路径（前缀匹配；注意用 getServletPath 而非 getRequestURI） */

@@ -62,6 +62,8 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
 
     private static final String LIMITED_APP = "t-quota";
     private static final String UNLIMITED_APP = "t-quota-free";
+    /** 专供"租户配置覆盖阈值"的用例：配置是**持久化**的，共享租户会让别的用例受影响 */
+    private static final String CFG_APP = "t-quota-cfg";
 
     /** 与实现约定的键格式（用例先写，实现来对齐——这就是"测试定义契约"） */
     private static final String QPS_KEY_PREFIX = "c:open:qps:";
@@ -81,8 +83,12 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired
     private StringRedisTemplate redis;
 
+    @Autowired
+    private com.newcoupon.application.service.TenantConfigService tenantConfigService;
+
     private static String limitedSecret;
     private static String unlimitedSecret;
+    private static String cfgSecret;
     private static final AtomicBoolean PROVISIONED = new AtomicBoolean();
 
     @BeforeEach
@@ -94,6 +100,8 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
                 new CreateAppRequest(LIMITED_APP, "配额受限接入方", 2, 3, null)).secret();
         unlimitedSecret = appService.create(
                 new CreateAppRequest(UNLIMITED_APP, "不限量接入方", 0, 0, null)).secret();
+        cfgSecret = appService.create(
+                new CreateAppRequest(CFG_APP, "配置覆盖验证方", 2, 0, null)).secret();
     }
 
     @Test
@@ -146,6 +154,45 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
 
         assertThat(result.status()).as(result.body())
                 .as("0=不做这个判断，而不是'给个很大的数'").isEqualTo(200);
+    }
+
+    @Test
+    @DisplayName("租户配置覆盖登记表阈值：未配用登记表（2），配了 1000 就用 1000")
+    void tenantConfig_overridesRegisteredThreshold() throws Exception {
+        clearConfig();   // 起点干净："配置是持久化的"，用例必须自己保证幂等
+
+        prefillQps(CFG_APP, 5);
+        assertThat(call(CFG_APP, cfgSecret).status())
+                .as("未配 → 用登记表的阈值 2，预填 5 应当被限").isEqualTo(429);
+
+        tenantConfigService.put(CFG_APP, java.util.Map.of("rate_limit.qps", "1000"), "test");
+
+        prefillQps(CFG_APP, 5);
+        assertThat(call(CFG_APP, cfgSecret).status())
+                .as("配了 1000 → 同样的预填计数应当放行（证明读的是租户配置）").isEqualTo(200);
+    }
+
+    @Test
+    @DisplayName("租户配置按租户隔离：只改配置租户的阈值，别的租户仍用登记表")
+    void tenantConfig_doesNotAffectOtherTenants() throws Exception {
+        tenantConfigService.put(CFG_APP, java.util.Map.of("rate_limit.qps", "1000"), "test");
+
+        prefillQps(CFG_APP, 5);
+        assertThat(call(CFG_APP, cfgSecret).status())
+                .as("配了 1000 的那个租户放行").isEqualTo(200);
+
+        prefillQps(LIMITED_APP, 5);
+        assertThat(call(LIMITED_APP, limitedSecret).status())
+                .as("没配的租户仍按登记表的 2 被限——配置不外溢").isEqualTo(429);
+    }
+
+    /** 清掉配置租户的那一项（配置持久化，用例必须自己保证"起点干净"） */
+    private void clearConfig() {
+        try {
+            tenantConfigService.remove(CFG_APP, "rate_limit.qps", "test");
+        } catch (RuntimeException ignored) {
+            // 从来没有配置过：删除会报"没有这一项"，忽略即可
+        }
     }
 
     // ------------------------------------------------------------------

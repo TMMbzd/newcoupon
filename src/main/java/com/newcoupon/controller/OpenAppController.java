@@ -8,7 +8,9 @@ import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.Result;
 import java.util.List;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -32,9 +34,12 @@ import org.springframework.web.bind.annotation.RestController;
 public class OpenAppController {
 
     private final OpenAppService openAppService;
+    private final com.newcoupon.application.service.TenantConfigService tenantConfigService;
 
-    public OpenAppController(OpenAppService openAppService) {
+    public OpenAppController(OpenAppService openAppService,
+                             com.newcoupon.application.service.TenantConfigService tenantConfigService) {
         this.openAppService = openAppService;
+        this.tenantConfigService = tenantConfigService;
     }
 
     /** 注册接入方。返回体里的 secret 是**明文 SK，只此一次** */
@@ -69,6 +74,39 @@ public class OpenAppController {
     @PostMapping("/{appId}/rotate")
     public Result<AppWithSecret> rotate(@PathVariable String appId) {
         return Result.success(openAppService.rotate(appId));
+    }
+
+    /** 读该租户的全部显式配置（未配置的项不出现，用默认值） */
+    @GetMapping("/{appId}/config")
+    public Result<java.util.Map<String, String>> getConfig(@PathVariable String appId) {
+        return Result.success(tenantConfigService.allOf(appId));
+    }
+
+    /**
+     * 批量写配置（新增或修改）。
+     *
+     * <p><b>先全部校验、再整体写入</b>：一批里有一个不合法就整体拒绝——
+     * 否则运维看到"报错了"，却不知道哪几项已经生效。
+     */
+    @PutMapping("/{appId}/config")
+    public Result<Void> putConfig(@PathVariable String appId,
+                                  @RequestBody java.util.Map<String, String> values,
+                                  jakarta.servlet.http.HttpServletRequest request) {
+        tenantConfigService.put(appId, values, operatorOf(request));
+        return Result.success();
+    }
+
+    /** 删除一项配置（回落默认值） */
+    @DeleteMapping("/{appId}/config/{key}")
+    public Result<Void> deleteConfig(@PathVariable String appId, @PathVariable String key,
+                                     jakarta.servlet.http.HttpServletRequest request) {
+        tenantConfigService.remove(appId, key, operatorOf(request));
+        return Result.success();
+    }
+
+    /** 变更审计里的操作者标识：管理面没有用户身份，记"令牌 + 来源 IP" */
+    private static String operatorOf(jakarta.servlet.http.HttpServletRequest request) {
+        return "admin@" + com.newcoupon.infrastructure.web.RiskControlFilter.clientIp(request);
     }
 
     public record SetStatusRequest(Integer status) {

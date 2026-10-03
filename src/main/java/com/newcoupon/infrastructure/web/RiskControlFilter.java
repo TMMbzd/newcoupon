@@ -60,8 +60,14 @@ public class RiskControlFilter extends OncePerRequestFilter {
         filterChain.doFilter(request, response);
     }
 
-    /** 代理头优先的客户端 IP 提取（X-Forwarded-For 首跳=最初的客户端） */
-    static String clientIp(HttpServletRequest request) {
+    /**
+     * 代理头优先的客户端 IP 提取（X-Forwarded-For 首跳=最初的客户端）。
+     *
+     * <p>被 {@code OpenApiAuthFilter}（审计记录来源 IP）与 {@code OpenAppController}（配置变更审计）
+     * 共用，所以是公开的——**同一份提取规则只应有一处实现**，否则"审计记的 IP"和"风控拦的 IP"
+     * 迟早会对不上。
+     */
+    public static String clientIp(HttpServletRequest request) {
         String xff = request.getHeader("X-Forwarded-For");
         if (xff != null && !xff.isBlank()) {
             int comma = xff.indexOf(',');
