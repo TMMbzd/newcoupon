@@ -65,10 +65,6 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     /** 专供"租户配置覆盖阈值"的用例：配置是**持久化**的，共享租户会让别的用例受影响 */
     private static final String CFG_APP = "t-quota-cfg";
 
-    /** 与实现约定的键格式（用例先写，实现来对齐——这就是"测试定义契约"） */
-    private static final String QPS_KEY_PREFIX = "c:open:qps:";
-    private static final String DAILY_KEY_PREFIX = "c:open:quota:";
-
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(Duration.ofSeconds(5))
@@ -79,9 +75,6 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
 
     @Autowired
     private OpenAppService appService;
-
-    @Autowired
-    private StringRedisTemplate redis;
 
     @Autowired
     private com.newcoupon.application.service.TenantConfigService tenantConfigService;
@@ -107,9 +100,7 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("QPS 超限 → 429 + 6006 + Retry-After")
     void qpsExceeded_rejected() throws Exception {
-        prefillQps(LIMITED_APP, 99);
-
-        Call result = call(LIMITED_APP, limitedSecret);
+        Call result = exhaust(LIMITED_APP, limitedSecret, 5);   // 登记表 QPS 上限 = 2
 
         assertThat(result.status()).as(result.body()).isEqualTo(429);
         assertThat(result.body()).contains("6006");
@@ -121,9 +112,13 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("日配额超限 → 429 + 6007")
     void dailyQuotaExceeded_rejected() throws Exception {
-        prefillDaily(LIMITED_APP, 99);
+        // 必须用一个 **QPS 不限**的租户：否则连打时先撞上的是 QPS 限流（6006），
+        // 测不到日配额那条路径（本用例第一版就是这么错的）
+        String appId = "t-quota-daily";
+        String secret = appService.create(
+                new CreateAppRequest(appId, "只限日配额", 0, 3, null)).secret();
 
-        Call result = call(LIMITED_APP, limitedSecret);
+        Call result = exhaust(appId, secret, 8);   // 日配额 3
 
         assertThat(result.status()).as(result.body()).isEqualTo(429);
         assertThat(result.body()).contains("6007");
@@ -131,26 +126,24 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("放行的请求确实会让计数 +1（证明配额是真的在数，不是只在超限时才看一眼）")
-    void allowedRequest_incrementsCounters() throws Exception {
-        String qpsKey = qpsKey(LIMITED_APP);
-        redis.delete(qpsKey);
-        redis.delete(dailyKey(LIMITED_APP));
+    @DisplayName("配额是真的在数：连打到上限就被拒，而不是只在某个时刻看一眼")
+    void allowedRequests_consumeQuota() throws Exception {
+        // 一个 QPS 上限 = 1 的租户：第 1 个应当通过，第 2 个应当被拒
+        String appId = "t-quota-one";
+        String secret = appService.create(
+                new CreateAppRequest(appId, "上限一", 1, 0, null)).secret();
 
-        Call result = call(LIMITED_APP, limitedSecret);
-        assertThat(result.status()).as(result.body()).isEqualTo(200);
-
-        assertThat(redis.opsForValue().get(qpsKey)).as("QPS 计数").isEqualTo("1");
-        assertThat(redis.opsForValue().get(dailyKey(LIMITED_APP))).as("日配额计数").isEqualTo("1");
+        assertThat(call(appId, secret).status()).as("第 1 个：消耗掉唯一配额").isEqualTo(200);
+        assertThat(call(appId, secret).status()).as("第 2 个：配额已用完").isEqualTo(429);
     }
 
     @Test
-    @DisplayName("配额为 0 = 不限：预填再大的计数也不拦（内部应用用）")
+    @DisplayName("配额为 0 = 不限：连打多少次都不拦（内部应用用）")
     void unlimitedApp_neverThrottled() throws Exception {
-        prefillQps(UNLIMITED_APP, 999_999);
-        prefillDaily(UNLIMITED_APP, 999_999);
-
-        Call result = call(UNLIMITED_APP, unlimitedSecret);
+        Call result = null;
+        for (int i = 0; i < 20; i++) {
+            result = call(UNLIMITED_APP, unlimitedSecret);
+        }
 
         assertThat(result.status()).as(result.body())
                 .as("0=不做这个判断，而不是'给个很大的数'").isEqualTo(200);
@@ -161,15 +154,13 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     void tenantConfig_overridesRegisteredThreshold() throws Exception {
         clearConfig();   // 起点干净："配置是持久化的"，用例必须自己保证幂等
 
-        prefillQps(CFG_APP, 5);
-        assertThat(call(CFG_APP, cfgSecret).status())
-                .as("未配 → 用登记表的阈值 2，预填 5 应当被限").isEqualTo(429);
+        assertThat(exhaust(CFG_APP, cfgSecret, 5).status())
+                .as("未配 → 用登记表的阈值 2，连打 5 次应当被限").isEqualTo(429);
 
         tenantConfigService.put(CFG_APP, java.util.Map.of("rate_limit.qps", "1000"), "test");
 
-        prefillQps(CFG_APP, 5);
-        assertThat(call(CFG_APP, cfgSecret).status())
-                .as("配了 1000 → 同样的预填计数应当放行（证明读的是租户配置）").isEqualTo(200);
+        assertThat(exhaust(CFG_APP, cfgSecret, 5).status())
+                .as("配了 1000 → 同样连打 5 次应当全部放行（证明读的是租户配置）").isEqualTo(200);
     }
 
     @Test
@@ -177,13 +168,29 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     void tenantConfig_doesNotAffectOtherTenants() throws Exception {
         tenantConfigService.put(CFG_APP, java.util.Map.of("rate_limit.qps", "1000"), "test");
 
-        prefillQps(CFG_APP, 5);
-        assertThat(call(CFG_APP, cfgSecret).status())
-                .as("配了 1000 的那个租户放行").isEqualTo(200);
+        assertThat(exhaust(CFG_APP, cfgSecret, 5).status())
+                .as("配了 1000 的那个租户：连打 5 次全部放行").isEqualTo(200);
 
-        prefillQps(LIMITED_APP, 5);
-        assertThat(call(LIMITED_APP, limitedSecret).status())
+        assertThat(exhaust(LIMITED_APP, limitedSecret, 5).status())
                 .as("没配的租户仍按登记表的 2 被限——配置不外溢").isEqualTo(429);
+    }
+
+    /**
+     * 连打到被拒为止（最多 attempts 次），返回**被拒的那一次**；一次都没被拒就返回最后一次。
+     *
+     * <p><b>为什么不预填计数器</b>：预填要依赖"限流器内部用的是什么键"，而键格式是实现细节——
+     * 换一种算法（固定窗口 → 滑动窗口）键就变了，用例会莫名其妙地红。
+     * **测外部行为，不测内部结构**：连打到被拒，既不依赖键格式，也不依赖算法的边界特性。
+     */
+    private Call exhaust(String appId, String secret, int attempts) throws Exception {
+        Call last = null;
+        for (int i = 0; i < attempts; i++) {
+            last = call(appId, secret);
+            if (last.status() == 429) {
+                return last;
+            }
+        }
+        return last;
     }
 
     /** 清掉配置租户的那一项（配置持久化，用例必须自己保证"起点干净"） */
@@ -198,22 +205,6 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     // ------------------------------------------------------------------
 
     private record Call(int status, String body, String retryAfter) {
-    }
-
-    private void prefillQps(String appId, long value) {
-        redis.opsForValue().set(qpsKey(appId), String.valueOf(value), Duration.ofSeconds(5));
-    }
-
-    private void prefillDaily(String appId, long value) {
-        redis.opsForValue().set(dailyKey(appId), String.valueOf(value), Duration.ofSeconds(60));
-    }
-
-    private static String qpsKey(String appId) {
-        return QPS_KEY_PREFIX + appId + ":" + (System.currentTimeMillis() / 1000);
-    }
-
-    private static String dailyKey(String appId) {
-        return DAILY_KEY_PREFIX + appId + ":" + LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE);
     }
 
     private Call call(String appId, String secret) throws Exception {

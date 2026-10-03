@@ -18,6 +18,8 @@ import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,19 +59,26 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     static final String DAILY_KEY_PREFIX = "c:open:quota:";
     private static final String RETRY_AFTER = "Retry-After";
 
+    /** 默认算法：租户没配或配了不存在的算法时用它 */
+    private static final String DEFAULT_ALGORITHM = "sliding_window";
+
     private final CachedOpenAppReader appReader;
-    private final RateLimiter rateLimiter;
     private final ObjectMapper objectMapper;
     private final TenantConfigService tenantConfigService;
 
+    /** 算法标识 → 限流器实现。**按实现自报的 algorithm() 建索引**，而不是靠 bean 名字去猜 */
+    private final Map<String, RateLimiter> limitersByAlgorithm;
+
     public OpenApiQuotaFilter(CachedOpenAppReader appReader,
-                              RateLimiter rateLimiter,
+                              List<RateLimiter> limiters,
                               ObjectMapper objectMapper,
                               TenantConfigService tenantConfigService) {
         this.appReader = appReader;
-        this.rateLimiter = rateLimiter;
         this.objectMapper = objectMapper;
         this.tenantConfigService = tenantConfigService;
+        this.limitersByAlgorithm = limiters.stream()
+                .collect(java.util.stream.Collectors.toMap(RateLimiter::algorithm, l -> l));
+        log.info("限流器已装配：{}", limitersByAlgorithm.keySet());
     }
 
     @Override
@@ -108,7 +117,7 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
             return true;
         }
         String key = QPS_KEY_PREFIX + appId + ":" + (System.currentTimeMillis() / 1000);
-        if (acquireSafely(key, limit, Duration.ofSeconds(2))) {
+        if (acquireSafely(appId, key, limit, Duration.ofSeconds(2))) {
             return true;
         }
         reject(response, ErrorCode.QPS_LIMIT_EXCEEDED, "1");   // 下一秒就是新窗口
@@ -124,7 +133,7 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         // 计数器活到次日 00:05（而不是 24h）：按自然日重置，跨天边界留 5 分钟余量
         LocalDateTime expireAt = LocalDate.now().plusDays(1).atTime(0, 5);
         String key = DAILY_KEY_PREFIX + appId + ":" + day;
-        if (acquireSafely(key, limit, Duration.between(LocalDateTime.now(), expireAt))) {
+        if (acquireSafely(appId, key, limit, Duration.between(LocalDateTime.now(), expireAt))) {
             return true;
         }
         long secondsUntilTomorrow = Duration.between(LocalDateTime.now(),
@@ -147,14 +156,32 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         return tenantConfigService.getInt(appId, key);
     }
 
-    /** fail-open：限流器抛异常时放行（配额是可用性防线，不因中间件故障误杀全量接入方） */
-    private boolean acquireSafely(String key, int limit, Duration ttl) {
+    /**
+     * 按租户配置挑算法并执行；**fail-open**（配额是可用性防线，不因中间件故障误杀全量接入方）。
+     *
+     * <p>算法来自租户配置 {@code rate_limit.algorithm}；配了不存在的算法会回落到默认算法
+     * （而不是抛异常）——配置写错是运维问题，不该变成用户的请求失败。
+     */
+    private boolean acquireSafely(String appId, String key, int limit, Duration ttl) {
+        RateLimiter limiter = pickLimiter(appId);
         try {
-            return rateLimiter.tryAcquire(key, limit, ttl);
+            return limiter.tryAcquire(key, limit, ttl);
         } catch (RuntimeException e) {
             log.error("配额检查失败（Redis 不可用），放行：key={}", key, e);
             return true;
         }
+    }
+
+    private RateLimiter pickLimiter(String appId) {
+        String algorithm = tenantConfigService.get(appId, TenantConfigKey.RATE_LIMIT_ALGORITHM);
+        RateLimiter limiter = algorithm == null ? null : limitersByAlgorithm.get(algorithm);
+        if (limiter == null) {
+            if (algorithm != null) {
+                log.warn("租户配置了未知的限流算法，回落默认：appId={} algorithm={}", appId, algorithm);
+            }
+            limiter = limitersByAlgorithm.get(DEFAULT_ALGORITHM);
+        }
+        return limiter;
     }
 
     private void reject(HttpServletResponse response, ErrorCode code, String retryAfterSeconds)

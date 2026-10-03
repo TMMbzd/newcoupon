@@ -36,4 +36,9 @@ public class FixedWindowRateLimiter implements RateLimiter {
         }
         return count == null || count <= limit;
     }
+
+    @Override
+    public String algorithm() {
+        return "fixed_window";
+    }
 }

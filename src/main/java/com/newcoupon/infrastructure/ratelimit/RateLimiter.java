@@ -28,4 +28,12 @@ public interface RateLimiter {
      * @return true=放行；false=超限
      */
     boolean tryAcquire(String key, int limit, Duration ttl);
+
+    /**
+     * 算法标识——与租户配置 {@code rate_limit.algorithm} 的取值一一对应。
+     *
+     * <p>S2 第 4 步加入：有了多个实现之后，调用方需要"按租户配置挑一个"，
+     * 所以实现必须能自报家门，而不是靠 bean 名字去猜。
+     */
+    String algorithm();
 }
