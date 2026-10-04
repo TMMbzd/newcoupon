@@ -29,4 +29,25 @@ public abstract class ShardedIntegrationTestSupport {
             // "到点即扫"类断言（如 L5 的 next_scan_time<=NOW()）要等 8 小时才成立
             .withEnv("TZ", "Asia/Shanghai");
 
+    /** 熔断器（可能为 null：不涉及治理组件的测试类不装配它） */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers circuitBreakers;
+
+    /**
+     * 每个用例之后复位熔断器。
+     *
+     * <p><b>为什么必须在基类做</b>：熔断器的状态是**进程级**的（一个应用进程一份），
+     * 而测试类共享同一个 Spring 上下文 —— 于是"某个用例的压力把连接池打满、熔断打开"
+     * 会**波及同批跑的其它用例**（实测：领券用例集里千并发那条一跑，后面几条全报"系统繁忙"）。
+     *
+     * <p>这不是熔断器的问题（连接池满确实该熔断），而是**测试之间共享了一个有状态组件**。
+     * 处理方式与"用例数据不共享"同一个原则：**让每个用例从同一个起点开始**。
+     */
+    @org.junit.jupiter.api.AfterEach
+    void resetCircuitBreakers() {
+        if (circuitBreakers != null) {
+            circuitBreakers.redis().reset();
+            circuitBreakers.mysql().reset();
+        }
+    }
 }

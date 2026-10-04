@@ -68,6 +68,7 @@ public class ReceiveAppService {
     private final CachedTemplateReader cachedTemplateReader;
     private final ReceiveMetrics metrics;
     private final org.springframework.data.redis.core.StringRedisTemplate redis;
+    private final com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers breakers;
 
     public ReceiveAppService(UserCouponRepository userCouponRepository,
                              TemplateRepository templateRepository,
@@ -78,7 +79,8 @@ public class ReceiveAppService {
                              StockBucketRouter stockBucketRouter,
                              CachedTemplateReader cachedTemplateReader,
                              ReceiveMetrics metrics,
-                             org.springframework.data.redis.core.StringRedisTemplate redis) {
+                             org.springframework.data.redis.core.StringRedisTemplate redis,
+                             com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers breakers) {
         this.userCouponRepository = userCouponRepository;
         this.templateRepository = templateRepository;
         this.issueTxService = issueTxService;
@@ -89,6 +91,7 @@ public class ReceiveAppService {
         this.cachedTemplateReader = cachedTemplateReader;
         this.metrics = metrics;
         this.redis = redis;
+        this.breakers = breakers;
     }
 
     public ReceiveResult receive(ReceiveRequest req) {
@@ -103,6 +106,36 @@ public class ReceiveAppService {
             throw e;
         } finally {
             metrics.stop(sample);
+        }
+    }
+
+    /**
+     * 库存闸门调用**统一收口**（S2 第 7 步）。
+     *
+     * <p>领券有多条重试与分类路径（共 9 处调用同一个闸门），逐个包熔断既难看又容易漏。
+     * 收口到一个方法之后，"**所有 Redis 闸门调用都过熔断**"成了结构性事实，而不是靠人记得。
+     */
+    private DeductResult deductThroughBreaker(DeductCommand cmd) {
+        return withBreaker(breakers.redis(), ErrorCode.DEGRADED, "库存闸门",
+                () -> stockGateway.deduct(cmd));
+    }
+
+    /**
+     * 给一次依赖调用套上熔断器。
+     *
+     * <p>熔断打开时 Resilience4j 抛 {@code CallNotPermittedException}——**在入口处快速失败**，
+     * 这正是熔断的意义：不让每个请求都去等那个已经不可用的依赖的超时。
+     * 我们把它翻译成业务码（Redis→5001 可重试 / 数据库→5000 系统繁忙），而不是把框架异常漏给用户。
+     *
+     * <p>业务异常（售罄、限领等）不会被计入失败率——那在熔断器配置里用 ignoreExceptions 排除了。
+     */
+    private <T> T withBreaker(io.github.resilience4j.circuitbreaker.CircuitBreaker breaker,
+                              ErrorCode code, String what, java.util.function.Supplier<T> call) {
+        try {
+            return breaker.executeSupplier(call);
+        } catch (io.github.resilience4j.circuitbreaker.CallNotPermittedException e) {
+            log.warn("依赖熔断打开，快速失败：{}", what);
+            throw new BizException(code, "依赖暂时不可用（" + what + "），请稍后重试");
         }
     }
 
@@ -155,18 +188,18 @@ public class ReceiveAppService {
                 template.getPerUserLimit(), template.getPerUserDailyLimit(), template.getDailyLimit(),
                 LocalDate.now().format(DAY), DAY_TTL_SEC, IDEM_TTL_SEC,
                 stockBucketRouter.preferred(req.userId()));   // P2b 路由亲和（v2 §3）
-        DeductResult d = stockGateway.deduct(cmd);
+        DeductResult d = deductThroughBreaker(cmd);
         d = healLimitRejectIfCounterLeaked(req, cmd, d);   // L42①：限领计数虚高时先复核再拒
         if (d.code() == -7) {
             // A2'：注册表空（清库/Redis 灾难）。随机退避把"同时再击"摊开；
             // ENSURE 按 DB 权威行一次性重建（按 quota-used 推导铸 stk，幂等）。
             backoffQuietly();
             stockBucketRouter.ensureRegisteredBuckets(req.templateId());
-            d = stockGateway.deduct(cmd);
+            d = deductThroughBreaker(cmd);
             if (d.code() == -7 && stockBucketRouter.tryOpenBucket(req.templateId())) {
                 // 兜底（审查 P1）：DB 有额度但一行活跃桶都没有（如 V10 前形态/回填缺口）——
                 // 把"首桶缺失"视为可开桶状态，而不是死路 DEGRADED
-                d = stockGateway.deduct(cmd);
+                d = deductThroughBreaker(cmd);
             }
             if (d.code() == -7) {
                 throw new BizException(ErrorCode.DEGRADED, "库存服务暂不可用，请稍后重试");
@@ -180,7 +213,7 @@ public class ReceiveAppService {
             // 正常惊群里尾量正被别人消费时它也成立，据它降级会把售罄风暴变成 5001 风暴（批 1 实锤）。
             if (stockGateway.anyStkKeyMissing(req.templateId())
                     && stockBucketRouter.rebuildMissingKeys(req.templateId())) {
-                d = stockGateway.deduct(cmd);
+                d = deductThroughBreaker(cmd);
             }
             // P2b v2 §5：全桶耗尽 → 开桶协议（single-flight+尾量+尾差恢复）。
             // 抢不到开桶锁≠售罄——别人正在开，短退避后重试（v2 §5 ①的原义，含夹缝自愈重放）；
@@ -200,14 +233,14 @@ public class ReceiveAppService {
                     if (stockGateway.openLockHeld(req.templateId())
                             || stockBucketRouter.hasAllocationGap(req.templateId())) {
                         backoffQuietly();
-                        d = stockGateway.deduct(cmd);
+                        d = deductThroughBreaker(cmd);
                         continue;
                     }
-                    d = stockGateway.deduct(cmd);   // 生产已停：门当场复核（可能已有货）
+                    d = deductThroughBreaker(cmd);   // 生产已停：门当场复核（可能已有货）
                     break;                          // 复核结果即终局（成功→继续发券；-10→真售罄）
                 }
                 backoffQuietly();
-                d = stockGateway.deduct(cmd);
+                d = deductThroughBreaker(cmd);
             }
             if (d.code() == -10 && (!stockBucketRouter.soldOutInDb(req.templateId())
                     || stockBucketRouter.hasAllocationGap(req.templateId()))) {
@@ -227,8 +260,12 @@ public class ReceiveAppService {
         //    P0 修复①②（2026-09-12）：confirm 单独兜底——它失败绝不回滚已提交事务的记账；
         //    RuntimeException 分支先探 DB 定案再决定动作——"不确定提交"不得盲目补偿。
         try {
-            UserCoupon issued = issueTxService.issue(req, template, d.seq(),
-                    d.bucket(), d.gen(), LocalDateTime.now());
+            // d 在前面几条重试路径里被重新赋过值，lambda 只能捕获 effectively final 的变量——
+            // 所以先取一份快照（这也让"这次落库用的是哪次扣减的结果"变得明确）
+            final DeductResult deducted = d;
+            UserCoupon issued = withBreaker(breakers.mysql(), ErrorCode.SYSTEM_ERROR, "落库",
+                    () -> issueTxService.issue(req, template, deducted.seq(),
+                            deducted.bucket(), deducted.gen(), LocalDateTime.now()));
             confirmQuietly(cmd, d);   // 修复①：DB 已提交，用户结果已定——confirm 失败只记日志放行
             return ReceiveResult.of(issued, false);
         } catch (DuplicateKeyException e) {
@@ -352,7 +389,7 @@ public class ReceiveAppService {
             }
             log.warn("limit counter leaked (redis said full, db says {}/{}): templateId={}, userId={}, code={}"
                     + " — healed & retrying", actual, limit, req.templateId(), req.userId(), d.code());
-            return stockGateway.deduct(cmd);
+            return deductThroughBreaker(cmd);
         } catch (RuntimeException e) {
             log.error("limit counter verify failed (keep gate decision): templateId={}, userId={}",
                     req.templateId(), req.userId(), e);
@@ -374,7 +411,7 @@ public class ReceiveAppService {
             if (stockBucketRouter.refillExhaustedBuckets(req.templateId())
                     || stockBucketRouter.tryOpenBucket(req.templateId())) {
                 backoffQuietly();
-                DeductResult d2 = stockGateway.deduct(cmd);
+                DeductResult d2 = deductThroughBreaker(cmd);
                 if (d2.success()) {
                     try {
                         UserCoupon issued = issueTxService.issue(req, template, d2.seq(),
