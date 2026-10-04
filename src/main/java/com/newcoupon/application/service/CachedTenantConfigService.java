@@ -6,6 +6,7 @@ import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
+import com.newcoupon.common.cache.CacheTtl;
 import com.newcoupon.domain.repository.OpenAppRepository;
 import com.newcoupon.infrastructure.persistence.mapper.OpenAppConfigLogMapper;
 import com.newcoupon.infrastructure.persistence.mapper.OpenAppConfigMapper;
@@ -13,7 +14,6 @@ import com.newcoupon.infrastructure.persistence.po.OpenAppConfigLogPO;
 import com.newcoupon.infrastructure.persistence.po.OpenAppConfigPO;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,25 +68,21 @@ public class CachedTenantConfigService implements TenantConfigService {
                 .expireAfter(new Expiry<String, Map<String, String>>() {
                     @Override
                     public long expireAfterCreate(String key, Map<String, String> value, long now) {
-                        return now + TimeUnit.NANOSECONDS.convert(jitter(), TimeUnit.MILLISECONDS);
+                        // 返回的是**持续时长**（带 ±20% 防雪崩抖动），不是绝对时刻——
+                        // 这里曾写成 now + 时长，导致条目实际存活 = JVM 已运行时长 + TTL（见 CacheTtl 注释）
+                        return CacheTtl.jitteredNanos(ttlMillis);
                     }
 
                     @Override
                     public long expireAfterUpdate(String key, Map<String, String> value,
                                                   long now, long previousDuration) {
-                        return now + TimeUnit.NANOSECONDS.convert(jitter(), TimeUnit.MILLISECONDS);
+                        return CacheTtl.jitteredNanos(ttlMillis);
                     }
 
                     @Override
                     public long expireAfterRead(String key, Map<String, String> value,
                                                 long now, long currentDuration) {
                         return currentDuration;   // 读不续命
-                    }
-
-                    /** 防雪崩：±20% 抖动，打散同时装载的租户配置的过期时刻 */
-                    private long jitter() {
-                        return Math.max(1, ttlMillis + ThreadLocalRandom.current().nextLong(
-                                -(ttlMillis / 5), ttlMillis / 5 + 1));
                     }
                 })
                 .build(this::load);
@@ -234,9 +230,24 @@ public class CachedTenantConfigService implements TenantConfigService {
 
     private Map<String, String> load(String appId) {
         Map<String, String> result = new HashMap<>();
-        for (OpenAppConfigPO po : mapper.selectList(
-                new QueryWrapper<OpenAppConfigPO>().eq("app_id", appId))) {
-            result.put(po.getConfigKey(), po.getConfigValue());
+        try {
+            for (OpenAppConfigPO po : mapper.selectList(
+                    new QueryWrapper<OpenAppConfigPO>().eq("app_id", appId))) {
+                result.put(po.getConfigKey(), po.getConfigValue());
+            }
+        } catch (RuntimeException e) {
+            // 回源失败 → 当作「该租户没有任何配置」（全走默认值），**不让 DB 抖动穿到调用方**。
+            //
+            // 这是本接口三条不可让步规则的第 1 条（读不到就用默认值）在故障场景下的兑现：
+            // 没有兜底时，DB 抖动 + 缓存硬过期会让每一次读取都抛异常——而开关判断
+            // 挂在**全路径拦截器**上，等于把所有接口一起打挂。**保命组件不能自己变成故障放大器。**
+            //
+            // 注意这里是"返回空"而不是"保留旧值"：Caffeine 的 refreshAfterWrite 在回源失败时
+            // 本来就会保留旧值（异步刷新不覆盖），只有**硬过期后**的同步装载才会走到这里——
+            // 那一刻旧值已被丢弃，能给的只有默认值。
+            log.warn("租户配置回源失败，本次按「无配置」处理（全走默认值）：appId={} err={}",
+                    appId, e.toString());
+            return Map.of();
         }
         log.debug("租户配置回源：appId={} 项数={}", appId, result.size());
         return result;

@@ -3,10 +3,10 @@ package com.newcoupon.application.service;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.newcoupon.common.cache.CacheTtl;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.repository.TemplateRepository;
 import java.util.Optional;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,22 +64,19 @@ public class CachedTemplateReader {
                 .expireAfter(new Expiry<Long, Optional<CouponTemplate>>() {
                     @Override
                     public long expireAfterCreate(Long key, Optional<CouponTemplate> value, long now) {
-                        return now + TimeUnit.NANOSECONDS.convert(jitter(ttlFor(value)), TimeUnit.MILLISECONDS);
+                        // 返回**持续时长**（含 ±20% 防雪崩抖动）——见 CacheTtl 的注释：
+                        // 这里曾写成 now + 时长，导致条目实际存活 = JVM 已运行时长 + TTL
+                        return CacheTtl.jitteredNanos(ttlFor(value));
                     }
                     @Override
                     public long expireAfterUpdate(Long key, Optional<CouponTemplate> value,
                                                   long now, long previousDuration) {
-                        return now + TimeUnit.NANOSECONDS.convert(jitter(ttlFor(value)), TimeUnit.MILLISECONDS);
+                        return CacheTtl.jitteredNanos(ttlFor(value));
                     }
                     @Override
                     public long expireAfterRead(Long key, Optional<CouponTemplate> value,
                                                 long now, long currentDuration) {
                         return currentDuration;   // 读不续命
-                    }
-                    /** 防雪崩：±20% 抖动（毫秒），打散同时装载条目的过期时刻 */
-                    private long jitter(long baseMillis) {
-                        return Math.max(1, baseMillis + ThreadLocalRandom.current().nextLong(
-                                -(baseMillis / 5), baseMillis / 5 + 1));
                     }
                     /** 防穿透：负缓存独立短 TTL */
                     private long ttlFor(Optional<CouponTemplate> value) {
