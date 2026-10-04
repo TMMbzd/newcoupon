@@ -102,6 +102,19 @@ public class CachedTenantConfigService implements TenantConfigService {
     }
 
     @Override
+    public String getRaw(String appId, String configKey) {
+        if (appId == null || appId.isBlank()) {
+            return null;   // 无租户上下文 = 不参与租户层（内部面、定时任务）
+        }
+        Map<String, String> configs = cache.get(appId);   // load 已兜底：失败返回空 Map，不抛
+        if (configs == null) {
+            return null;
+        }
+        String value = configs.get(configKey);
+        return (value == null || value.isBlank()) ? null : value;
+    }
+
+    @Override
     public int getInt(String appId, TenantConfigKey key) {
         String raw = get(appId, key);
         if (raw == null) {

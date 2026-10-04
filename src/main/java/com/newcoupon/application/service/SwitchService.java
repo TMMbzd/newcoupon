@@ -33,17 +33,82 @@ public class SwitchService {
     private static final Logger log = LoggerFactory.getLogger(SwitchService.class);
 
     private final Environment environment;
+    private final TenantConfigService tenantConfig;
 
-    public SwitchService(Environment environment) {
+    public SwitchService(Environment environment, TenantConfigService tenantConfig) {
         this.environment = environment;
+        this.tenantConfig = tenantConfig;
     }
 
     /**
-     * 开关是否开启。**未配置 = 开启**（默认全开的理由见 {@link SwitchKey}）。
+     * 开关是否开启（不带租户上下文）。**未配置 = 开启**（默认全开的理由见 {@link SwitchKey}）。
+     *
+     * <p>内部面与定时任务走这里（它们没有接入方身份）；开放面走
+     * {@link #isOn(SwitchKey, String)} 以启用租户层覆盖。
      */
     public boolean isOn(SwitchKey key) {
-        String raw = environment.getProperty(key.propertyName());
-        return raw == null || Boolean.parseBoolean(raw.trim());
+        return isOn(key, null);
+    }
+
+    /**
+     * 开关是否开启——**三层取值**（S2 第 10 步）。
+     *
+     * <pre>
+     * ① 租户层（open_app_config: switch.receive.enabled）  ← 最具体，有则用
+     * ② 全站层（coupon.switch.receive.enabled）
+     * ③ 默认 true
+     * </pre>
+     *
+     * <p><b>为什么"没配过"必须与"配了 false"分开</b>：三层取值里，租户层"没配过"的语义是
+     * <b>继承全站层</b>，而不是"取自己的默认值"。所以判断租户层用的是
+     * {@link TenantConfigService#getRaw}（可空），**不能用 {@code getBool}**——
+     * 后者对 null 返回 false，会把"没配过"误判成"显式关闭"，
+     * 结果是一个什么都没配的租户，所有开关被静默关掉。
+     *
+     * @param appId 接入方身份（来自 {@code RequestContext}）。
+     *              {@code null} = 无租户上下文（内部面、定时任务）→ 跳过租户层。
+     *              <b>这条不对称是有意的</b>：内部调用没有"是谁在调"的身份，
+     *              租户策略对它无从谈起。
+     */
+    public boolean isOn(SwitchKey key, String appId) {
+        // ① 租户层
+        String tenantRaw = readTenantRawQuietly(appId, key);
+        if (tenantRaw != null) {
+            if (key.validate(tenantRaw) == null) {
+                return Boolean.parseBoolean(tenantRaw.trim());
+            }
+            // 值非法（只可能来自手工改库——写入时已被校验挡住）：**忽略租户层，继续往下走**。
+            // 注意不能"非法就返回 true"：那会让这个租户借一个拼错的值绕过全站关闭。
+            log.warn("租户开关取值非法，忽略该层并回落全站配置：appId={} key={} value={}",
+                    appId, key.key(), tenantRaw);
+        }
+        // ② 全站层
+        String globalRaw = environment.getProperty(key.propertyName());
+        if (globalRaw != null) {
+            return Boolean.parseBoolean(globalRaw.trim());
+        }
+        // ③ 默认全开
+        return true;
+    }
+
+    /**
+     * 读租户层的原始值；无租户上下文或读取失败 → {@code null}（等价于"该层没有发言权"）。
+     *
+     * <p><b>为什么这里还要 catch 一次</b>：{@code CachedTenantConfigService} 内部已经对回源失败
+     * 做了兜底，但开关判断挂在<b>全路径拦截器</b>上——任何一次意外异常都会让所有接口一起失败。
+     * 保命组件对"自己出问题"必须比对"依赖出问题"更保守：**宁可退化成只用全站层**。
+     */
+    private String readTenantRawQuietly(String appId, SwitchKey key) {
+        if (appId == null || appId.isBlank()) {
+            return null;
+        }
+        try {
+            return tenantConfig.getRaw(appId, key.configKey());
+        } catch (RuntimeException e) {
+            log.warn("读租户开关配置失败，本次跳过租户层：appId={} key={} err={}",
+                    appId, key.key(), e.toString());
+            return null;
+        }
     }
 
     /**

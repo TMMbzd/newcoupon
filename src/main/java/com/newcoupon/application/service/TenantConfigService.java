@@ -23,6 +23,23 @@ public interface TenantConfigService {
     String get(String appId, TenantConfigKey key);
 
     /**
+     * 读**原始值**（S2 第 10 步）：未配置返回 {@code null}，**不做任何解析或默认值回落**。
+     *
+     * <p><b>为什么必须单独有这个方法</b>：{@link #get} 在"没配过"时返回默认值，
+     * 调用方因此<b>无法区分</b>"运维显式配了 false"与"没人配过、取的是默认"。
+     * 开关的三层取值恰恰依赖这个区分——租户层"没配过"要<b>继承全站层</b>，
+     * 而不是取自己的默认值。
+     *
+     * <p>也正因如此，判断"租户有没有配过"**绝不能用 {@code getBool}**：
+     * 它对 null 返回 false，会把"没配过"误判成"显式关闭"，
+     * 结果是一个什么都没配的租户，所有开关都被静默关掉。
+     *
+     * @param configKey 存储键（{@code open_app_config.config_key}），
+     *                  如 {@code rate_limit.qps} 或 {@code switch.receive.enabled}
+     */
+    String getRaw(String appId, String configKey);
+
+    /**
      * 读整数配置。**解析失败回落默认值并记 WARN，绝不抛异常**——
      * 配置错误是运维问题，不该变成用户的请求失败。
      */

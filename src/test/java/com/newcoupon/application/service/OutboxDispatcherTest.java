@@ -37,7 +37,10 @@ class OutboxDispatcherTest {
     private final StockDriftLogGateway driftLog = mock(StockDriftLogGateway.class);
     private final OutboxDispatcher dispatcher =
             new OutboxDispatcher(mapper, publisher, scanLock, driftLog,
-                    new SwitchService(new org.springframework.core.env.StandardEnvironment()), 100, 8);
+                    // 投递开关是**全局**的：定时任务没有接入方身份，永远走全站层——
+                    // 所以这里的 TenantConfigService 不会被调用，给个 mock 即可
+                    new SwitchService(new org.springframework.core.env.StandardEnvironment(),
+                            mock(TenantConfigService.class)), 100, 8);
 
     private CouponOutboxPO row(int retryCount) {
         CouponOutboxPO po = new CouponOutboxPO();
