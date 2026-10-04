@@ -36,10 +36,12 @@ import org.springframework.beans.factory.annotation.Autowired;
  * 预案会写一批配置，共享租户必然互相污染。
  */
 @Timeout(value = 90, unit = TimeUnit.SECONDS)
-@org.springframework.boot.test.context.SpringBootTest(properties = {
-        "coupon.open.secret-master-key=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
-        "coupon.admin.token=test-admin-token"
-})
+@org.springframework.boot.test.context.SpringBootTest(
+        webEnvironment = org.springframework.boot.test.context.SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = {
+                "coupon.open.secret-master-key=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+                "coupon.admin.token=test-admin-token"
+        })
 class SwitchPlanIntegrationTest extends ShardedIntegrationTestSupport {
 
     @org.springframework.test.context.DynamicPropertySource
@@ -64,6 +66,12 @@ class SwitchPlanIntegrationTest extends ShardedIntegrationTestSupport {
 
     @Autowired
     private OpenAppConfigLogMapper logMapper;
+
+    @Autowired
+    private org.springframework.boot.test.web.client.TestRestTemplate rest;
+
+    @Autowired
+    private com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
     private String appId;
 
@@ -184,6 +192,76 @@ class SwitchPlanIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     // ------------------------------------------------------------------
+    // 管理面（HTTP 层）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("H1 无令牌套用预案 → 401 + 7002（预案写接口必须受管理面令牌保护）")
+    void h1_withoutTokenRejected() {
+        var headers = new org.springframework.http.HttpHeaders();
+        headers.setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
+
+        var r = rest.exchange("/api/apps/" + appId + "/plans/apply/YELLOW",
+                org.springframework.http.HttpMethod.POST,
+                new org.springframework.http.HttpEntity<>("{}", headers), String.class);
+
+        assertThat(r.getStatusCode().value())
+                .as("一个无鉴权的「一键降级」接口 = 暴露在网络上的 kill-switch："
+                        + "能把核心领券/核销全量打成 5001，也能把别人刚关掉的开关改回去")
+                .isEqualTo(401);
+        assertThat(r.getBody()).contains("7002");
+    }
+
+    @Test
+    @DisplayName("H2 带令牌套用 → 200，且配置真的被改了（不是「接口成功但什么都没写」）")
+    void h2_withTokenAppliesPlan() {
+        var r = rest.exchange("/api/apps/" + appId + "/plans/apply/YELLOW",
+                org.springframework.http.HttpMethod.POST,
+                new org.springframework.http.HttpEntity<>("{\"reason\":\"drill\"}", adminHeaders()),
+                String.class);
+
+        assertThat(r.getStatusCode().value()).isEqualTo(200);
+        assertThat(r.getBody()).contains("\"code\":0");
+        assertThat(configService.getRaw(appId, "switch.template.publish.enabled"))
+                .as("黄预案要关掉模板发布——接口返回成功但配置没变是必须防住的假绿")
+                .isEqualTo("false");
+    }
+
+    @Test
+    @DisplayName("H3 读取接口：当前预案 + 可选清单（运维要能看见「有哪些预案、各自会改什么」）")
+    void h3_listShowsActiveAndAvailable() throws Exception {
+        planService.apply(appId, SwitchPlan.YELLOW, OPERATOR, "test");
+
+        var r = rest.getForEntity("/api/apps/" + appId + "/plans", String.class);
+        var data = objectMapper.readTree(r.getBody()).path("data");
+
+        assertThat(data.path("active").path("level").asText()).isEqualTo("YELLOW");
+        assertThat(data.path("available"))
+                .as("三份预案都要列出来，且带着「会改哪些键」——出事时人不用翻代码")
+                .hasSize(3);
+    }
+
+    @Test
+    @DisplayName("H4 无令牌恢复 → 401（恢复同样是写操作，不能比套用松）")
+    void h4_revertWithoutTokenRejected() {
+        var headers = new org.springframework.http.HttpHeaders();
+        headers.setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
+
+        var r = rest.exchange("/api/apps/" + appId + "/plans/revert",
+                org.springframework.http.HttpMethod.POST,
+                new org.springframework.http.HttpEntity<>("{}", headers), String.class);
+
+        assertThat(r.getStatusCode().value()).isEqualTo(401);
+    }
+
+    // ------------------------------------------------------------------
+
+    private static org.springframework.http.HttpHeaders adminHeaders() {
+        var headers = new org.springframework.http.HttpHeaders();
+        headers.setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
+        headers.set("X-Admin-Token", "test-admin-token");
+        return headers;
+    }
 
     private long countLogs(String configKey) {
         return logMapper.selectCount(
