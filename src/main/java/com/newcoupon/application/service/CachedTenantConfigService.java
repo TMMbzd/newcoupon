@@ -149,7 +149,7 @@ public class CachedTenantConfigService implements TenantConfigService {
         }
         // ① 先全部校验：批量写入要么全成、要么全不成（不做部分写入）
         for (Map.Entry<String, String> e : values.entrySet()) {
-            TenantConfigKey key = TenantConfigKey.fromKey(e.getKey());
+            ConfigKeySpec key = resolveKey(e.getKey());
             if (key == null) {
                 throw new BizException(ErrorCode.PARAM_ERROR, "未登记的配置键：" + e.getKey());
             }
@@ -171,8 +171,7 @@ public class CachedTenantConfigService implements TenantConfigService {
     @org.springframework.transaction.annotation.Transactional
     public void remove(String appId, String key, String operator) {
         requireApp(appId);
-        TenantConfigKey configKey = TenantConfigKey.fromKey(key);
-        if (configKey == null) {
+        if (resolveKey(key) == null) {
             throw new BizException(ErrorCode.PARAM_ERROR, "未登记的配置键：" + key);
         }
         String old = currentValue(appId, key);
@@ -251,5 +250,23 @@ public class CachedTenantConfigService implements TenantConfigService {
         }
         log.debug("租户配置回源：appId={} 项数={}", appId, result.size());
         return result;
+    }
+
+    /**
+     * 组合解析配置键：先查租户策略词表（{@link TenantConfigKey}），再查开关清单（{@link SwitchKey}）。
+     *
+     * <p>（S2 第 10 步·词表对齐）两套词表各自独立存在，但<b>写入校验只有这一个入口</b>——
+     * 于是"开关能不能按租户配"变成一行解析，而不是把 8 个开关复制进 {@code TenantConfigKey}
+     * （复制必然漂移：漏一次，租户覆盖就静默失效；拼错一个键，语义永远读不到）。
+     *
+     * <p>两个 {@code fromXxx} 都是<b>精确匹配</b>——不做前缀匹配，
+     * 否则任意垃圾键都能写进配置表。
+     */
+    private static ConfigKeySpec resolveKey(String configKey) {
+        TenantConfigKey tenantKey = TenantConfigKey.fromKey(configKey);
+        if (tenantKey != null) {
+            return tenantKey;
+        }
+        return SwitchKey.fromConfigKey(configKey);
     }
 }

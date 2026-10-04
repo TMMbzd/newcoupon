@@ -11,7 +11,7 @@ package com.newcoupon.application.service;
  * <p><b>命名规范</b>：{@code 域.对象[.子项]}——与资源命名、开关命名共用同一套词汇，
  * 让"看到一个键就知道它管什么"。
  */
-public enum TenantConfigKey {
+public enum TenantConfigKey implements ConfigKeySpec {
 
     /**
      * 限流算法。
@@ -146,6 +146,17 @@ public enum TenantConfigKey {
     }
 
     public String key() {
+        return key;
+    }
+
+    /**
+     * 存储键 = {@link #key()}（租户配置项的键名本来就是完整的，不像开关要加 {@code switch.} 前缀）。
+     *
+     * <p>这个方法的存在是为了与 {@link SwitchKey} 共用 {@link ConfigKeySpec} 契约——
+     * 让写入校验能做**组合解析**，而不是维护两套并行的词表。
+     */
+    @Override
+    public String configKey() {
         return key;
     }
 

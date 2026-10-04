@@ -14,8 +14,13 @@ package com.newcoupon.application.service;
  *
  * <p><b>默认全开</b>：开关是"出事时关"，不是"上线时开"。缺省为 true，
  * 少配一个开关不会让功能莫名消失。
+ *
+ * <p><b>S2 第 10 步起，开关可以按租户配置</b>：存储键是 {@code switch.<key>}
+ * （见 {@link #configKey()}），落在 {@code open_app_config} 里，
+ * 与其它租户策略共用一套写入校验、变更审计与缓存。取值三层：
+ * 租户配置 → 全站配置（{@code coupon.switch.*}）→ 默认 true。
  */
-public enum SwitchKey {
+public enum SwitchKey implements ConfigKeySpec {
 
     /** 领券总开关——关掉后所有领券请求返回 5001（可重试），库存与账目不受影响 */
     RECEIVE("receive.enabled", "领券入口总开关（关闭后领券返回 5001 可重试）"),
@@ -61,5 +66,57 @@ public enum SwitchKey {
 
     public String description() {
         return description;
+    }
+
+    // ------------------------------------------------------------------
+    // ConfigKeySpec（S2 第 10 步·词表对齐）
+    // ------------------------------------------------------------------
+
+    /**
+     * 在 {@code open_app_config} 里的存储键，如 {@code switch.receive.enabled}。
+     *
+     * <p>与 {@link #key()} 的区别：后者是开关自己的标识（{@code receive.enabled}），
+     * 前者带 {@code switch.} 前缀——配置表里一眼能看出"这一项是开关"。
+     */
+    @Override
+    public String configKey() {
+        return "switch." + key;
+    }
+
+    /** 开关只接受 true/false——拼错的布尔值必须在写入时就被挡住 */
+    @Override
+    public String validate(String value) {
+        if (value == null) {
+            return "配置值不能为 null（要删除请用删除接口）";
+        }
+        String trimmed = value.trim();
+        if (!"true".equalsIgnoreCase(trimmed) && !"false".equalsIgnoreCase(trimmed)) {
+            return "该配置项需要 true/false，收到：" + value;
+        }
+        return null;
+    }
+
+    /** 没配过时的行为：开（见类注释"默认全开"） */
+    @Override
+    public String defaultValue() {
+        return "true";
+    }
+
+    /**
+     * 按存储键反查（{@code switch.receive.enabled} → {@code RECEIVE}）；未登记返回 {@code null}。
+     *
+     * <p><b>只做精确匹配，不做前缀匹配</b>：写成"以 switch. 开头就放行"会让任意垃圾键
+     * 写进配置表。有一条用例专门钉这个边界。
+     */
+    public static SwitchKey fromConfigKey(String configKey) {
+        if (configKey == null) {
+            return null;
+        }
+        for (SwitchKey k : values()) {
+            if (k.configKey().equals(configKey)) {
+                return k;
+            }
+        }
+        return null;
     }
 }

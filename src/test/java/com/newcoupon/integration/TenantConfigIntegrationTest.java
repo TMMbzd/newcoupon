@@ -210,6 +210,50 @@ class TenantConfigIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     // ------------------------------------------------------------------
+    // S2 第 10 步·词表对齐：开关项要能按租户配置
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("第10步·开关项能按租户配置：PUT switch.<key> 不被词表拒绝")
+    void adminApi_switchKeyIsWritable() {
+        String url = "/api/apps/" + APP_A + "/config";
+
+        var r = put(url, "{\"switch.receive.enabled\":\"false\"}", "test-admin-token");
+
+        assertThat(r.getBody())
+                .as("开关与其它配置项共用同一套写入校验——否则「一键套用预案」第一次调用就整体失败，"
+                        + "而且是在出事的时候才发现")
+                .contains("\"code\":0");
+
+        // 读回确认真的落库（不是"接口返回成功但什么都没写"）
+        var g = rest.exchange(url, org.springframework.http.HttpMethod.GET,
+                new org.springframework.http.HttpEntity<>(adminHeaders("test-admin-token")), String.class);
+        assertThat(g.getBody()).contains("switch.receive.enabled").contains("false");
+    }
+
+    @Test
+    @DisplayName("第10步·开关项只认 true/false：写错被拒（不能把 flase 当成「配过了」）")
+    void adminApi_switchKeyRejectsNonBoolean() {
+        var bad = put("/api/apps/" + APP_A + "/config",
+                "{\"switch.receive.enabled\":\"flase\"}", "test-admin-token");
+
+        assertThat(bad.getBody())
+                .as("拼错的布尔值必须被写入校验挡住——写宽容会让「以为关了其实没关」成为常态")
+                .contains("true/false");
+    }
+
+    @Test
+    @DisplayName("第10步·判据不能放宽：长得像开关但没登记的键仍被拒（防「前缀匹配」式实现）")
+    void adminApi_unregisteredSwitchLikeKeyStillRejected() {
+        // 这条是**防回归**而不是红灯：它今天就是绿的，钉的是"别为了支持开关而把门拆了"——
+        // 一旦 fromConfigKey 写成"只要以 switch. 开头就放行"，任意垃圾键都能进配置表
+        var bad = put("/api/apps/" + APP_A + "/config",
+                "{\"switch.not_a_real_key.enabled\":\"false\"}", "test-admin-token");
+
+        assertThat(bad.getBody()).contains("未登记的配置键");
+    }
+
+    // ------------------------------------------------------------------
 
     private org.springframework.http.ResponseEntity<String> put(String url, String body, String token) {
         return rest.exchange(url, org.springframework.http.HttpMethod.PUT,
