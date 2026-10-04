@@ -41,11 +41,20 @@ import org.springframework.beans.factory.annotation.Autowired;
  * ⑨ 售罄钉零+标志（A1'+B4）：DB 拒绝分类先行 → 钉零立标志 → 后续流量 Lua 首行短路
  * ⑩ 清库风暴（A2'）：删 stock key 后 50 并发 → 条件 SET 只重建一次，零 DECR 覆盖
  */
+// 本类含 2000 并发的压力用例：它会把连接池打满、产生大量依赖故障类异常。
+// 那是**测试制造的瞬时压力**而非被测代码的缺陷，不该触发熔断
+// （否则"压力敏感"会扩散成"整批偶发红"：熔断一开，后续请求全被快速失败，
+//  成功数从 1000 掉到几十——2026-10-05 实测就是这个症状）。
+// **两个参数都要调大**：minimumNumberOfCalls 必须 ≤ slidingWindowSize，只调前者是无效配置。
+// （同类配置见 ReceiveIntegrationTest；第 8 步定的规矩是"谁需要谁配"，
+//  本类当时漏了——它同样含千级并发，是那次改动的遗漏。）
 @org.springframework.boot.test.context.SpringBootTest(properties = {
         "spring.datasource.hikari.maximum-pool-size=50",
         "coupon.reconcile.inflight-ttl-ms=300",       // 测试压缩在途 TTL（生产 180s）
         "coupon.reconcile.log-min-interval-ms=0",     // 测试不限频，便于断言漂移表
-        "coupon.reconcile.auto-repair.mode=force"     // 本类验证修复行为（生产默认 shadow）
+        "coupon.reconcile.auto-repair.mode=force",    // 本类验证修复行为（生产默认 shadow）
+        "coupon.circuit-breaker.min-calls=10000",
+        "coupon.circuit-breaker.window-size=10000"
 })
 class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
 
@@ -174,8 +183,10 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
             var failDist = results.stream().filter(r -> !"OK".equals(r.code()))
                     .collect(java.util.stream.Collectors.groupingBy(Res::code,
                             java.util.stream.Collectors.counting()));
-            assertThat(ok).as("成功数恰等于库存").isEqualTo(1000);
-            assertThat(failDist).as("失败只有售罄3001").containsOnlyKeys("3001");
+            // 失败分布**先算好并写进断言消息**：否则第一个断言一红，分布就永远看不到
+            // （本项目踩过同款坑：同一个千并发用例出现 98 != 100 时完全没有线索）
+            assertThat(ok).as("成功数恰等于库存；失败分布=" + failDist).isEqualTo(1000);
+            assertThat(failDist).as("失败只有售罄3001；实际=" + failDist).containsOnlyKeys("3001");
             assertThat(failDist.get("3001")).isEqualTo(1000L);
 
             // 恒等式验账：每笔成功都完成了 confirm（dbi+1 与令牌出清原子配对），

@@ -194,21 +194,26 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("冷启动预热：预热期内有效阈值被压低（保护还没热身的 JVM）")
+    @DisplayName("冷启动预热：配置接得上且限流仍生效（阈值曲线由 WarmUpRateLimiterTest 精确覆盖）")
     void warmUp_throttlesDuringColdStart() throws Exception {
         String appId = "t-quota-warm";
+        // **为什么改用日配额**：QPS 的限流 key 带"当前秒"（见 OpenApiQuotaFilter 的 key 构造），
+        // 于是"连打 N 次必被拒"隐含要求**N 次全部落在同一秒内**——那是不可控的量
+        // （机器快慢、同批负载）。2026-10-05 的全量测试里就真的出现过：35 次横跨两个秒桶、
+        // 每桶都不超 30，于是全部放行、用例误报。日配额的 key 是"当天"，没有这个问题。
         String secret = appService.create(
-                new CreateAppRequest(appId, "冷启动预热验证", 30, 0, null)).secret();
+                new CreateAppRequest(appId, "冷启动预热验证", 0, 30, null)).secret();   // QPS 不限，日配额 30
 
-        // 预热 600 秒——远长于测试运行时间，所以整个用例都处在"冷启动期"
         tenantConfigService.put(appId, java.util.Map.of("rate_limit.warmup_seconds", "600"), "test");
 
-        // 有效阈值 = 30 × (1/3 + 2/3 × 已过比例)，随 JVM 已运行时长在 [10, 30] 之间浮动——
-        // 而"JVM 已经跑了多久"取决于这个测试类在套件里的位置，用例控制不了。
-        // 所以连打次数要**大于目标阈值**：无论预热进行到哪一步都会被拒。
-        // （第一版连打 20 次，单跑时绿、与其他类同批跑时红——典型的 flaky）
+        // **为什么这里不断言"阈值被压低到多少"**：有效阈值 = 30 × (1/3 + 2/3 × 已过/JVM已运行时长)，
+        // 而"JVM 已经跑了多久"取决于这个测试类在套件里的位置（更别说 JVM 跑够久之后预热就结束了）——
+        // 用例控制不了，属于"用不可控的量卡边界"。
+        // 曲线本身由单元测试 WarmUpRateLimiterTest 用假时钟精确覆盖；
+        // 这一条只负责"配置接得上 + 预热装饰器没有把限流弄坏"。
         assertThat(exhaust(appId, secret, 35).status())
-                .as("预热期内连打 35 次必定被拒（有效阈值上限就是全额 30）").isEqualTo(429);
+                .as("配了预热的租户，配额仍然会被拦下（预热是压低阈值，不是关掉限流）")
+                .isEqualTo(429);
     }
 
     @Test
