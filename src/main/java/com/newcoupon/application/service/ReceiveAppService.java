@@ -196,6 +196,10 @@ public class ReceiveAppService {
         // 越权者不该从错误码里看出"这个模板是否在领取期"（那是别人的运营信息）
         AppOwnership.assertAccessible(template.getAppId(), "template:" + req.templateId());
         template.assertReceivable(LocalDateTime.now());
+        // S2 第 9 步·准入门：预算已耗尽就别开始干活。
+        // **放在归属判定之后**——越权请求应当返回 6011，不能被"预算耗尽"洗掉
+        //（既是错误归因，也会让审计丢掉"有人在探测别人模板"的信号）
+        com.newcoupon.common.context.DeadlineGuard.requireBudget();
 
         // ② Redis Lua 闸门——幂等检查内置于脚本（EXISTS 幂等key → -8 回 DB 确认）。
         //    设计取舍（2026-09-07 评审修正）：入口幂等只用 Redis——抢购洪峰中"首次领取"
@@ -280,11 +284,24 @@ public class ReceiveAppService {
             // d 在前面几条重试路径里被重新赋过值，lambda 只能捕获 effectively final 的变量——
             // 所以先取一份快照（这也让"这次落库用的是哪次扣减的结果"变得明确）
             final DeductResult deducted = d;
+            // S2 第 9 步·写地板：预算不足就不要**开始**一次写事务（写一旦开始必须做完，不能中断）。
+            // **关键：库存已经扣了，直接退出会留下孤儿状态**——所以先补偿再抛。
+            if (com.newcoupon.common.context.DeadlineGuard.belowFloor(
+                    com.newcoupon.common.context.DeadlineGuard.WRITE_FLOOR_MS)) {
+                cancelQuietly(cmd, deducted, CancelCause.TRANSIENT);
+                throw new BizException(ErrorCode.REQUEST_BUDGET_EXHAUSTED);
+            }
             UserCoupon issued = withBreakers("mysql", ErrorCode.SYSTEM_ERROR, "落库",
                     () -> issueTxService.issue(req, template, deducted.seq(),
                             deducted.bucket(), deducted.gen(), LocalDateTime.now()));
             confirmQuietly(cmd, d);   // 修复①：DB 已提交，用户结果已定——confirm 失败只记日志放行
             return ReceiveResult.of(issued, false);
+        } catch (BizException e) {
+            // **预算耗尽等主动业务拒绝必须原样抛出**：否则会被下面的 catch(RuntimeException)
+            // 接住、误入"不确定提交"恢复路径——那里会再打一次 DB 探针（池满时又是 3 秒）
+            // 并按不确定提交记一条 ERROR 日志，而这里根本不存在"不确定提交"。
+            // （对抗性审查发现的真实缺陷：写地板主动抛的 5003 走了这条路。）
+            throw e;
         } catch (DuplicateKeyException e) {
             cancelQuietly(cmd, d, CancelCause.TRANSIENT);   // 计数还原+库存回加，令牌出清
             return classifyAfterRollback(req, cmd, retryOnce, e);
@@ -360,7 +377,20 @@ public class ReceiveAppService {
     }
 
     /** A2'：-7 重试前的随机退避 50~200ms——削平"清库后同一批请求同时再击 DB"的雷击 */
+    /**
+     * 退避等待（重试之间）。
+     *
+     * <p>S2 第 9 步在这里加了**重试地板**：退避是"还要再试一次"的信号，
+     * 所以在这个位置判断"剩余预算还够不够一次完整的依赖调用 + 退避"最精确——
+     * 明知会超时还给一个已经被上游放弃的请求再等一秒，是纯粹的浪费，而且会占着线程。
+     */
     private void backoffQuietly() {
+        if (com.newcoupon.common.context.DeadlineGuard.belowFloor(
+                com.newcoupon.common.context.DeadlineGuard.RETRY_FLOOR_MS)) {
+            // 用专属码而不是 5001：5001 已经被"熔断降级"和"Redis 故障"占着，
+            // 排障时再加一个来源就分不清了（这正是 5003 存在的理由）
+            throw new BizException(ErrorCode.REQUEST_BUDGET_EXHAUSTED, "剩余预算不足以重试");
+        }
         try {
             Thread.sleep(50 + ThreadLocalRandom.current().nextInt(150));
         } catch (InterruptedException ie) {
@@ -430,12 +460,24 @@ public class ReceiveAppService {
                 backoffQuietly();
                 DeductResult d2 = deductThroughBreaker(cmd);
                 if (d2.success()) {
+                    // 对抗性审查发现的**两处遗漏**，都发生在这个落库点：
+                    // ① 它与主路径是两条独立的写路径，但原来只有主路径有写地板与熔断；
+                    // ② 它的 catch(RuntimeException) 同样会劫持主动抛出的业务拒绝。
+                    // 设计文档 §4.5.2 的要求（"进入落库前不足则先补偿再抛"）对**所有**落库点成立。
+                    if (com.newcoupon.common.context.DeadlineGuard.belowFloor(
+                            com.newcoupon.common.context.DeadlineGuard.WRITE_FLOOR_MS)) {
+                        cancelQuietly(cmd, d2, CancelCause.TRANSIENT);
+                        throw new BizException(ErrorCode.REQUEST_BUDGET_EXHAUSTED);
+                    }
                     try {
-                        UserCoupon issued = issueTxService.issue(req, template, d2.seq(),
-                                d2.bucket(), d2.gen(), LocalDateTime.now());
+                        UserCoupon issued = withBreakers("mysql", ErrorCode.SYSTEM_ERROR, "落库",
+                                () -> issueTxService.issue(req, template, d2.seq(),
+                                        d2.bucket(), d2.gen(), LocalDateTime.now()));
                         confirmQuietly(cmd, d2);
                         metrics.recordFalseSelloutAid();
                         return ReceiveResult.of(issued, false);
+                    } catch (BizException e) {
+                        throw e;   // 主动业务拒绝原样抛出，不当作"不确定提交"
                     } catch (RuntimeException e) {
                         return recoverUncertainOutcome(req, cmd, d2, e);
                     }

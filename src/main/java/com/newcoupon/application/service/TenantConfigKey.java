@@ -33,8 +33,14 @@ public enum TenantConfigKey {
     /** 冷启动预热时长（秒）：0 = 不预热 */
     RATE_LIMIT_WARMUP_SECONDS("rate_limit.warmup_seconds", "0", Type.INT, "冷启动预热时长（秒，0=不预热）"),
 
-    /** 未带 X-Timeout-Ms 时的默认时间预算（毫秒） */
-    TIMEOUT_DEFAULT_MS("timeout.default_ms", "3000", Type.INT, "默认时间预算（毫秒）"),
+    /**
+     * 未带 X-Timeout-Ms 时的默认时间预算（毫秒）——**下限取重试地板**。
+     *
+     * <p>下限不是随手定的：低于 {@code DeadlineGuard.RETRY_FLOOR_MS}（1200）的预算会让该租户
+     * 每个请求都在"扣减成功 → 写地板补偿 → 拒绝"之间空转——成功率归零，还要白占一次 Redis 与取消。
+     * 上限与请求头的上限（30000）一致，避免"走头"与"走配置"两条路径行为不一致。
+     */
+    TIMEOUT_DEFAULT_MS("timeout.default_ms", "3000", Type.INT, "默认时间预算（毫秒，1200~30000）", 1200, 30_000),
 
     /** 熔断的异常比例阈值（百分比） */
     CIRCUIT_BREAKER_FAILURE_RATE("circuit_breaker.failure_rate", "50", Type.INT, "熔断：异常比例阈值（%）"),
@@ -55,13 +61,35 @@ public enum TenantConfigKey {
     private final Type type;
     private final String description;
     private final java.util.Set<String> allowedValues;
+    private final Integer minValue;
+    private final Integer maxValue;
 
+    /** 枚举式取值（allowedValues 非空即校验取值必须在其中） */
     TenantConfigKey(String key, String defaultValue, Type type, String description, String... allowedValues) {
         this.key = key;
         this.defaultValue = defaultValue;
         this.type = type;
         this.description = description;
         this.allowedValues = java.util.Set.of(allowedValues);
+        this.minValue = null;
+        this.maxValue = null;
+    }
+
+    /**
+     * 数值型取值范围。
+     *
+     * <p><b>为什么要范围</b>：只校验"能不能解析成整数"是不够的——配成 0 或负数会让该租户每个请求
+     * 立即过期（整片 5001），配成 10^9 又等于没有约束。**越界的值比写错格式更危险**，
+     * 因为它看起来是合法的。
+     */
+    TenantConfigKey(String key, String defaultValue, Type type, String description, int minValue, int maxValue) {
+        this.key = key;
+        this.defaultValue = defaultValue;
+        this.type = type;
+        this.description = description;
+        this.allowedValues = java.util.Set.of();
+        this.minValue = minValue;
+        this.maxValue = maxValue;
     }
 
     public Type type() {
@@ -94,10 +122,14 @@ public enum TenantConfigKey {
         }
         switch (type) {
             case INT -> {
+                int parsed;
                 try {
-                    Integer.parseInt(value.trim());
+                    parsed = Integer.parseInt(value.trim());
                 } catch (NumberFormatException e) {
                     return "该配置项需要整数，收到：" + value;
+                }
+                if (minValue != null && (parsed < minValue || parsed > maxValue)) {
+                    return "取值必须在 [" + minValue + ", " + maxValue + "] 之间，收到：" + value;
                 }
             }
             case BOOL -> {

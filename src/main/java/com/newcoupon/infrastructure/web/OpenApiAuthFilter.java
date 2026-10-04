@@ -5,6 +5,7 @@ import com.newcoupon.application.service.CachedOpenAppReader;
 import com.newcoupon.application.service.CachedOpenAppReader.AppAuth;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.Result;
+import com.newcoupon.application.service.TenantConfigKey;
 import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.common.crypto.OpenApiAuthHeader;
 import com.newcoupon.common.crypto.OpenApiSignature;
@@ -74,23 +75,26 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
     private static final long WINDOW_MS = 5 * 60 * 1000L;
     /** nonce 保留 2 倍窗口（覆盖窗口边界：窗口过期的请求不会再被接受，nonce 也就不必再留） */
     private static final Duration NONCE_TTL = Duration.ofSeconds(600);
-    /** 未带 X-Timeout-Ms 时的服务端默认预算（S2 会用它裁剪下游超时，S1 只透传） */
-    private static final long DEFAULT_BUDGET_MS = 3_000;
+    /** 兜底预算：租户没配 `timeout.default_ms` 时用它（配置项见 TenantConfigKey） */
+    private static final long FALLBACK_BUDGET_MS = 3_000;
     private static final long MAX_BUDGET_MS = 30_000;
 
     private final CachedOpenAppReader appReader;
     private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
     private final OpenApiAuditRecorder auditRecorder;
+    private final com.newcoupon.application.service.TenantConfigService tenantConfigService;
 
     public OpenApiAuthFilter(CachedOpenAppReader appReader,
                              StringRedisTemplate redis,
                              ObjectMapper objectMapper,
-                             OpenApiAuditRecorder auditRecorder) {
+                             OpenApiAuditRecorder auditRecorder,
+                             com.newcoupon.application.service.TenantConfigService tenantConfigService) {
         this.appReader = appReader;
         this.redis = redis;
         this.objectMapper = objectMapper;
         this.auditRecorder = auditRecorder;
+        this.tenantConfigService = tenantConfigService;
     }
 
     @Override
@@ -166,7 +170,8 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
             // 认证通过：建立请求上下文
             verified = true;
             RequestContext ctx = new RequestContext(
-                    header.appId(), MDC.get(TraceIdFilter.TRACE_ID), deadline(request), hasTimeoutHeader(request));
+                    header.appId(), MDC.get(TraceIdFilter.TRACE_ID),
+                    deadline(request, header.appId()), hasTimeoutHeader(request));
             ctx.resource(path.substring(V1_PREFIX.length()));   // 如 coupons/receive（维度由应用服务补）
             RequestContext.set(ctx);
 
@@ -253,9 +258,20 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
         return raw != null && !raw.isBlank();
     }
 
-    /** 超时预算：请求头 X-Timeout-Ms（越界/非法视为未带）→ deadline = now + 预算 */
-    private static long deadline(HttpServletRequest request) {
-        long budget = DEFAULT_BUDGET_MS;
+    /**
+     * 超时预算 → deadline。**来源优先级：请求头 &gt; 租户配置 &gt; 全局兜底**。
+     *
+     * <p>请求头优先，是因为它表达"这一次调用的显式意愿"；租户配置是"这个客户的常态偏好"。
+     * 认证通过之后才调这个方法，所以拿得到 appId——租户配置读的是本地缓存，热路径不增加往返。
+     *
+     * <p>（实现了却没人读的旋钮最危险：运维改了配置、行为不变，还以为生效了。
+     * 这条正是对抗性审查在 `timeout.default_ms` 上发现的问题。）
+     */
+    private long deadline(HttpServletRequest request, String appId) {
+        long budget = tenantConfigService.getInt(appId, TenantConfigKey.TIMEOUT_DEFAULT_MS);
+        if (budget <= 0) {
+            budget = FALLBACK_BUDGET_MS;
+        }
         String raw = request.getHeader(TIMEOUT_HEADER);
         if (raw != null && !raw.isBlank()) {
             try {
@@ -264,7 +280,7 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
                     budget = parsed;
                 }
             } catch (NumberFormatException ignored) {
-                // 非法值按未带处理：预算这东西宁可用默认值，也不要因为一个坏头拒绝请求
+                // 非法值按未带处理：预算这东西宁可用配置值，也不要因为一个坏头拒绝请求
             }
         }
         return System.currentTimeMillis() + budget;

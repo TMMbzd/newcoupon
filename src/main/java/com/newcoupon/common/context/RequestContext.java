@@ -83,9 +83,29 @@ public final class RequestContext {
         return deadlineExplicit;
     }
 
+    /**
+     * 是否带预算。内部面与定时任务（EMPTY）**没有预算**——所有裁剪判断都要先问这一句，
+     * 否则会把 {@link Long#MAX_VALUE} 这个哨兵拿去参与算术（强转会变成 -1、加法会溢出），
+     * 于是"永不到期"翻转成"永远到期"，把对账/过期/开桶这些**本应完整跑完**的任务掐断。
+     */
+    public boolean hasDeadline() {
+        return deadlineMs != Long.MAX_VALUE;
+    }
+
     /** 剩余预算（毫秒）；无预算时返回 {@link Long#MAX_VALUE} */
     public long remainingMs() {
-        return deadlineMs == Long.MAX_VALUE ? Long.MAX_VALUE : deadlineMs - System.currentTimeMillis();
+        return remainingMs(System.currentTimeMillis());
+    }
+
+    /**
+     * 剩余预算（毫秒），由调用方提供"现在"。
+     *
+     * <p><b>为什么要这个重载</b>：裁剪判据的边界（"剩 0 毫秒"与"剩 1 毫秒"）
+     * 如果只能在集成测试里靠墙钟验证，就永远在和线程调度赛跑——
+     * 单测传精确值、生产传 {@code System.currentTimeMillis()}，边界才可精确断言。
+     */
+    public long remainingMs(long nowMs) {
+        return deadlineMs == Long.MAX_VALUE ? Long.MAX_VALUE : deadlineMs - nowMs;
     }
 
     public boolean expired() {

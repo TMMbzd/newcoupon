@@ -15,6 +15,7 @@ import static org.mockito.Mockito.when;
 import com.newcoupon.application.dto.ReceiveRequest;
 import com.newcoupon.application.dto.ReceiveResult;
 import com.newcoupon.common.BizException;
+import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.domain.coupon.ApproveStatus;
 import com.newcoupon.domain.coupon.CouponStatus;
@@ -67,6 +68,35 @@ class ReceiveAppServiceTest {
     private ReceiveMetrics metrics;
     @Mock
     private org.springframework.data.redis.core.StringRedisTemplate redis;
+    @Mock
+    private com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers breakers;
+
+    /**
+     * 让熔断器变成"透传"：CLOSED 状态的熔断器会直接执行被装饰的调用，等价于"没有熔断"。
+     *
+     * <p>本类测的是**编排逻辑**（闸门结果分类、补偿三变体、重试），熔断行为由
+     * DependencyCircuitBreakerIntegrationTest / TenantCircuitBreakerIntegrationTest 专门覆盖。
+     *
+     * <p>用 lenient 是因为部分用例在更早的阶段就返回、根本走不到依赖调用
+     * （严格桩检查会把"没用上"当成错误）。
+     *
+     * <p><b>补这个 mock 的教训</b>：第 7 步给 ReceiveAppService 加了构造依赖时，
+     * 我只跑了集成测试、**漏了单测** → 本类 20 例里 19 例 NPE 却没人发现，
+     * 直到第 9 步的多 agent 审查（风险视角）预言"@InjectMocks 不会自动补新依赖"才回头验证。
+     * **加构造依赖后必须同时跑单测与集成测试。**
+     */
+    @org.junit.jupiter.api.BeforeEach
+    void stubBreakersAsPassThrough() {
+        io.github.resilience4j.circuitbreaker.CircuitBreaker passThrough =
+                io.github.resilience4j.circuitbreaker.CircuitBreaker.ofDefaults("test");
+        org.mockito.Mockito.lenient()
+                .when(breakers.dependency(org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(passThrough);
+        org.mockito.Mockito.lenient()
+                .when(breakers.forTenant(org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(passThrough);
+    }
 
     @org.junit.jupiter.api.BeforeEach
     void readerPassthrough() {
@@ -109,6 +139,58 @@ class ReceiveAppServiceTest {
     private void givenTemplateAndGate(int perUserLimit, DeductResult gate) {
         when(templateRepository.findById(anyLong())).thenReturn(Optional.of(template(perUserLimit)));
         when(stockGateway.deduct(any())).thenReturn(gate);
+    }
+
+    // ---------- S2 第 9 步：时间预算裁剪 ----------
+    //
+    // 这两条用例是**对抗性审查要求补的**：原来只有集成用例，而集成用例里
+    // "准入门拦下"与"写地板先补偿再拒"都表现为"5003 + 没发券"，**删掉准入门它们照样绿**——
+    // 也就是说准入门（本步的第一根支柱）当时是没人守的代码。用 mock 才能把两者区分开。
+
+    @Test
+    @DisplayName("准入门：预算已耗尽 → 抛 5003，且**一个依赖调用都没发**")
+    void expiredBudget_rejectsBeforeAnyDependencyCall() {
+        when(templateRepository.findById(anyLong())).thenReturn(Optional.of(template(1)));
+        // appId 用 "1"：与模板默认归属（内置应用）一致，保证拦下它的是准入门而不是越权检查
+        RequestContext.set(new RequestContext("1", "trace", System.currentTimeMillis() - 60_000, true));
+        try {
+            assertThatThrownBy(() -> service.receive(new ReceiveRequest("ddl-1", 42L, 1L)))
+                    .isInstanceOf(BizException.class)
+                    .extracting(e -> ((BizException) e).getErrorCode().getCode())
+                    .isEqualTo(5003);
+
+            org.mockito.Mockito.verifyNoInteractions(stockGateway);
+            org.mockito.Mockito.verifyNoInteractions(issueTxService);
+        } finally {
+            RequestContext.clear();
+        }
+    }
+
+    @Test
+    @DisplayName("写地板：扣减成功但预算不足 → **先补偿再拒**，不落库")
+    void writeFloor_cancelsThenRejects() {
+        givenTemplateAndGate(5, new DeductResult(0, 1));   // 闸门放行
+        // 预算 400ms：准入门放行（> 0），写地板拦下（< WRITE_FLOOR_MS = 500）
+        RequestContext.set(new RequestContext("1", "trace", System.currentTimeMillis() + 400, true));
+        try {
+            assertThatThrownBy(() -> service.receive(new ReceiveRequest("ddl-wf", 42L, 1L)))
+                    .isInstanceOf(BizException.class)
+                    .extracting(e -> ((BizException) e).getErrorCode().getCode())
+                    .isEqualTo(5003);
+
+            // cancel 的签名是 (cmd, bucket, gen, cause)——用参数匹配器跟上真实形态
+            org.mockito.Mockito.verify(stockGateway).cancel(
+                    org.mockito.ArgumentMatchers.any(),
+                    org.mockito.ArgumentMatchers.anyInt(),
+                    org.mockito.ArgumentMatchers.anyLong(),
+                    org.mockito.ArgumentMatchers.any());
+            org.mockito.Mockito.verify(issueTxService, org.mockito.Mockito.never())
+                    .issue(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyInt(),
+                            org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any());
+        } finally {
+            RequestContext.clear();
+        }
     }
 
     // ---------- 快查与闸门前校验 ----------
