@@ -1,4 +1,4 @@
-.PHONY: up down test red-contract run package demo negative
+.PHONY: up down test red-contract run package demo negative drill
 
 # 本地常用命令统一入口（大厂惯例：新人 clone 后看一眼 Makefile/README 就能跑起来）
 up:            ## 启动本地 MySQL + Redis
@@ -24,3 +24,7 @@ demo:          ## 开放接口全链路演示（需先 make up && make run）
 
 negative:      ## 开放接口反例演示：签名错/超窗/重放/缺token/越权/超配额（需先 make up && make run）
 	bash scripts/open-api/negative.sh
+
+drill:         ## 三级预案演练：暂停 Redis → 观察熔断 → 套黄预案 → 恢复（需先 make up && make run）
+	@echo "⚠️  演练会暂停本机 Redis 容器并修改演练租户的配置（租户名带 drill- 前缀，用完自建自清）"
+	CONFIRM=yes bash scripts/open-api/drill.sh

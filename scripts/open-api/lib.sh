@@ -114,6 +114,27 @@ split_response() {
   RESP_BODY="${raw%$'\n'__HTTP__*}"
 }
 
+# 管理面写操作（带令牌）。$1=路径 $2=body（可空）。返回响应体。
+# **管理面写操作只有这一个实现**——和签名一样，免得几份脚本对"令牌放在哪个头"给出不同答案。
+admin_post() {
+  local path="$1" body="${2:-}"
+  curl -sS -X POST "$BASE$path" \
+      -H "Content-Type: application/json" \
+      -H "X-Admin-Token: $ADMIN_TOKEN" \
+      ${body:+-d "$body"}
+}
+
+# 读熔断器状态（S2 第 10 步的只读观测口）。$1=熔断器名（redis / mysql / redis:appId）
+breaker_state() {
+  curl -sS "$BASE/api/switches/breakers" | python3 -c "
+import sys, json
+name = sys.argv[1]
+for b in json.load(sys.stdin).get('data', []):
+    if b['name'] == name:
+        print(b['state']); break
+" "$1"
+}
+
 # 断言 HTTP 状态 + 业务码。$1=描述 $2=期望HTTP $3=期望业务码，其余参数透传给 signed_call
 expect_http_and_code() {
   local what="$1" want_http="$2" want_code="$3"; shift 3
