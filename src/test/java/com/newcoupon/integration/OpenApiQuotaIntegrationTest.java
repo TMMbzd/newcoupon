@@ -193,6 +193,36 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
         return last;
     }
 
+    @Test
+    @DisplayName("冷启动预热：预热期内有效阈值被压低（保护还没热身的 JVM）")
+    void warmUp_throttlesDuringColdStart() throws Exception {
+        String appId = "t-quota-warm";
+        String secret = appService.create(
+                new CreateAppRequest(appId, "冷启动预热验证", 30, 0, null)).secret();
+
+        // 预热 600 秒——远长于测试运行时间，所以整个用例都处在"冷启动期"
+        tenantConfigService.put(appId, java.util.Map.of("rate_limit.warmup_seconds", "600"), "test");
+
+        // 有效阈值 = 30 × (1/3 + 2/3 × 已过比例)，JVM 跑了几十秒 → 大约 12~15
+        assertThat(exhaust(appId, secret, 20).status())
+                .as("预热期内连打 20 次应当被拒（若用全额阈值 30 则不会被拒）").isEqualTo(429);
+    }
+
+    @Test
+    @DisplayName("对照：不配预热就是全额阈值（证明上一条的差异来自预热，不是别的）")
+    void withoutWarmUp_fullThresholdTakesEffect() throws Exception {
+        String appId = "t-quota-nowarm";
+        String secret = appService.create(
+                new CreateAppRequest(appId, "不预热", 30, 0, null)).secret();
+
+        // 连打 20 次：低于全额阈值 30，应当全部放行
+        Call last = null;
+        for (int i = 0; i < 20; i++) {
+            last = call(appId, secret);
+            assertThat(last.status()).as("第 " + (i + 1) + " 次：20 < 30，不该被限").isEqualTo(200);
+        }
+    }
+
     /** 清掉配置租户的那一项（配置持久化，用例必须自己保证"起点干净"） */
     private void clearConfig() {
         try {

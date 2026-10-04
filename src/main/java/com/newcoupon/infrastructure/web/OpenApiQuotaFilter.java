@@ -69,6 +69,10 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     /** 算法标识 → 限流器实现。**按实现自报的 algorithm() 建索引**，而不是靠 bean 名字去猜 */
     private final Map<String, RateLimiter> limitersByAlgorithm;
 
+    /** JVM 启动时刻：冷启动预热的起点（预热保护的是"这个进程还没热身"） */
+    private static final long JVM_START_MS =
+            java.lang.management.ManagementFactory.getRuntimeMXBean().getStartTime();
+
     public OpenApiQuotaFilter(CachedOpenAppReader appReader,
                               List<RateLimiter> limiters,
                               ObjectMapper objectMapper,
@@ -163,7 +167,7 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
      * （而不是抛异常）——配置写错是运维问题，不该变成用户的请求失败。
      */
     private boolean acquireSafely(String appId, String key, int limit, Duration ttl) {
-        RateLimiter limiter = pickLimiter(appId);
+        RateLimiter limiter = resolveLimiter(appId);
         try {
             return limiter.tryAcquire(key, limit, ttl);
         } catch (RuntimeException e) {
@@ -172,7 +176,24 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         }
     }
 
-    private RateLimiter pickLimiter(String appId) {
+    /**
+     * 组装该租户实际使用的限流器：**先按配置选算法，再按配置决定要不要套上冷启动预热**。
+     *
+     * <p>装饰器在这里"现场组装"而不是预先注册成 bean：预热参数是租户级的，
+     * 组合数 = 算法数 × 预热配置数，预先注册会爆炸；而且包装对象只有三个字段，构造成本可忽略。
+     */
+    private RateLimiter resolveLimiter(String appId) {
+        RateLimiter limiter = baseLimiter(appId);
+        int warmupSeconds = tenantConfigService.getInt(appId, TenantConfigKey.RATE_LIMIT_WARMUP_SECONDS);
+        if (warmupSeconds > 0) {
+            return new com.newcoupon.infrastructure.ratelimit.WarmUpRateLimiter(
+                    limiter, JVM_START_MS, warmupSeconds * 1000L);
+        }
+        return limiter;
+    }
+
+    /** 按配置选算法；配了不存在的算法回落默认（配置写错是运维问题，不该变成用户的请求失败） */
+    private RateLimiter baseLimiter(String appId) {
         String algorithm = tenantConfigService.get(appId, TenantConfigKey.RATE_LIMIT_ALGORITHM);
         RateLimiter limiter = algorithm == null ? null : limitersByAlgorithm.get(algorithm);
         if (limiter == null) {
