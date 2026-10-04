@@ -23,35 +23,48 @@ package com.newcoupon.application.service;
 public enum SwitchKey implements ConfigKeySpec {
 
     /** 领券总开关——关掉后所有领券请求返回 5001（可重试），库存与账目不受影响 */
-    RECEIVE("receive.enabled", "领券入口总开关（关闭后领券返回 5001 可重试）"),
+    RECEIVE("receive.enabled", "领券入口总开关（关闭后领券返回 5001 可重试）", true),
 
     /** 锁券开关——下单锁券入口 */
-    TRADE_LOCK("trade.lock.enabled", "锁券入口开关（关闭后下单锁券返回 5001）"),
+    TRADE_LOCK("trade.lock.enabled", "锁券入口开关（关闭后下单锁券返回 5001）", true),
 
     /** 核销开关——支付成功核销入口 */
-    TRADE_CONFIRM("trade.confirm.enabled", "核销入口开关（关闭后核销返回 5001）"),
+    TRADE_CONFIRM("trade.confirm.enabled", "核销入口开关（关闭后核销返回 5001）", true),
 
     /** 释放开关——订单取消/超时释放入口 */
-    TRADE_RELEASE("trade.release.enabled", "释放入口开关（关闭后释放返回 5001）"),
+    TRADE_RELEASE("trade.release.enabled", "释放入口开关（关闭后释放返回 5001）", true),
 
     /** 建券发布开关——关掉后不能再发布新券（已发布的券照常发放） */
-    TEMPLATE_PUBLISH("template.publish.enabled", "券模板发布开关（关闭后不可发布新券）"),
+    TEMPLATE_PUBLISH("template.publish.enabled", "券模板发布开关（关闭后不可发布新券）", true),
 
     /** Redis 依赖开关——S2 的调用熔断会接管这里；S1 先留位并可见 */
-    REDIS_DEPENDENCY("redis.dependency.enabled", "Redis 依赖开关（关闭后依赖 Redis 的路径返回 5001）"),
+    REDIS_DEPENDENCY("redis.dependency.enabled", "Redis 依赖开关（关闭后依赖 Redis 的路径返回 5001）", false),
 
     /** 发件箱投递开关——关掉后投递器跳过本轮（消息不丢，恢复后补投） */
-    OUTBOX_DISPATCH("outbox.dispatch.enabled", "发件箱投递开关（关闭后暂停投递，消息不丢）"),
+    OUTBOX_DISPATCH("outbox.dispatch.enabled", "发件箱投递开关（关闭后暂停投递，消息不丢）", true),
 
     /** 触达外呼开关——S6 的触达通道用；S1 先登记，保证清单完整 */
-    MESSAGE_CHANNEL("message.channel.enabled", "触达外呼开关（关闭后不发送消息，仅落表）");
+    MESSAGE_CHANNEL("message.channel.enabled", "触达外呼开关（关闭后不发送消息，仅落表）", false);
 
     private final String key;
     private final String description;
+    /**
+     * 这个开关**有没有真实的执行点**（S2 第 10 步）。
+     *
+     * <p>为什么要标出来：三级预案的价值是"一键让某些行为真的变了"。把一个没接线的开关
+     * 放进预案，套用会<b>成功、有审计、配置表也变了，但什么都没发生</b>——
+     * 验收时会以为预案生效了，出事时更会以为"我已经关了"。
+     *
+     * <p>{@code WiredSwitchKeysTest} 会扫描所有 {@code @SwitchGuard} 注解，
+     * 断言"实际用到的开关都标记为已接线"——所以新接线一个开关却忘了改这里，用例会红。
+     * 反向（标了已接线但其实没接）由预案的行为用例守。
+     */
+    private final boolean wired;
 
-    SwitchKey(String key, String description) {
+    SwitchKey(String key, String description, boolean wired) {
         this.key = key;
         this.description = description;
+        this.wired = wired;
     }
 
     /** 配置键（不带前缀） */
@@ -66,6 +79,11 @@ public enum SwitchKey implements ConfigKeySpec {
 
     public String description() {
         return description;
+    }
+
+    /** 是否有真实执行点（见 {@link #wired} 的注释）——只有已接线的开关才该进预案 */
+    public boolean wired() {
+        return wired;
     }
 
     // ------------------------------------------------------------------

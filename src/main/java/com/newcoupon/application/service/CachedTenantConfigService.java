@@ -171,9 +171,14 @@ public class CachedTenantConfigService implements TenantConfigService {
                 throw new BizException(ErrorCode.PARAM_ERROR, e.getKey() + "：" + reason);
             }
         }
-        // ② 再逐键 upsert + 记审计
+        // ② 再逐键 upsert + 记审计。**值没变就跳过**（S2 第 10 步）：
+        // 预案是"模板化"的操作，很可能被重复套用（演练、误操作、重试），
+        // 每次都写一遍审计会把真正的人工改动淹没在噪音里。
         for (Map.Entry<String, String> e : values.entrySet()) {
             String old = currentValue(appId, e.getKey());
+            if (java.util.Objects.equals(old, e.getValue())) {
+                continue;
+            }
             upsert(appId, e.getKey(), e.getValue());
             writeLog(appId, e.getKey(), old, e.getValue(), operator);
         }
