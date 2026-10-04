@@ -100,14 +100,61 @@ public class DependencyCircuitBreakers {
                 // 累计到阈值、把熔断器打开了，导致后续用例全部"系统繁忙"。
                 // 白名单的方向是安全的：新增一种业务异常时它自动不计入；
                 // 而漏记某种依赖故障的代价只是"熔断晚一点生效"，远小于"被业务异常误熔断"。
-                .recordExceptions(
-                        org.springframework.dao.DataAccessResourceFailureException.class,   // 连不上/拿不到连接
-                        org.springframework.dao.TransientDataAccessResourceException.class, // 瞬时资源问题（含查询超时）
-                        org.springframework.data.redis.RedisConnectionFailureException.class,
-                        io.lettuce.core.RedisConnectionException.class,
-                        io.lettuce.core.RedisCommandTimeoutException.class,
-                        java.net.SocketTimeoutException.class,
-                        java.util.concurrent.TimeoutException.class);
+                //
+                // **判据必须沿原因链看**（S2 第 10 步 P1 修复）——
+                // 原来的写法是 recordExceptions(类清单)，只比对**抛出来的那个对象**的类。
+                // 于是出现了这个缺口：docker pause / 主从切换时，
+                //   Lettuce 抛 RedisCommandTimeoutException（内层，清单里有）
+                //   → Spring Data Redis 翻译成 QueryTimeoutException（外层，清单里没有）再抛给应用
+                //   → 熔断器认不出，失败计数恒为 0，永不打开。
+                // 而这恰是熔断**最该保护**的形态（TCP 还在、命令不响应，每个请求都卡满超时）。
+                // 日志实测：真实故障中 QueryTimeoutException 出现 119 次、RedisSystemException 709 次。
+                //
+                // 换成谓词后，外层包装是什么都不重要——只要**原因链上有**依赖故障就算数。
+                // 两个边界必须守住（都有用例钉着）：
+                //   ① RedisSystemException **不能**整类计入——它只是个"容器"，
+                //      cause 是连接故障才算，cause 是脚本错误（我们自己的 bug）不算；
+                //   ② 业务异常即使被包装了一层也**不能**捞进来（DuplicateKeyException 等）。
+                .recordException(DependencyCircuitBreakers::isDependencyFailure);
+    }
+
+    /**
+     * 这个异常是不是"依赖故障"——**沿原因链逐层判断**。
+     *
+     * <p>为什么要往下钻：基础设施库普遍会**翻译并包装**底层异常
+     * （Spring Data Redis 把 lettuce 异常翻成 Spring DAO 异常族）。
+     * 只看最外层等于把翻译后的形态全部漏掉；只看最内层则会被"包装本身"挡住。
+     *
+     * <p>终止条件用 {@code next == c} 判自引用：{@link Throwable} 的约定是
+     * {@code getCause() == this} 表示"原因未知或不存在"，不处理会死循环。
+     */
+    static boolean isDependencyFailure(Throwable t) {
+        Throwable c = t;
+        while (c != null) {
+            if (isDependencyFailureType(c)) {
+                return true;
+            }
+            Throwable next = c.getCause();
+            c = (next == c) ? null : next;   // 自引用 = 链到头
+        }
+        return false;
+    }
+
+    /**
+     * 依赖故障的**类型清单**（白名单，逐层比对用）。
+     *
+     * <p>刻意不收 {@code RedisSystemException}：它是"容器"而非"故障类型"，
+     * 整类计入会把脚本错误（应用缺陷）也算成依赖故障。它的 cause 会被本清单捕获。
+     */
+    private static boolean isDependencyFailureType(Throwable c) {
+        return c instanceof org.springframework.dao.DataAccessResourceFailureException       // 连不上/拿不到连接
+                || c instanceof org.springframework.dao.TransientDataAccessResourceException // 瞬时资源问题
+                || c instanceof org.springframework.dao.QueryTimeoutException                 // 查询/命令超时（Spring 的翻译形态）
+                || c instanceof org.springframework.data.redis.RedisConnectionFailureException
+                || c instanceof io.lettuce.core.RedisConnectionException
+                || c instanceof io.lettuce.core.RedisCommandTimeoutException
+                || c instanceof java.net.SocketTimeoutException
+                || c instanceof java.util.concurrent.TimeoutException;
     }
 
     /** 依赖级熔断器（总闸）：按依赖名取 */
