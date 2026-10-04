@@ -6,6 +6,7 @@ import com.newcoupon.common.Result;
 import java.util.List;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -28,8 +29,16 @@ public class SwitchController {
         this.switchService = switchService;
     }
 
+    /**
+     * 开关清单。带 {@code appId} 时按该租户的三层取值解析，并给出**来源**
+     * （{@code TENANT} / {@code GLOBAL} / {@code DEFAULT}）。
+     *
+     * <p>不带 {@code appId} 时保持原样（只看全站层）——兼容既有调用方，
+     * 也对应"内部面没有接入方身份"这一语义。
+     */
     @GetMapping
-    public Result<List<SwitchView>> list() {
-        return Result.success(switchService.all());
+    public Result<List<SwitchView>> list(
+            @RequestParam(value = "appId", required = false) String appId) {
+        return Result.success(switchService.all(appId));
     }
 }

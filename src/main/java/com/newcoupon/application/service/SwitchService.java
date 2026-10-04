@@ -71,24 +71,36 @@ public class SwitchService {
      *              租户策略对它无从谈起。
      */
     public boolean isOn(SwitchKey key, String appId) {
+        return resolve(key, appId).on();
+    }
+
+    /** 三层的解析结果：生效值 + **它来自哪一层**（排障时的关键信息，读取接口会返回） */
+    private record Resolved(boolean on, String source) {
+    }
+
+    /**
+     * 三层取值的**唯一实现**——{@link #isOn} 与 {@link #all} 都走这里，
+     * 避免"判断逻辑"与"展示逻辑"各写一遍（那种重复迟早会让"列表显示的"与"实际生效的"不一致）。
+     */
+    private Resolved resolve(SwitchKey key, String appId) {
         // ① 租户层
         String tenantRaw = readTenantRawQuietly(appId, key);
+        if (tenantRaw != null && key.validate(tenantRaw) == null) {
+            return new Resolved(Boolean.parseBoolean(tenantRaw.trim()), "TENANT");
+        }
         if (tenantRaw != null) {
-            if (key.validate(tenantRaw) == null) {
-                return Boolean.parseBoolean(tenantRaw.trim());
-            }
             // 值非法（只可能来自手工改库——写入时已被校验挡住）：**忽略租户层，继续往下走**。
-            // 注意不能"非法就返回 true"：那会让这个租户借一个拼错的值绕过全站关闭。
+            // 注意不能"非法就当成开"：那会让这个租户借一个拼错的值绕过全站关闭。
             log.warn("租户开关取值非法，忽略该层并回落全站配置：appId={} key={} value={}",
                     appId, key.key(), tenantRaw);
         }
         // ② 全站层
         String globalRaw = environment.getProperty(key.propertyName());
         if (globalRaw != null) {
-            return Boolean.parseBoolean(globalRaw.trim());
+            return new Resolved(Boolean.parseBoolean(globalRaw.trim()), "GLOBAL");
         }
         // ③ 默认全开
-        return true;
+        return new Resolved(true, "DEFAULT");
     }
 
     /**
@@ -118,28 +130,48 @@ public class SwitchService {
      * 返回 boolean 的写法迟早会被写成 {@code if (!on) {}} 或者干脆忘了判。
      */
     public void requireOn(SwitchKey key) {
-        if (!isOn(key)) {
-            log.warn("SWITCH OFF: {} ({}) —— 按降级处理", key.key(), key.description());
+        requireOn(key, null);
+    }
+
+    /** 带租户上下文的断言（开放面走这条）；关闭时同样抛 5001 可重试 */
+    public void requireOn(SwitchKey key, String appId) {
+        if (!isOn(key, appId)) {
+            log.warn("SWITCH OFF: {} ({}), appId={} —— 按降级处理",
+                    key.key(), key.description(), appId);
             throw new BizException(ErrorCode.DEGRADED, "功能已关闭：" + key.description());
         }
     }
 
-    /** 全部开关及其当前状态（管理面读取接口用）——运维的"我能关什么"清单 */
+    /** 全部开关及其当前状态（不带租户上下文） */
     public List<SwitchView> all() {
+        return all(null);
+    }
+
+    /**
+     * 全部开关及其当前状态（管理面读取接口用）——运维的"我能关什么"清单。
+     *
+     * <p>带 {@code appId} 时按该租户的三层取值解析，并标出**来源**——
+     * 加入租户层之后，光看 {@code on=false} 已无法判断"谁把它关的"，
+     * 排障会重新变长（"我明明配了怎么没生效"）。
+     */
+    public List<SwitchView> all(String appId) {
         return Arrays.stream(SwitchKey.values()).map(key -> {
-            String raw = environment.getProperty(key.propertyName());
-            return new SwitchView(key.key(), key.description(),
-                    raw == null || Boolean.parseBoolean(raw.trim()),
-                    raw != null);   // configured=false 表示"取的是默认值"，不是有人显式配过
+            Resolved r = resolve(key, appId);
+            String globalRaw = environment.getProperty(key.propertyName());
+            return new SwitchView(key.key(), key.description(), r.on(),
+                    globalRaw != null,   // configured=false 表示"全站层取的是默认值"
+                    r.source());
         }).toList();
     }
 
     /**
-     * @param key         开关键
+     * @param key         开关键（不带 {@code switch.} 前缀，如 {@code receive.enabled}）
      * @param description 人话描述
-     * @param on          当前是否开启
-     * @param configured  是否被显式配置过（false = 正在用默认值 true）
+     * @param on          当前生效值
+     * @param configured  全站层是否被显式配置过（false = 正在用默认值 true）
+     * @param source      生效值来自哪一层：{@code TENANT} / {@code GLOBAL} / {@code DEFAULT}
      */
-    public record SwitchView(String key, String description, boolean on, boolean configured) {
+    public record SwitchView(String key, String description, boolean on, boolean configured,
+                             String source) {
     }
 }
