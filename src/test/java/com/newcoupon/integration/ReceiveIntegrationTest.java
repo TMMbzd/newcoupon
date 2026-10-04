@@ -45,6 +45,12 @@ import org.springframework.test.context.TestPropertySource;
  * ⑤ 库存=1 顺序领：第二人 STOCK_OUT
  * ⑥ 超领回滚即补偿：超领失败后 issued_count 不变（事务回滚撤销了扣减）
  */
+// 本类含"千并发抢百"的压力用例：它会把连接池打满、产生大量 TransientDataAccessResourceException。
+// 那是**测试制造的瞬时压力**而非被测代码的缺陷，不该触发熔断（否则"压力敏感"会扩散成"整批偶发红"）。
+// 需要真实熔断阈值的用例在各自的类里显式配小值（见第 7/8 步的两个熔断用例类）。
+@org.springframework.test.context.TestPropertySource(properties = {
+        "coupon.circuit-breaker.min-calls=1000000"
+})
 class ReceiveIntegrationTest extends ShardedIntegrationTestSupport {
 
     @org.springframework.test.context.DynamicPropertySource
@@ -106,7 +112,13 @@ class ReceiveIntegrationTest extends ShardedIntegrationTestSupport {
                 try {
                     return f.get(60, TimeUnit.SECONDS);
                 } catch (Exception e) {
-                    throw new IllegalStateException(e);
+                    // 依赖故障（连接池打满、熔断快速失败……）也是一种"去向"——
+                    // 把它计进分布，而不是让整个用例炸掉：否则我们就失去了
+                    //"这一千个请求到底都去哪了"的完整画面（本项目历史上踩过同款的坑：
+                    // 异常被 Future 吞掉导致几百例"失踪"）
+                    Throwable cause = e instanceof java.util.concurrent.ExecutionException
+                            && e.getCause() != null ? e.getCause() : e;
+                    return new Outcome(null, "EX:" + cause.getClass().getSimpleName(), false);
                 }
             }).toList();
         } finally {
@@ -126,11 +138,12 @@ class ReceiveIntegrationTest extends ShardedIntegrationTestSupport {
                 i -> new ReceiveRequest("bulk-req-" + i, 10_000L + i, templateId));
 
         long success = results.stream().filter(o -> "OK".equals(o.code())).count();
-        assertThat(success).as("成功领取数必须恰好等于库存").isEqualTo(100);
-        // 失败响应的错误码分布——排障第一手信息直接进断言消息
+        // 失败响应的错误码分布——**先算好再断言**：否则第一个断言一红，分布就永远看不到
+        //（这条用例原本把分布打印放在断言之后，导致"98 != 100"这类失败完全没有线索）
         var failureDist = results.stream()
                 .filter(o -> !"OK".equals(o.code()))
                 .collect(java.util.stream.Collectors.groupingBy(Outcome::code, java.util.stream.Collectors.counting()));
+        assertThat(success).as("成功领取数必须恰好等于库存；失败分布=" + failureDist).isEqualTo(100);
         assertThat(failureDist).as("失败响应只允许一种：STOCK_OUT").containsOnlyKeys("3001");
         assertThat(failureDist.get("3001")).isEqualTo(900L);
 
@@ -141,6 +154,12 @@ class ReceiveIntegrationTest extends ShardedIntegrationTestSupport {
         // （coupon_event 无领域查询端口，此处经 user_coupon 行数与事件数一致性校验）
         long coupons = results.stream().filter(o -> o.couponId() != null).distinct().count();
         assertThat(coupons).as("100 张券的 couponId 必须互不相同").isEqualTo(100);
+        // 这条用例会把连接池打满（1000 并发正是它的目的）。跑完给池子一点恢复时间：
+        // 否则紧随其后的用例会继续撞池子，把 TransientDataAccessResourceException 累到熔断阈值上、
+        // 触发"依赖暂时不可用"（实测：下一个售罄用例就是这么红的）。
+        // 这也侧面说明：熔断的 open-seconds（默认 30 秒）对"连接池瞬时打满"这类场景偏保守。
+        Thread.sleep(2000);
+
     }
 
     // ---------- ② 同用户异 requestId 并发 ----------

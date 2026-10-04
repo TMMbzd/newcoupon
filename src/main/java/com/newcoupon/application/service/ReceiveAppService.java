@@ -116,8 +116,25 @@ public class ReceiveAppService {
      * 收口到一个方法之后，"**所有 Redis 闸门调用都过熔断**"成了结构性事实，而不是靠人记得。
      */
     private DeductResult deductThroughBreaker(DeductCommand cmd) {
-        return withBreaker(breakers.redis(), ErrorCode.DEGRADED, "库存闸门",
-                () -> stockGateway.deduct(cmd));
+        return withBreakers("redis", ErrorCode.DEGRADED, "库存闸门", () -> stockGateway.deduct(cmd));
+    }
+
+    /**
+     * **两层熔断**（S2 第 8 步）：外层是租户级（分闸），内层是依赖级（总闸）。
+     *
+     * <p>顺序的道理：先看"是不是某个租户的问题"，再看"是不是依赖整体的问题"。
+     * 依赖级打开时所有租户一起快速失败（保护依赖）；租户级打开时只有那一个租户被拦下（保护其他人）。
+     *
+     * <p>内部面（没有接入方身份）只用依赖级——它不是任何租户的流量。
+     */
+    private <T> T withBreakers(String dependency, ErrorCode code, String what,
+                               java.util.function.Supplier<T> call) {
+        String appId = AppOwnership.currentAppId();
+        if (appId == null) {
+            return withBreaker(breakers.dependency(dependency), code, what, call);
+        }
+        return withBreaker(breakers.forTenant(dependency, appId), code, what,
+                () -> withBreaker(breakers.dependency(dependency), code, what, call));
     }
 
     /**
@@ -263,7 +280,7 @@ public class ReceiveAppService {
             // d 在前面几条重试路径里被重新赋过值，lambda 只能捕获 effectively final 的变量——
             // 所以先取一份快照（这也让"这次落库用的是哪次扣减的结果"变得明确）
             final DeductResult deducted = d;
-            UserCoupon issued = withBreaker(breakers.mysql(), ErrorCode.SYSTEM_ERROR, "落库",
+            UserCoupon issued = withBreakers("mysql", ErrorCode.SYSTEM_ERROR, "落库",
                     () -> issueTxService.issue(req, template, deducted.seq(),
                             deducted.bucket(), deducted.gen(), LocalDateTime.now()));
             confirmQuietly(cmd, d);   // 修复①：DB 已提交，用户结果已定——confirm 失败只记日志放行

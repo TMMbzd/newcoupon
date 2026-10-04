@@ -31,7 +31,9 @@ import org.springframework.beans.factory.annotation.Value;
  */
 @Timeout(value = 90, unit = TimeUnit.SECONDS)
 @org.springframework.boot.test.context.SpringBootTest(properties = {
-        "coupon.open.secret-master-key=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="
+        "coupon.open.secret-master-key=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+                "coupon.circuit-breaker.min-calls=5",
+                "coupon.circuit-breaker.window-size=10"
 })
 class DependencyCircuitBreakerIntegrationTest extends ShardedIntegrationTestSupport {
 
@@ -138,13 +140,32 @@ class DependencyCircuitBreakerIntegrationTest extends ShardedIntegrationTestSupp
         CircuitBreaker breaker = breakers.redis();
         assertThat(breaker.getState()).isEqualTo(CircuitBreaker.State.CLOSED);
 
-        // 模拟连续失败：最小样本数配置为 5，异常比例阈值 50%
+        // 模拟连续失败：最小样本数配置为 5，异常比例阈值 50%。
+        // **必须用"真正的依赖故障"类型**（白名单里的），普通的 RuntimeException 不计入——
+        // 这正是白名单设计的含义（见设计文档 §发现 8）
         for (int i = 0; i < 5; i++) {
-            breaker.onError(0, TimeUnit.NANOSECONDS, new RuntimeException("模拟依赖故障"));
+            breaker.onError(0, TimeUnit.NANOSECONDS, new java.net.SocketTimeoutException("模拟依赖超时"));
         }
 
         assertThat(breaker.getState())
                 .as("5 次连续失败（样本数达阈值）应当让熔断器打开").isEqualTo(CircuitBreaker.State.OPEN);
+    }
+
+    @Test
+    @DisplayName("业务异常**不计入**失败率——否则一次秒杀售罄就能把熔断器打开")
+    void businessExceptions_doNotCountAsFailures() {
+        CircuitBreaker breaker = breakers.redis();
+
+        // DuplicateKeyException 是"幂等/限领撞唯一索引"，是正常的业务结果，不是依赖故障
+        for (int i = 0; i < 10; i++) {
+            breaker.onError(0, TimeUnit.NANOSECONDS,
+                    new org.springframework.dao.DuplicateKeyException("幂等冲突"));
+        }
+        assertThat(breaker.getState())
+                .as("打 10 次业务异常也不该打开熔断器")
+                .isEqualTo(CircuitBreaker.State.CLOSED);
+        assertThat(breaker.getMetrics().getNumberOfFailedCalls())
+                .as("业务异常连'失败次数'都不该计入").isZero();
     }
 
     // ------------------------------------------------------------------
