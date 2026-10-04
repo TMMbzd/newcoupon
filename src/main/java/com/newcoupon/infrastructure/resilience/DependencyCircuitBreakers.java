@@ -4,6 +4,10 @@ import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import java.time.Duration;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import com.newcoupon.application.service.TenantConfigKey;
 import com.newcoupon.application.service.TenantConfigService;
@@ -26,6 +30,8 @@ import org.springframework.stereotype.Component;
 @Component
 public class DependencyCircuitBreakers {
 
+    private static final Logger log = LoggerFactory.getLogger(DependencyCircuitBreakers.class);
+
     /** 与 Redis 相关的调用（库存闸门是唯一的强依赖点） */
     public static final String REDIS = "redis";
     /** 与数据库相关的调用 */
@@ -39,6 +45,8 @@ public class DependencyCircuitBreakers {
     private final int minCalls;
     /** 租户级熔断器实例缓存：名字 → 实例（配置改了要重启才生效，见 forTenant 注释） */
     private final java.util.Map<String, CircuitBreaker> tenantBreakers = new java.util.concurrent.ConcurrentHashMap<>();
+    /** 已挂过状态转移日志的熔断器名（去重：onStateTransition 是追加消费者，重复挂会打多份日志） */
+    private final Set<String> loggingRegistered = ConcurrentHashMap.newKeySet();
     private final TenantConfigService tenantConfig;
 
     public DependencyCircuitBreakers(
@@ -69,17 +77,32 @@ public class DependencyCircuitBreakers {
         return defaultConfig;
     }
 
-    /** 租户级熔断器：同一套判据，只是阈值换成了该租户配置的 */
+    /**
+     * 租户级熔断器：同一套判据，只是阈值换成了该租户配置的。
+     *
+     * <p><b>取值必须钳制到合法区间</b>：Resilience4j 对非法参数是**直接抛异常**
+     * （{@code failureRateThreshold must be between 1 and 100}），
+     * 而那会让熔断器创建失败 → 请求失败。配置读宽容这一原则在这里的落法就是钳制：
+     * 一个被手工改成 0 或负数的配置项，应该退化成"用边界值"，而不是把请求打挂。
+     * <p>（这个点是测试暴露的：mock 的 {@code getInt} 默认返回 0，第一次创建就炸了。）
+     */
     private CircuitBreakerConfig config(int failureRate, long slowCallMs, long openSeconds) {
+        int rate = (int) clamp(failureRate, 1, 100);
+        long slowMs = clamp(slowCallMs, 1, 60_000);
+        long openSec = clamp(openSeconds, 1, 3_600);
         return baseConfig()
-                .failureRateThreshold(failureRate)
-                .slowCallDurationThreshold(Duration.ofMillis(slowCallMs))
-                .slowCallRateThreshold(failureRate)
-                .waitDurationInOpenState(Duration.ofSeconds(openSeconds))
+                .failureRateThreshold(rate)
+                .slowCallDurationThreshold(Duration.ofMillis(slowMs))
+                .slowCallRateThreshold(rate)
+                .waitDurationInOpenState(Duration.ofSeconds(openSec))
                 .permittedNumberOfCallsInHalfOpenState(halfOpenCalls)
                 .slidingWindowSize(windowSize)
                 .minimumNumberOfCalls(minCalls)
                 .build();
+    }
+
+    private static long clamp(long value, long min, long max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     /**
@@ -157,9 +180,36 @@ public class DependencyCircuitBreakers {
                 || c instanceof java.util.concurrent.TimeoutException;
     }
 
+    /**
+     * 给熔断器挂**状态转移日志**（S2 第 10 步）——"熔断打开了"这件事必须能从外部看见。
+     *
+     * <p>为什么需要：第 10 步的演练脚本要判定"注入故障 → 观察熔断打开 → 恢复 → 闭合"。
+     * 但本项目没有 resilience4j-micrometer（拉不到新依赖），{@code /actuator/circuitbreakers}
+     * 也不存在——没有日志的话，脚本只能靠响应码与时延猜，而时延是不可控量
+     * （本项目的测试铁律③：不要用不可控的量卡边界）。
+     *
+     * <p>用 {@code loggingRegistered} 去重：{@code getEventPublisher().onStateTransition}
+     * 是**追加**消费者，重复调用会打多份日志（熔断器实例本身是按名字缓存的）。
+     */
+    private CircuitBreaker attachStateTransitionLog(CircuitBreaker breaker) {
+        if (loggingRegistered.add(breaker.getName())) {
+            breaker.getEventPublisher().onStateTransition(event -> {
+                var transition = event.getStateTransition();
+                if (transition.getToState() == CircuitBreaker.State.OPEN) {
+                    log.warn("熔断器打开：{} {} → {} —— 依赖不可用，开始快速失败",
+                            event.getCircuitBreakerName(), transition.getFromState(), transition.getToState());
+                } else {
+                    log.info("熔断器状态变化：{} {} → {}",
+                            event.getCircuitBreakerName(), transition.getFromState(), transition.getToState());
+                }
+            });
+        }
+        return breaker;
+    }
+
     /** 依赖级熔断器（总闸）：按依赖名取 */
     public CircuitBreaker dependency(String dependency) {
-        return registry.circuitBreaker(dependency);
+        return attachStateTransitionLog(registry.circuitBreaker(dependency));
     }
 
     public CircuitBreaker redis() {
@@ -192,7 +242,7 @@ public class DependencyCircuitBreakers {
             int failureRate = tenantConfig.getInt(appId, TenantConfigKey.CIRCUIT_BREAKER_FAILURE_RATE);
             long slowCallMs = tenantConfig.getInt(appId, TenantConfigKey.CIRCUIT_BREAKER_SLOW_CALL_MS);
             long openSeconds = tenantConfig.getInt(appId, TenantConfigKey.CIRCUIT_BREAKER_OPEN_SECONDS);
-            return registry.circuitBreaker(n, config(failureRate, slowCallMs, openSeconds));
+            return attachStateTransitionLog(registry.circuitBreaker(n, config(failureRate, slowCallMs, openSeconds)));
         });
     }
 
