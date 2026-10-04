@@ -44,12 +44,17 @@ final class OpenApiTestClient {
         return send("GET", path, query, null, appId, secret, null);
     }
 
+    /** 带额外请求头（如 {@code X-Forwarded-For}——用它模拟不同来源 IP） */
+    Response get(String path, String query, String appId, String secret, String... extraHeaders) throws Exception {
+        return send("GET", path, query, null, appId, secret, null, extraHeaders);
+    }
+
     Response post(String path, String body, String appId, String secret, String clientToken) throws Exception {
         return send("POST", path, null, body, appId, secret, clientToken);
     }
 
     private Response send(String method, String path, String query, String body,
-                          String appId, String secret, String clientToken) throws Exception {
+                          String appId, String secret, String clientToken, String... extraHeaders) throws Exception {
         String timestamp = String.valueOf(System.currentTimeMillis());
         String nonce = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
         String bodySha = OpenApiSignature.bodySha256(
@@ -67,6 +72,9 @@ final class OpenApiTestClient {
                 .timeout(Duration.ofSeconds(15));
         if (clientToken != null) {
             builder.header("X-Client-Token", clientToken);
+        }
+        for (int i = 0; i + 1 < extraHeaders.length; i += 2) {
+            builder.header(extraHeaders[i], extraHeaders[i + 1]);
         }
         builder.method(method, body == null
                 ? HttpRequest.BodyPublishers.noBody()

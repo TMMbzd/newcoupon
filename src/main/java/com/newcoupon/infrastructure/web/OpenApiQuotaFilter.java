@@ -9,6 +9,7 @@ import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.Result;
 import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.infrastructure.ratelimit.RateLimiter;
+import org.springframework.beans.factory.annotation.Value;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -69,6 +70,20 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     /** 算法标识 → 限流器实现。**按实现自报的 algorithm() 建索引**，而不是靠 bean 名字去猜 */
     private final Map<String, RateLimiter> limitersByAlgorithm;
 
+    /**
+     * 平台级限流维度（S2 第 6 步）。
+     *
+     * <p><b>为什么与 appId 维度分开</b>：appId 维度是**租户级**的——"这个客户能用多少"
+     * 是商业约定，放租户配置；IP 与接口维度是**平台级**的——"一个来源 / 一个接口最多打多少"
+     * 是自我保护，与具体客户无关，放全站配置。
+     *
+     * <p>**默认关闭**：打开它们会改变所有接入方的可见行为，应当由运维显式决定。
+     */
+    private final boolean ipEnabled;
+    private final int ipQps;
+    private final boolean resourceEnabled;
+    private final int resourceQps;
+
     /** JVM 启动时刻：冷启动预热的起点（预热保护的是"这个进程还没热身"） */
     private static final long JVM_START_MS =
             java.lang.management.ManagementFactory.getRuntimeMXBean().getStartTime();
@@ -76,10 +91,18 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     public OpenApiQuotaFilter(CachedOpenAppReader appReader,
                               List<RateLimiter> limiters,
                               ObjectMapper objectMapper,
-                              TenantConfigService tenantConfigService) {
+                              TenantConfigService tenantConfigService,
+                              @Value("${coupon.ratelimit.ip.enabled:false}") boolean ipEnabled,
+                              @Value("${coupon.ratelimit.ip.qps:0}") int ipQps,
+                              @Value("${coupon.ratelimit.resource.enabled:false}") boolean resourceEnabled,
+                              @Value("${coupon.ratelimit.resource.qps:0}") int resourceQps) {
         this.appReader = appReader;
         this.objectMapper = objectMapper;
         this.tenantConfigService = tenantConfigService;
+        this.ipEnabled = ipEnabled;
+        this.ipQps = ipQps;
+        this.resourceEnabled = resourceEnabled;
+        this.resourceQps = resourceQps;
         this.limitersByAlgorithm = limiters.stream()
                 .collect(java.util.stream.Collectors.toMap(RateLimiter::algorithm, l -> l));
         log.info("限流器已装配：{}", limitersByAlgorithm.keySet());
@@ -106,6 +129,15 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         }
         AppAuth app = found.get();
 
+        // 平台级维度先检查（自我保护优先于商业约定），任一超限即拒
+        if (!withinPlatformDimension("IP", "c:rl:ip:" + RiskControlFilter.clientIp(request),
+                ipQps, ipEnabled, response)) {
+            return;
+        }
+        if (!withinPlatformDimension("接口", "c:rl:res:" + RequestContext.current().resourceName(),
+                resourceQps, resourceEnabled, response)) {
+            return;
+        }
         if (!withinQps(appId, app.qpsLimit(), response)) {
             return;
         }
@@ -124,7 +156,7 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         if (acquireSafely(appId, key, limit, Duration.ofSeconds(2))) {
             return true;
         }
-        reject(response, ErrorCode.QPS_LIMIT_EXCEEDED, "1");   // 下一秒就是新窗口
+        reject(response, ErrorCode.QPS_LIMIT_EXCEEDED, "1", "租户配额");   // 下一秒就是新窗口
         return false;
     }
 
@@ -142,7 +174,34 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         }
         long secondsUntilTomorrow = Duration.between(LocalDateTime.now(),
                 LocalDate.now().plusDays(1).atStartOfDay()).getSeconds();
-        reject(response, ErrorCode.DAILY_QUOTA_EXCEEDED, String.valueOf(Math.max(1, secondsUntilTomorrow)));
+        reject(response, ErrorCode.DAILY_QUOTA_EXCEEDED, String.valueOf(Math.max(1, secondsUntilTomorrow)), "日配额");
+        return false;
+    }
+
+    /**
+     * 平台级维度（IP / 接口）的限流检查。**任一超限即拒**，且错误信息里带上维度名——
+     * 接入方看到 429 时能知道是自己打太快，还是这个接口被全平台限了。
+     *
+     * <p>用默认算法（滑动窗口）：平台级维度是保护性的，不需要"允许突发"这类业务特性。
+     */
+    private boolean withinPlatformDimension(String dimension, String keyPrefix, int limit,
+                                            boolean enabled, HttpServletResponse response) throws IOException {
+        if (!enabled || limit <= 0) {
+            return true;
+        }
+        String key = keyPrefix + ":" + (System.currentTimeMillis() / 1000);
+        RateLimiter limiter = limitersByAlgorithm.get(DEFAULT_ALGORITHM);
+        boolean allowed;
+        try {
+            allowed = limiter.tryAcquire(key, limit, Duration.ofSeconds(2));
+        } catch (RuntimeException e) {
+            log.error("平台级限流检查失败（Redis 不可用），放行：dimension={} key={}", dimension, key, e);
+            return true;   // fail-open，与配额一致
+        }
+        if (allowed) {
+            return true;
+        }
+        reject(response, ErrorCode.QPS_LIMIT_EXCEEDED, "1", dimension + "维度");
         return false;
     }
 
@@ -205,13 +264,14 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         return limiter;
     }
 
-    private void reject(HttpServletResponse response, ErrorCode code, String retryAfterSeconds)
-            throws IOException {
+    private void reject(HttpServletResponse response, ErrorCode code, String retryAfterSeconds,
+                        String dimension) throws IOException {
         response.setStatus(429);
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.setCharacterEncoding("UTF-8");
         // 429 必须告诉对方多久后重试——否则接入方只能瞎猜（或死循环重试，把限流变成自杀）
         response.setHeader(RETRY_AFTER, retryAfterSeconds);
-        response.getWriter().write(objectMapper.writeValueAsString(Result.fail(code)));
+        // 带上维度名：接入方看到 429 时能区分"我打太快"与"这个接口被全平台限了"
+        response.getWriter().write(objectMapper.writeValueAsString(Result.fail(code, dimension)));
     }
 }

@@ -203,9 +203,12 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
         // 预热 600 秒——远长于测试运行时间，所以整个用例都处在"冷启动期"
         tenantConfigService.put(appId, java.util.Map.of("rate_limit.warmup_seconds", "600"), "test");
 
-        // 有效阈值 = 30 × (1/3 + 2/3 × 已过比例)，JVM 跑了几十秒 → 大约 12~15
-        assertThat(exhaust(appId, secret, 20).status())
-                .as("预热期内连打 20 次应当被拒（若用全额阈值 30 则不会被拒）").isEqualTo(429);
+        // 有效阈值 = 30 × (1/3 + 2/3 × 已过比例)，随 JVM 已运行时长在 [10, 30] 之间浮动——
+        // 而"JVM 已经跑了多久"取决于这个测试类在套件里的位置，用例控制不了。
+        // 所以连打次数要**大于目标阈值**：无论预热进行到哪一步都会被拒。
+        // （第一版连打 20 次，单跑时绿、与其他类同批跑时红——典型的 flaky）
+        assertThat(exhaust(appId, secret, 35).status())
+                .as("预热期内连打 35 次必定被拒（有效阈值上限就是全额 30）").isEqualTo(429);
     }
 
     @Test
