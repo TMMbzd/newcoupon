@@ -79,6 +79,8 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired
     private com.newcoupon.application.service.TenantConfigService tenantConfigService;
 
+
+
     private static String limitedSecret;
     private static String unlimitedSecret;
     private static String cfgSecret;
@@ -197,22 +199,29 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     @DisplayName("冷启动预热：配置接得上且限流仍生效（阈值曲线由 WarmUpRateLimiterTest 精确覆盖）")
     void warmUp_throttlesDuringColdStart() throws Exception {
         String appId = "t-quota-warm";
-        // **为什么改用日配额**：QPS 的限流 key 带"当前秒"（见 OpenApiQuotaFilter 的 key 构造），
-        // 于是"连打 N 次必被拒"隐含要求**N 次全部落在同一秒内**——那是不可控的量
-        // （机器快慢、同批负载）。2026-10-05 的全量测试里就真的出现过：35 次横跨两个秒桶、
-        // 每桶都不超 30，于是全部放行、用例误报。日配额的 key 是"当天"，没有这个问题。
+
+        // **日配额设成 1，然后连打 3 次——这个写法是确定的**，理由有两条：
+        //  ① 日配额的窗口是"当天"，不跨秒（QPS 维度的键带"当前秒"，连打会跨秒桶）；
+        //  ② 阈值 1 在预热的**任何阶段**都成立：预热把阈值压到 1/3，
+        //     而 1/3 取整是 0、实现会兜到 1（否则 0 会被下游解读成"不限"，方向正好相反）。
+        // 于是"第 2 次必被拒"与机器快慢、套件位置、JVM 已运行多久都无关。
+        //
+        // 这条用例红过三次，前两次的修法都不彻底，教训记在这里：
+        //  · 第一版：QPS 连打 35 次 → 跨秒桶，全量时误报；
+        //  · 第二版：改用日配额但仍是"连打 35 次" → 同样依赖机器速度；
+        //  · 第三版（现在）：把阈值降到 1，让"必被拒"不再依赖任何时序。
+        // 另外试过"预填计数器"，但**滑动窗口会在基础键下派生窗口号子键**，
+        // 预填基础键对默认算法无效——那属于依赖实现细节，不走这条路。
         String secret = appService.create(
-                new CreateAppRequest(appId, "冷启动预热验证", 0, 30, null)).secret();   // QPS 不限，日配额 30
+                new CreateAppRequest(appId, "冷启动预热验证", 0, 1, null)).secret();   // QPS 不限，日配额 1
 
         tenantConfigService.put(appId, java.util.Map.of("rate_limit.warmup_seconds", "600"), "test");
 
-        // **为什么这里不断言"阈值被压低到多少"**：有效阈值 = 30 × (1/3 + 2/3 × 已过/JVM已运行时长)，
-        // 而"JVM 已经跑了多久"取决于这个测试类在套件里的位置（更别说 JVM 跑够久之后预热就结束了）——
-        // 用例控制不了，属于"用不可控的量卡边界"。
-        // 曲线本身由单元测试 WarmUpRateLimiterTest 用假时钟精确覆盖；
-        // 这一条只负责"配置接得上 + 预热装饰器没有把限流弄坏"。
-        assertThat(exhaust(appId, secret, 35).status())
-                .as("配了预热的租户，配额仍然会被拦下（预热是压低阈值，不是关掉限流）")
+        // 分界说明：阈值曲线本身由单元测试 WarmUpRateLimiterTest 用假时钟精确覆盖
+        // （它可控），这一条只负责"配置接得上 + 预热装饰器没有把限流弄坏"。
+        Call last = exhaust(appId, secret, 3);
+        assertThat(last.status())
+                .as("日配额=1 时第 2 发必被拒（预热是压低阈值，不是关掉限流）；响应=" + last.body())
                 .isEqualTo(429);
     }
 
