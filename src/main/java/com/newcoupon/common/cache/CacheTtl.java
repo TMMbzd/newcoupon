@@ -10,7 +10,10 @@ import java.util.concurrent.TimeUnit;
  * （{@code CachedTemplateReader} / {@code CachedOpenAppReader} / {@code CachedTenantConfigService}），
  * <b>三遍都写错了同一个地方</b>——{@code expireAfterCreate} 的契约是返回<b>持续时长</b>
  * （Caffeine 内部自己会加 {@code now}），而三处都写成了 {@code return now + 时长}，
- * 于是条目实际存活时间 ≈ <b>JVM 已运行时长 + TTL</b>：JVM 跑 1 小时，缓存项就活 1 小时 60 秒。
+ * 于是条目实际存活时间 ≈ <b>创建那一刻的 {@code nanoTime} 值 + TTL</b>。
+ * {@code System.nanoTime()} 是单调时钟、起点任意（Linux 上通常是开机时刻），
+ * 所以这个值可能是"开机至今"的纳秒数——机器开了 10 天才启动 JVM，缓存项就会活约 10 天；
+ * 而且**同一个 JVM 内越晚创建的条目活得越久**（因为 nanoTime 一直在涨）。
  *
  * <p>后果：号称"防雪崩"的 TTL 抖动与"防穿透"的负缓存短 TTL <b>从写下的第一天起就没生效过</b>
  * （抖动被 {@code now} 这个巨大的基数淹没了）。
