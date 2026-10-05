@@ -83,6 +83,8 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     private final int ipQps;
     private final boolean resourceEnabled;
     private final int resourceQps;
+    /** 治理指标（S2 第 11 步） */
+    private final com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics;
 
     /** JVM 启动时刻：冷启动预热的起点（预热保护的是"这个进程还没热身"） */
     private static final long JVM_START_MS =
@@ -95,7 +97,9 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
                               @Value("${coupon.ratelimit.ip.enabled:false}") boolean ipEnabled,
                               @Value("${coupon.ratelimit.ip.qps:0}") int ipQps,
                               @Value("${coupon.ratelimit.resource.enabled:false}") boolean resourceEnabled,
-                              @Value("${coupon.ratelimit.resource.qps:0}") int resourceQps) {
+                              @Value("${coupon.ratelimit.resource.qps:0}") int resourceQps,
+            com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics) {
+        this.governanceMetrics = governanceMetrics;
         this.appReader = appReader;
         this.objectMapper = objectMapper;
         this.tenantConfigService = tenantConfigService;
@@ -130,11 +134,11 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         AppAuth app = found.get();
 
         // 平台级维度先检查（自我保护优先于商业约定），任一超限即拒
-        if (!withinPlatformDimension("IP", "c:rl:ip:" + RiskControlFilter.clientIp(request),
+        if (!withinPlatformDimension("IP", "ip", "c:rl:ip:" + RiskControlFilter.clientIp(request),
                 ipQps, ipEnabled, response)) {
             return;
         }
-        if (!withinPlatformDimension("接口", "c:rl:res:" + RequestContext.current().resourceName(),
+        if (!withinPlatformDimension("接口", "resource", "c:rl:res:" + RequestContext.current().resourceName(),
                 resourceQps, resourceEnabled, response)) {
             return;
         }
@@ -153,10 +157,10 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
             return true;
         }
         String key = QPS_KEY_PREFIX + appId + ":" + (System.currentTimeMillis() / 1000);
-        if (acquireSafely(appId, key, limit, Duration.ofSeconds(2))) {
+        if (acquireSafely(appId, key, limit, Duration.ofSeconds(2), "tenant_qps")) {
             return true;
         }
-        reject(response, ErrorCode.QPS_LIMIT_EXCEEDED, "1", "租户配额");   // 下一秒就是新窗口
+        reject(response, ErrorCode.QPS_LIMIT_EXCEEDED, "1", "租户配额", "tenant_qps");   // 下一秒就是新窗口
         return false;
     }
 
@@ -169,12 +173,12 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         // 计数器活到次日 00:05（而不是 24h）：按自然日重置，跨天边界留 5 分钟余量
         LocalDateTime expireAt = LocalDate.now().plusDays(1).atTime(0, 5);
         String key = DAILY_KEY_PREFIX + appId + ":" + day;
-        if (acquireSafely(appId, key, limit, Duration.between(LocalDateTime.now(), expireAt))) {
+        if (acquireSafely(appId, key, limit, Duration.between(LocalDateTime.now(), expireAt), "tenant_daily")) {
             return true;
         }
         long secondsUntilTomorrow = Duration.between(LocalDateTime.now(),
                 LocalDate.now().plusDays(1).atStartOfDay()).getSeconds();
-        reject(response, ErrorCode.DAILY_QUOTA_EXCEEDED, String.valueOf(Math.max(1, secondsUntilTomorrow)), "日配额");
+        reject(response, ErrorCode.DAILY_QUOTA_EXCEEDED, String.valueOf(Math.max(1, secondsUntilTomorrow)), "日配额", "tenant_daily");
         return false;
     }
 
@@ -184,8 +188,9 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
      *
      * <p>用默认算法（滑动窗口）：平台级维度是保护性的，不需要"允许突发"这类业务特性。
      */
-    private boolean withinPlatformDimension(String dimension, String keyPrefix, int limit,
-                                            boolean enabled, HttpServletResponse response) throws IOException {
+    private boolean withinPlatformDimension(String dimension, String metricDimension, String keyPrefix,
+                                            int limit, boolean enabled,
+                                            HttpServletResponse response) throws IOException {
         if (!enabled || limit <= 0) {
             return true;
         }
@@ -196,12 +201,13 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
             allowed = limiter.tryAcquire(key, limit, Duration.ofSeconds(2));
         } catch (RuntimeException e) {
             log.error("平台级限流检查失败（Redis 不可用），放行：dimension={} key={}", dimension, key, e);
+            governanceMetrics.recordLimitFailOpen(metricDimension);
             return true;   // fail-open，与配额一致
         }
         if (allowed) {
             return true;
         }
-        reject(response, ErrorCode.QPS_LIMIT_EXCEEDED, "1", dimension + "维度");
+        reject(response, ErrorCode.QPS_LIMIT_EXCEEDED, "1", dimension + "维度", metricDimension);
         return false;
     }
 
@@ -225,12 +231,17 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
      * <p>算法来自租户配置 {@code rate_limit.algorithm}；配了不存在的算法会回落到默认算法
      * （而不是抛异常）——配置写错是运维问题，不该变成用户的请求失败。
      */
-    private boolean acquireSafely(String appId, String key, int limit, Duration ttl) {
+    private boolean acquireSafely(String appId, String key, int limit, Duration ttl,
+                                  String metricDimension) {
         RateLimiter limiter = resolveLimiter(appId);
         try {
             return limiter.tryAcquire(key, limit, ttl);
         } catch (RuntimeException e) {
             log.error("配额检查失败（Redis 不可用），放行：key={}", key, e);
+            // **fail-open 必须可见**（S2 第 11 步）：限流是可用性防线，依赖故障时放行是对的，
+            // 但那样仪表盘上会呈现「拒绝数为 0、一切正常」的假象——实际上防线已经失效。
+            // 没有这条指标，「防线失效」与「流量本来就小」在监控上完全无法区分。
+            governanceMetrics.recordLimitFailOpen(metricDimension);
             return true;
         }
     }
@@ -265,7 +276,10 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     }
 
     private void reject(HttpServletResponse response, ErrorCode code, String retryAfterSeconds,
-                        String dimension) throws IOException {
+                        String dimension, String metricDimension) throws IOException {
+        // 打点用 **ASCII 维度码**而不是响应里的中文文案：文案一改标签就断，
+        // 而指标标签是长期契约（改了等于历史序列清零）。
+        governanceMetrics.recordLimitRejected(metricDimension);
         response.setStatus(429);
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.setCharacterEncoding("UTF-8");

@@ -38,7 +38,9 @@ class DependencyCircuitBreakersTest {
     /** 依赖级路径不读租户配置，用 mock 即可（本类只测判据） */
     private DependencyCircuitBreakers newBreakers() {
         return new DependencyCircuitBreakers(50f, 1000L, 30L, 10, 5, 3,
-                mock(TenantConfigService.class));
+                mock(TenantConfigService.class),
+                new com.newcoupon.infrastructure.metrics.GovernanceMetrics(
+                        new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
     }
 
     /** 熔断器的窗口是 10、最小样本数 5：喂满 5 次即达判定条件 */

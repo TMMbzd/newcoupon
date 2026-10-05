@@ -48,6 +48,8 @@ public class DependencyCircuitBreakers {
     /** 已挂过状态转移日志的熔断器名（去重：onStateTransition 是追加消费者，重复挂会打多份日志） */
     private final Set<String> loggingRegistered = ConcurrentHashMap.newKeySet();
     private final TenantConfigService tenantConfig;
+    /** 状态转移要计数（S2 第 11 步）——官方 resilience4j 指标集里没有 transition 计数 */
+    private final com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics;
 
     public DependencyCircuitBreakers(
             @Value("${coupon.circuit-breaker.failure-rate:50}") float failureRate,
@@ -56,8 +58,10 @@ public class DependencyCircuitBreakers {
             @Value("${coupon.circuit-breaker.window-size:10}") int windowSize,
             @Value("${coupon.circuit-breaker.min-calls:5}") int minCalls,
             @Value("${coupon.circuit-breaker.half-open-calls:3}") int halfOpenCalls,
-            TenantConfigService tenantConfig) {
+            TenantConfigService tenantConfig,
+            com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics) {
         this.tenantConfig = tenantConfig;
+        this.governanceMetrics = governanceMetrics;
         this.halfOpenCalls = halfOpenCalls;
         this.windowSize = windowSize;
         this.minCalls = minCalls;
@@ -184,9 +188,11 @@ public class DependencyCircuitBreakers {
      * 给熔断器挂**状态转移日志**（S2 第 10 步）——"熔断打开了"这件事必须能从外部看见。
      *
      * <p>为什么需要：第 10 步的演练脚本要判定"注入故障 → 观察熔断打开 → 恢复 → 闭合"。
-     * 但本项目没有 resilience4j-micrometer（拉不到新依赖），{@code /actuator/circuitbreakers}
-     * 也不存在——没有日志的话，脚本只能靠响应码与时延猜，而时延是不可控量
+     * 当时还没有把熔断接进 Micrometer，{@code /actuator/circuitbreakers} 也不存在——
+     * 没有日志的话，脚本只能靠响应码与时延猜，而时延是不可控量
      * （本项目的测试铁律③：不要用不可控的量卡边界）。
+     * <p>（第 11 步起 Prometheus 侧也能看到状态了，见 {@code CircuitBreakerMetricsConfig}；
+     * 日志仍然是**最省事的那一手**——脚本 grep 一行就够，不必解析指标文本。）
      *
      * <p>用 {@code loggingRegistered} 去重：{@code getEventPublisher().onStateTransition}
      * 是**追加**消费者，重复调用会打多份日志（熔断器实例本身是按名字缓存的）。
@@ -202,6 +208,11 @@ public class DependencyCircuitBreakers {
                     log.info("熔断器状态变化：{} {} → {}",
                             event.getCircuitBreakerName(), transition.getFromState(), transition.getToState());
                 }
+                // 计数进 Prometheus（S2 第 11 步）：官方集成导出 state/failure_rate/calls 等 16 项，
+                // 但**没有** transition 计数，而 RQ-10 要"切换次数"。
+                // 挂在这个**状态事件**上而不是调用路径上——不会被请求量放大。
+                governanceMetrics.recordBreakerTransition(
+                        event.getCircuitBreakerName(), transition.getToState().name());
             });
         }
         return breaker;

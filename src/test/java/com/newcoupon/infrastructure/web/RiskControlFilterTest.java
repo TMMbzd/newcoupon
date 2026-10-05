@@ -24,7 +24,9 @@ import org.springframework.mock.web.MockHttpServletResponse;
 class RiskControlFilterTest {
 
     private final IpRateGate gate = mock(IpRateGate.class);
-    private final RiskControlFilter filter = new RiskControlFilter(gate);
+    private final RiskControlFilter filter = new RiskControlFilter(gate,
+            new com.newcoupon.infrastructure.metrics.GovernanceMetrics(
+                    new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
 
     private MockHttpServletRequest post(String servletPath, String remoteAddr) {
         MockHttpServletRequest request = new MockHttpServletRequest("POST", servletPath);

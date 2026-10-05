@@ -36,9 +36,11 @@ public class SwitchController {
      * 熔断器当前状态（S2 第 10 步）——**新增的只读观测口**。
      *
      * <p>为什么需要它：第 10 步的演练脚本要判定"注入故障 → 熔断打开 → 恢复 → 闭合"，
-     * 但本项目没有 resilience4j-micrometer（离线拉不到新依赖），
-     * {@code /actuator/circuitbreakers} 与 Prometheus 的 breaker 指标都不存在。
+     * 当时既没有 {@code /actuator/circuitbreakers}、Prometheus 侧也没有 breaker 指标。
      * 没有这个口，脚本只能靠"响应码 + 时延"猜——而时延是不可控量，负载下必然 flaky。
+     * <p><b>第 11 步起 Prometheus 侧也有了</b>（{@code resilience4j_circuitbreaker_state}，
+     * 见 {@code CircuitBreakerMetricsConfig}）；这个端点保留，因为它是"一眼看全部熔断器"
+     * 的最短路径（Prometheus 侧要先抓再查，排障时反而绕）。
      *
      * <p>只读、不设防（与开关清单一致）：熔断状态不含敏感信息，
      * 而"能读到当前状态"本身就是排障与演练的第一步。

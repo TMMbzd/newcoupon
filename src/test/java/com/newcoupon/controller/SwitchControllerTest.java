@@ -15,10 +15,10 @@ import org.springframework.mock.env.MockEnvironment;
 /**
  * 熔断观测接口（S2 第 10 步）。
  *
- * <p>为什么这个"只是读状态"的接口值得一组用例：<b>它是演练脚本唯一的可靠判据</b>。
- * 本项目没有 resilience4j-micrometer，{@code /actuator/circuitbreakers} 与 Prometheus
- * 的 breaker 指标都不存在；没有这个口，脚本只能靠响应码 + 时延猜，
- * 而时延是不可控量（测试铁律③），负载一高就 flaky。
+ * <p>为什么这个"只是读状态"的接口值得一组用例：<b>它当时是演练脚本唯一的可靠判据</b>。
+ * 没有这个口，脚本只能靠响应码 + 时延猜，而时延是不可控量（测试铁律③），
+ * 负载一高就 flaky。（第 11 步起 Prometheus 侧也有了熔断状态指标，
+ * 但这个"一眼看全部熔断器"的只读端点仍然更省事。）
  *
  * <p>用例的设计要点：**断言状态随实际状态变化**（先 CLOSED，打开后 OPEN），
  * 而不是只断言"字段存在"——后者在实现把状态写死时照样绿。
@@ -29,7 +29,9 @@ class SwitchControllerTest {
 
     private DependencyCircuitBreakers newBreakers() {
         return new DependencyCircuitBreakers(50f, 1000L, 30L, 10, 5, 3,
-                mock(TenantConfigService.class));
+                mock(TenantConfigService.class),
+                new com.newcoupon.infrastructure.metrics.GovernanceMetrics(
+                        new io.micrometer.core.instrument.simple.SimpleMeterRegistry()));
     }
 
     private SwitchController newController(DependencyCircuitBreakers breakers) {

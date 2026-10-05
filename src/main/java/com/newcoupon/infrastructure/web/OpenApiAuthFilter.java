@@ -83,17 +83,21 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
     private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
     private final OpenApiAuditRecorder auditRecorder;
+    /** 治理指标（S2 第 11 步） */
+    private final com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics;
     private final com.newcoupon.application.service.TenantConfigService tenantConfigService;
 
     public OpenApiAuthFilter(CachedOpenAppReader appReader,
                              StringRedisTemplate redis,
                              ObjectMapper objectMapper,
                              OpenApiAuditRecorder auditRecorder,
+                             com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics,
                              com.newcoupon.application.service.TenantConfigService tenantConfigService) {
         this.appReader = appReader;
         this.redis = redis;
         this.objectMapper = objectMapper;
         this.auditRecorder = auditRecorder;
+        this.governanceMetrics = governanceMetrics;
         this.tenantConfigService = tenantConfigService;
     }
 
@@ -208,6 +212,14 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
                 (int) (System.currentTimeMillis() - start),
                 RiskControlFilter.clientIp(request),
                 ctx.userId()));
+
+        // 租户用量进 Prometheus（S2 第 11 步）。
+        // **appId 只在验签通过时作标签**：请求头里的 appId 在验签前不可信，
+        // 直接拿来当标签，任何人用随机 appId 发请求就能把时间序列打爆（cardinality DoS）。
+        // 未验签的一律归入固定桶 unverified。
+        Integer businessCode = verified ? ctx.resultCode() : rejectedCode;
+        governanceMetrics.recordOpenApiCall(verified ? declaredAppId : null,
+                (businessCode != null && businessCode == 0) ? "ok" : "rejected");
     }
 
     /**

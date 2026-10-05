@@ -69,6 +69,36 @@
       <artifactId>micrometer-registry-prometheus</artifactId>
     </dependency>
 
+    <!-- S2 第 11 步（RQ-10）：把熔断状态接进 Micrometer。
+         为什么用官方集成而不是自建 Gauge：它会**自动跟进**熔断器的懒创建、按租户动态创建与移除
+         （实测：绑定之后新建的熔断器也会被补上指标，evict 之后序列真实消失）——
+         自建 Gauge 要把这套生命周期再实现一遍，且极易漏掉"后创建的熔断器"。
+         排除 4 个用不到的模块：它们在本 artifact 里是 runtime 依赖，而本项目只用了 circuitbreaker
+         （留着的代价是依赖树噪音与潜在的版本冲突面）。 -->
+    <dependency>
+      <groupId>io.github.resilience4j</groupId>
+      <artifactId>resilience4j-micrometer</artifactId>
+      <version>${resilience4j.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>io.github.resilience4j</groupId>
+          <artifactId>resilience4j-bulkhead</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>io.github.resilience4j</groupId>
+          <artifactId>resilience4j-retry</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>io.github.resilience4j</groupId>
+          <artifactId>resilience4j-ratelimiter</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>io.github.resilience4j</groupId>
+          <artifactId>resilience4j-timelimiter</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
     <!-- ORM：MyBatis-Plus（阶段2 分库分表时在底层叠加 ShardingSphere-JDBC） -->
     <dependency>
       <groupId>com.baomidou</groupId>

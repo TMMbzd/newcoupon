@@ -35,9 +35,13 @@ public class RiskControlFilter extends OncePerRequestFilter {
     private static final String RECEIVE_PATH_SUFFIX = "/receive";
 
     private final IpRateGate ipRateGate;
+    /** 治理指标（S2 第 11 步） */
+    private final com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics;
 
-    public RiskControlFilter(IpRateGate ipRateGate) {
+    public RiskControlFilter(IpRateGate ipRateGate,
+                             com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics) {
         this.ipRateGate = ipRateGate;
+        this.governanceMetrics = governanceMetrics;
     }
 
     @Override
@@ -48,6 +52,9 @@ public class RiskControlFilter extends OncePerRequestFilter {
                 && request.getServletPath().endsWith(RECEIVE_PATH_SUFFIX)) {
             String ip = clientIp(request);
             if (!ipRateGate.allow(ip)) {
+                // 维度码用 risk_ip：与开放面配额过滤器里的 IP 维度（ip）区分开——
+                // 两者是**不同的防线**（一个是风控、一个是配额），合并计数会看不清是谁在拦
+                governanceMetrics.recordLimitRejected("risk_ip");
                 response.setStatus(429);
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
                 // L43（2026-09-29 教学演示实测）：不声明字符集时 Servlet 默认 ISO-8859-1，
