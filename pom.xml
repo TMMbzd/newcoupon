@@ -104,6 +104,13 @@
       <artifactId>sentinel-spring-webmvc-v6x-adapter</artifactId>
       <version>${sentinel.version}</version>
     </dependency>
+    <!-- 动态规则源的基础设施（AutoRefreshDataSource / Converter）。
+         适配器不含它，但官方明确要求集群流控"必须对接动态规则源"，所以这一层是必需的。 -->
+    <dependency>
+      <groupId>com.alibaba.csp</groupId>
+      <artifactId>sentinel-datasource-extension</artifactId>
+      <version>${sentinel.version}</version>
+    </dependency>
 
     <!-- S2 第 11 步（RQ-10）：把熔断状态接进 Micrometer。
          为什么用官方集成而不是自建 Gauge：它会**自动跟进**熔断器的懒创建、按租户动态创建与移除
