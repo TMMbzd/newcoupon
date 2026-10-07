@@ -78,10 +78,18 @@ class GovernanceMetricsIntegrationTest extends ShardedIntegrationTestSupport {
 
     @BeforeEach
     void provisionOnce() {
+        // **守卫写反过（2026-10-08 修）**：原来是 `if (!CAS) { 建 }` ——
+        // 效果是"第一条用例不建、之后每条都建"（这里因为每次都用新 appId，所以只是白白多建几个，
+        // 没红；同款写法在 SentinelIpDimensionTest 上就红了：client 为 null + "appId 已存在"）。
+        // 正确写法是"抢到的那一次才建，其余直接返回"——见工程手记 §2.5。
         if (!PROVISIONED.compareAndSet(false, true)) {
-            appId = "t-metrics-" + SEQ.incrementAndGet();
-            appService.create(new CreateAppRequest(appId, "指标验证", 0, 0, null));
+            return;
         }
+        // 注：appId 目前只在这里赋值、没有任何断言用到它（本类的用例走的是**未验签**请求，
+        // 归入 unverified 桶）。保留它是因为"租户用量"这条能力迟早要有验签链路的用例，
+        // 那时它就是现成的；真要清理请连同这个字段一起去掉。
+        appId = "t-metrics-" + SEQ.incrementAndGet();
+        appService.create(new CreateAppRequest(appId, "指标验证", 0, 0, null));
     }
 
     // ------------------------------------------------------------------
