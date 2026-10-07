@@ -35,6 +35,8 @@
     <resilience4j.version>2.2.0</resilience4j.version>
     <!-- 限流库版本（见下方依赖处的选型理由） -->
     <bucket4j.version>8.21.0</bucket4j.version>
+    <!-- Sentine 版本：1.8.10 是当前最新 GA（2.0.0-alpha 自 2023 起未 GA） -->
+    <sentinel.version>1.8.10</sentinel.version>
   </properties>
 
   <dependencies>
@@ -89,6 +91,18 @@
       <groupId>com.bucket4j</groupId>
       <artifactId>bucket4j_jdk17-lettuce</artifactId>
       <version>${bucket4j.version}</version>
+    </dependency>
+
+    <!-- 限流：Sentinel（2026-10-08 决定全面迁移过来，见 docs/S3-限流全面迁移到Sentinel-需求与设计-2026-10-08.md）。
+         坐标核实（无需排除项）：
+         · 传递依赖里的 fastjson 是 **test scope**，不进生产依赖；
+         · jakarta.servlet-api / spring-webmvc 都是 **provided**，不会与 Boot 3.3.5 冲突；
+         · 官方**没有** sentinel-spring-boot-starter（Central 上那个是 2018 年的 0.1.0），
+           也没有自动配置——必须手动 addInterceptor。 -->
+    <dependency>
+      <groupId>com.alibaba.csp</groupId>
+      <artifactId>sentinel-spring-webmvc-v6x-adapter</artifactId>
+      <version>${sentinel.version}</version>
     </dependency>
 
     <!-- S2 第 11 步（RQ-10）：把熔断状态接进 Micrometer。
