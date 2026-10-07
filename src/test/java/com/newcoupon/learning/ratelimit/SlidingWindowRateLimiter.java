@@ -1,4 +1,6 @@
-package com.newcoupon.infrastructure.ratelimit;
+package com.newcoupon.learning.ratelimit;
+
+import com.newcoupon.infrastructure.ratelimit.RateLimiter;
 
 import java.time.Duration;
 import java.util.List;
@@ -25,7 +27,10 @@ import org.springframework.stereotype.Component;
  *
  * <p>时间同样取自 Redis 服务端（理由见 {@link TokenBucketRateLimiter}）。
  */
-@Component
+// 【学习材料】不在生产路径上。生产用的是 main 里的 Bucket4jRateLimiter。
+// 保留这几个实现，是为了能对照着读「三种算法分别长什么样」，
+// 并让 RateLimitAlgorithmsTest 用它们演示各自的形状差异（包括各自的缺点）。
+
 public class SlidingWindowRateLimiter implements RateLimiter {
 
     /**

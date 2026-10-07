@@ -61,14 +61,14 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     private static final String RETRY_AFTER = "Retry-After";
 
     /** 默认算法：租户没配或配了不存在的算法时用它 */
-    private static final String DEFAULT_ALGORITHM = "sliding_window";
 
     private final CachedOpenAppReader appReader;
     private final ObjectMapper objectMapper;
     private final TenantConfigService tenantConfigService;
 
     /** 算法标识 → 限流器实现。**按实现自报的 algorithm() 建索引**，而不是靠 bean 名字去猜 */
-    private final Map<String, RateLimiter> limitersByAlgorithm;
+    /** 限流器（2026-10-08 起只有一个实现：Bucket4j 的分布式令牌桶） */
+    private final RateLimiter limiter;
 
     /**
      * 平台级限流维度（S2 第 6 步）。
@@ -91,7 +91,7 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
             java.lang.management.ManagementFactory.getRuntimeMXBean().getStartTime();
 
     public OpenApiQuotaFilter(CachedOpenAppReader appReader,
-                              List<RateLimiter> limiters,
+                              RateLimiter limiter,
                               ObjectMapper objectMapper,
                               TenantConfigService tenantConfigService,
                               @Value("${coupon.ratelimit.ip.enabled:false}") boolean ipEnabled,
@@ -107,9 +107,8 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         this.ipQps = ipQps;
         this.resourceEnabled = resourceEnabled;
         this.resourceQps = resourceQps;
-        this.limitersByAlgorithm = limiters.stream()
-                .collect(java.util.stream.Collectors.toMap(RateLimiter::algorithm, l -> l));
-        log.info("限流器已装配：{}", limitersByAlgorithm.keySet());
+        this.limiter = limiter;
+        log.info("限流器已装配：{}", limiter.algorithm());
     }
 
     @Override
@@ -156,8 +155,12 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         if (limit <= 0) {
             return true;
         }
-        String key = QPS_KEY_PREFIX + appId + ":" + (System.currentTimeMillis() / 1000);
-        if (acquireSafely(appId, key, limit, Duration.ofSeconds(2), "tenant_qps")) {
+        // **subject 只是"限谁"，不含时间**（2026-10-08 修正）：
+        // 旧写法把"当前秒"拼进键里，等于让调用方替算法决定"窗口怎么切"——
+        // 滑动窗口因此读不到"上一窗口"（它派生在基础键下面，而基础键每秒就换），
+        // 配了滑动窗口的租户实际拿到的是退化的固定窗口。窗口怎么切是实现的职责。
+        String subject = QPS_KEY_PREFIX + appId;
+        if (acquireSafely(appId, subject, limit, Duration.ofSeconds(2), "tenant_qps")) {
             return true;
         }
         reject(response, ErrorCode.QPS_LIMIT_EXCEEDED, "1", "租户配额", "tenant_qps");   // 下一秒就是新窗口
@@ -169,15 +172,14 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         if (limit <= 0) {
             return true;
         }
-        String day = LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE);
-        // 计数器活到次日 00:05（而不是 24h）：按自然日重置，跨天边界留 5 分钟余量
-        LocalDateTime expireAt = LocalDate.now().plusDays(1).atTime(0, 5);
-        String key = DAILY_KEY_PREFIX + appId + ":" + day;
-        if (acquireSafely(appId, key, limit, Duration.between(LocalDateTime.now(), expireAt), "tenant_daily")) {
-            return true;
-        }
+        // 同样只传"限谁"：日配额的"当天"这个概念由窗口长度表达（到次日 0 点），
+        // 不再是"键里拼日期、靠换键重置"。
         long secondsUntilTomorrow = Duration.between(LocalDateTime.now(),
                 LocalDate.now().plusDays(1).atStartOfDay()).getSeconds();
+        if (acquireSafely(appId, DAILY_KEY_PREFIX + appId, limit,
+                Duration.ofSeconds(Math.max(1, secondsUntilTomorrow)), "tenant_daily")) {
+            return true;
+        }
         reject(response, ErrorCode.DAILY_QUOTA_EXCEEDED, String.valueOf(Math.max(1, secondsUntilTomorrow)), "日配额", "tenant_daily");
         return false;
     }
@@ -186,7 +188,8 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
      * 平台级维度（IP / 接口）的限流检查。**任一超限即拒**，且错误信息里带上维度名——
      * 接入方看到 429 时能知道是自己打太快，还是这个接口被全平台限了。
      *
-     * <p>用默认算法（滑动窗口）：平台级维度是保护性的，不需要"允许突发"这类业务特性。
+     * <p>（2026-10-08 注：这里原写着"用默认算法（滑动窗口）"——那个说法已经作废。
+     * 现在只有一个限流实现（Bucket4j 令牌桶），不存在"平台级用哪种算法"这回事。）
      */
     private boolean withinPlatformDimension(String dimension, String metricDimension, String keyPrefix,
                                             int limit, boolean enabled,
@@ -194,8 +197,7 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
         if (!enabled || limit <= 0) {
             return true;
         }
-        String key = keyPrefix + ":" + (System.currentTimeMillis() / 1000);
-        RateLimiter limiter = limitersByAlgorithm.get(DEFAULT_ALGORITHM);
+        String key = keyPrefix;   // 只传"限谁"，窗口交给算法
         boolean allowed;
         try {
             allowed = limiter.tryAcquire(key, limit, Duration.ofSeconds(2));
@@ -226,14 +228,14 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     }
 
     /**
-     * 按租户配置挑算法并执行；**fail-open**（配额是可用性防线，不因中间件故障误杀全量接入方）。
+     * 执行一次限流检查；**fail-open**（配额是可用性防线，不因中间件故障误杀全量接入方）。
      *
-     * <p>算法来自租户配置 {@code rate_limit.algorithm}；配了不存在的算法会回落到默认算法
-     * （而不是抛异常）——配置写错是运维问题，不该变成用户的请求失败。
+     * <p>（2026-10-08 起不再"按租户配置挑算法"——那个配置项已删：调研核实业界没有
+     * "固定窗口/滑动窗口/令牌桶三选一"这种东西，主流就是令牌桶。
+     * 而它在本项目里还是坏的：见 {@code RateLimiter} 的类注释。）
      */
     private boolean acquireSafely(String appId, String key, int limit, Duration ttl,
                                   String metricDimension) {
-        RateLimiter limiter = resolveLimiter(appId);
         try {
             return limiter.tryAcquire(key, limit, ttl);
         } catch (RuntimeException e) {
@@ -244,35 +246,6 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
             governanceMetrics.recordLimitFailOpen(metricDimension);
             return true;
         }
-    }
-
-    /**
-     * 组装该租户实际使用的限流器：**先按配置选算法，再按配置决定要不要套上冷启动预热**。
-     *
-     * <p>装饰器在这里"现场组装"而不是预先注册成 bean：预热参数是租户级的，
-     * 组合数 = 算法数 × 预热配置数，预先注册会爆炸；而且包装对象只有三个字段，构造成本可忽略。
-     */
-    private RateLimiter resolveLimiter(String appId) {
-        RateLimiter limiter = baseLimiter(appId);
-        int warmupSeconds = tenantConfigService.getInt(appId, TenantConfigKey.RATE_LIMIT_WARMUP_SECONDS);
-        if (warmupSeconds > 0) {
-            return new com.newcoupon.infrastructure.ratelimit.WarmUpRateLimiter(
-                    limiter, JVM_START_MS, warmupSeconds * 1000L);
-        }
-        return limiter;
-    }
-
-    /** 按配置选算法；配了不存在的算法回落默认（配置写错是运维问题，不该变成用户的请求失败） */
-    private RateLimiter baseLimiter(String appId) {
-        String algorithm = tenantConfigService.get(appId, TenantConfigKey.RATE_LIMIT_ALGORITHM);
-        RateLimiter limiter = algorithm == null ? null : limitersByAlgorithm.get(algorithm);
-        if (limiter == null) {
-            if (algorithm != null) {
-                log.warn("租户配置了未知的限流算法，回落默认：appId={} algorithm={}", appId, algorithm);
-            }
-            limiter = limitersByAlgorithm.get(DEFAULT_ALGORITHM);
-        }
-        return limiter;
     }
 
     private void reject(HttpServletResponse response, ErrorCode code, String retryAfterSeconds,

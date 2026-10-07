@@ -156,8 +156,13 @@ class OpenApiQuotaIntegrationTest extends ShardedIntegrationTestSupport {
     void tenantConfig_overridesRegisteredThreshold() throws Exception {
         clearConfig();   // 起点干净："配置是持久化的"，用例必须自己保证幂等
 
-        assertThat(exhaust(CFG_APP, cfgSecret, 5).status())
-                .as("未配 → 用登记表的阈值 2，连打 5 次应当被限").isEqualTo(429);
+        // **连打 20 次而不是 5 次**：令牌桶是"按时间补充"的（容量 2、每 2 秒补满 2 个），
+        // 所以"连打 5 次必被拒"隐含"5 次落在 2 秒内"这个前提——那是不可控的量。
+        // 改成 20 次之后，即使这 20 次花掉 10 秒（只补回 10 个令牌），也**必然**有请求被拒，
+        // 与机器快慢无关。（换实现前这条用例用的是 5 次，靠的是旧实现"每秒一个独立窗口"，
+        // 窗口更短所以更容易撞上——那是个一直存在的时序依赖，换实现后暴露了出来。）
+        assertThat(exhaust(CFG_APP, cfgSecret, 20).status())
+                .as("未配 → 用登记表的阈值 2，连打 20 次必然被限").isEqualTo(429);
 
         tenantConfigService.put(CFG_APP, java.util.Map.of("rate_limit.qps", "1000"), "test");
 

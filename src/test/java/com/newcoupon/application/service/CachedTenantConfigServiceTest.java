@@ -99,9 +99,9 @@ class CachedTenantConfigServiceTest {
         assertThat(service.allOf(APP))
                 .as("读不到配置 = 该租户没有任何配置（走默认值），不是异常")
                 .isEmpty();
-        assertThat(service.get(APP, TenantConfigKey.RATE_LIMIT_ALGORITHM))
+        assertThat(service.get(APP, TenantConfigKey.RATE_LIMIT_QPS))
                 .as("读不到就用该键的默认值——这正是 S2 第 1 步定下的三条铁律第 1 条")
-                .isEqualTo(TenantConfigKey.RATE_LIMIT_ALGORITHM.defaultValue());
+                .isEqualTo(TenantConfigKey.RATE_LIMIT_QPS.defaultValue());
     }
 
     @Test

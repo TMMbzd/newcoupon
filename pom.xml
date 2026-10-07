@@ -33,6 +33,8 @@
     <mybatis-plus.version>3.5.7</mybatis-plus.version>
     <!-- Boot BOM 未纳管，显式声明（见下方依赖注释） -->
     <resilience4j.version>2.2.0</resilience4j.version>
+    <!-- 限流库版本（见下方依赖处的选型理由） -->
+    <bucket4j.version>8.21.0</bucket4j.version>
   </properties>
 
   <dependencies>
@@ -67,6 +69,26 @@
     <dependency>
       <groupId>io.micrometer</groupId>
       <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
+
+    <!-- 限流：Bucket4j（2026-10-08 替换自研的三个算法实现）。
+         选它的理由（见 docs/限流选型-业界调研-2026-10-08.md）：
+         ① 契约正确——getProxy(key, config) 的 key 就是"限谁"，不含时间信息；
+            自研接口当年把"键必须自带窗口标识"写进了契约，导致滑动窗口读不到上一窗口；
+         ② 可**复用项目现有的 Lettuce 连接**，不引入第二个 Redis 客户端栈（这是排除 Redisson 的主因）；
+         ③ Apache-2.0，且持续发版（8.21.0 是 2026-10-02 发布）；
+         ④ 零新传递依赖。
+         制品按 JDK 分档：必须用 jdk17 坐标；网上老教程常引用的
+         com.bucket4j:bucket4j-redis（Jedis 版）与 bucket4j_jdk17-redis 都已停更。 -->
+    <dependency>
+      <groupId>com.bucket4j</groupId>
+      <artifactId>bucket4j_jdk17-core</artifactId>
+      <version>${bucket4j.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.bucket4j</groupId>
+      <artifactId>bucket4j_jdk17-lettuce</artifactId>
+      <version>${bucket4j.version}</version>
     </dependency>
 
     <!-- S2 第 11 步（RQ-10）：把熔断状态接进 Micrometer。

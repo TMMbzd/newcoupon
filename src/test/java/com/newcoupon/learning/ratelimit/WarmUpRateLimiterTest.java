@@ -1,4 +1,6 @@
-package com.newcoupon.infrastructure.ratelimit;
+package com.newcoupon.learning.ratelimit;
+
+import com.newcoupon.infrastructure.ratelimit.RateLimiter;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

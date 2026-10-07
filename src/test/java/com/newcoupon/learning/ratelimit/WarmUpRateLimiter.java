@@ -1,4 +1,6 @@
-package com.newcoupon.infrastructure.ratelimit;
+package com.newcoupon.learning.ratelimit;
+
+import com.newcoupon.infrastructure.ratelimit.RateLimiter;
 
 import java.time.Duration;
 
@@ -18,6 +20,10 @@ import java.time.Duration;
  * <p><b>起点取 JVM 启动时间</b>：预热保护的是"这个进程还没热身"，所以它的生命周期属于进程，
  * 而不是某个租户或某个键。这也让"重启之后又变冷"这件事自动成立。
  */
+// 【学习材料】不在生产路径上。生产用的是 main 里的 Bucket4jRateLimiter。
+// 保留这几个实现，是为了能对照着读「三种算法分别长什么样」，
+// 并让 RateLimitAlgorithmsTest 用它们演示各自的形状差异（包括各自的缺点）。
+
 public class WarmUpRateLimiter implements RateLimiter {
 
     /** 冷启动因子：起点阈值为目标阈值的 1/3 */

@@ -1,4 +1,6 @@
-package com.newcoupon.infrastructure.ratelimit;
+package com.newcoupon.learning.ratelimit;
+
+import com.newcoupon.infrastructure.ratelimit.RateLimiter;
 
 import java.time.Duration;
 import java.util.List;
@@ -25,7 +27,10 @@ import org.springframework.stereotype.Component;
  * <p><b>为什么用 Lua</b>：读令牌、算补充、扣减、写回必须原子完成；分成几条命令会出现
  * "两个请求同时读到还有 1 个令牌、都扣成功"的超发。
  */
-@Component
+// 【学习材料】不在生产路径上。生产用的是 main 里的 Bucket4jRateLimiter。
+// 保留这几个实现，是为了能对照着读「三种算法分别长什么样」，
+// 并让 RateLimitAlgorithmsTest 用它们演示各自的形状差异（包括各自的缺点）。
+
 public class TokenBucketRateLimiter implements RateLimiter {
 
     /**

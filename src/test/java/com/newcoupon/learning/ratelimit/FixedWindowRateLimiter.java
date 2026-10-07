@@ -1,4 +1,6 @@
-package com.newcoupon.infrastructure.ratelimit;
+package com.newcoupon.learning.ratelimit;
+
+import com.newcoupon.infrastructure.ratelimit.RateLimiter;
 
 import java.time.Duration;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -14,7 +16,10 @@ import org.springframework.stereotype.Component;
  * <p>本类不做 fail-open/fail-closed 裁决：Redis 异常直接抛，由调用方按场景决定
  * （开放面配额是可用性防线 → 放行）。
  */
-@Component
+// 【学习材料】不在生产路径上。生产用的是 main 里的 Bucket4jRateLimiter。
+// 保留这几个实现，是为了能对照着读「三种算法分别长什么样」，
+// 并让 RateLimitAlgorithmsTest 用它们演示各自的形状差异（包括各自的缺点）。
+
 public class FixedWindowRateLimiter implements RateLimiter {
 
     private final StringRedisTemplate redis;

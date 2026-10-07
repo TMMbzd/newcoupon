@@ -13,17 +13,6 @@ package com.newcoupon.application.service;
  */
 public enum TenantConfigKey implements ConfigKeySpec {
 
-    /**
-     * 限流算法。
-     *
-     * <p><b>为什么没有 leaky_bucket（漏桶）</b>：漏桶的独立价值在于"请求先入桶、按固定速率流出"，
-     * 也就是**排队**；而排队已被本阶段的决策排除（同步模型下排队会占住请求线程，把"拒绝一部分"
-     * 变成"全部拖死"）。去掉排队的漏桶退化成水位模型，与令牌桶行为等价——
-     * **不做的事不要出现在选项里**，否则运维配了它却发现行为一样。
-     */
-    RATE_LIMIT_ALGORITHM("rate_limit.algorithm", "sliding_window", Type.STRING, "限流算法",
-            "fixed_window", "sliding_window", "token_bucket"),
-
     /** 每秒上限；不配则回落到登记表 open_app.qps_limit（保持 S1 的既有入口） */
     RATE_LIMIT_QPS("rate_limit.qps", null, Type.INT, "每秒请求上限（0=不限；不配则用登记表的值）"),
 

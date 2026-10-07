@@ -82,8 +82,8 @@ class TenantConfigIntegrationTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("没配过 → 用该键的默认值（配置缺失不该变成功能不可用）")
     void unconfigured_fallsBackToDefault() {
-        assertThat(configService.get(APP_CLEAN, TenantConfigKey.RATE_LIMIT_ALGORITHM))
-                .isEqualTo("sliding_window");
+        assertThat(configService.get(APP_CLEAN, TenantConfigKey.CIRCUIT_BREAKER_OPEN_SECONDS))
+                .isEqualTo("30");
         assertThat(configService.getInt(APP_CLEAN, TenantConfigKey.TIMEOUT_DEFAULT_MS)).isEqualTo(3000);
         assertThat(configService.getInt(APP_CLEAN, TenantConfigKey.CIRCUIT_BREAKER_FAILURE_RATE)).isEqualTo(50);
         assertThat(configService.allOf(APP_CLEAN)).as("这个租户没有任何显式配置").isEmpty();
@@ -92,11 +92,11 @@ class TenantConfigIntegrationTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("配过了 → 用配置值（管理面写入后要能被读到）")
     void configured_usesStoredValue() {
-        put(APP_A, TenantConfigKey.RATE_LIMIT_ALGORITHM, "token_bucket");
+        put(APP_A, TenantConfigKey.CIRCUIT_BREAKER_OPEN_SECONDS, "45");
         put(APP_A, TenantConfigKey.TIMEOUT_DEFAULT_MS, "800");
         configService.invalidate(APP_A);   // 管理面改配置后的主动失效
 
-        assertThat(configService.get(APP_A, TenantConfigKey.RATE_LIMIT_ALGORITHM)).isEqualTo("token_bucket");
+        assertThat(configService.get(APP_A, TenantConfigKey.CIRCUIT_BREAKER_OPEN_SECONDS)).isEqualTo("45");
         assertThat(configService.getInt(APP_A, TenantConfigKey.TIMEOUT_DEFAULT_MS)).isEqualTo(800);
         assertThat(configService.allOf(APP_A)).containsEntry("timeout.default_ms", "800");
     }
@@ -128,15 +128,19 @@ class TenantConfigIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("布尔配置：解析 'true'/'false'，写错回落默认值")
+    @DisplayName("非布尔值上的 getBool：读不出来就回落 false，不抛异常")
     void booleanConfig() {
-        put(APP_A, TenantConfigKey.RATE_LIMIT_ALGORITHM, "leaky_bucket");
+        // 词表里目前没有 BOOL 类型的键（开关那些走的是另一套：SwitchKey）。
+        // 这条用例验的是 getBool 的**通用行为**——遇到非布尔值时安静回落，而不是把请求打挂。
+        // put 用直接写库（绕过管理面校验），模拟"库里本来就有坏值"的历史数据。
+        put(APP_A, TenantConfigKey.CIRCUIT_BREAKER_OPEN_SECONDS, "abc");
         configService.invalidate(APP_A);
-        assertThat(configService.get(APP_A, TenantConfigKey.RATE_LIMIT_ALGORITHM)).isEqualTo("leaky_bucket");
-        // 布尔键当前词表里没有，这里用 getBool 的通用行为验证：未配置 → 默认
-        assertThat(configService.getBool(APP_A, TenantConfigKey.CIRCUIT_BREAKER_FAILURE_RATE))
-                .as("'50' 不是布尔值 → 回落默认 false（当前无布尔键，验证不抛异常即可）")
-                .isFalse();
+        assertThat(configService.get(APP_A, TenantConfigKey.CIRCUIT_BREAKER_OPEN_SECONDS))
+                .as("字符串读取不做校验，原样返回").isEqualTo("abc");
+        assertThat(configService.getBool(APP_A, TenantConfigKey.CIRCUIT_BREAKER_OPEN_SECONDS))
+                .as("'abc' 不是布尔值 → 安静回落 false，不抛异常").isFalse();
+        assertThat(configService.getInt(APP_A, TenantConfigKey.CIRCUIT_BREAKER_OPEN_SECONDS))
+                .as("'abc' 不是整数 → 回落该键默认值 30").isEqualTo(30);
     }
 
     // ------------------------------------------------------------------
