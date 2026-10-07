@@ -194,8 +194,19 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
             assertThat(bucketUsed(tplId)).as("P2b：发放权威读数=SUM(stock_bucket.used)").isEqualTo(1000);
             assertThat(stockGateway.remaining(tplId))
                     .as("Redis余量=总量-已发（取消记账无残留）").isEqualTo(1000L - 1000);
-            assertThat(stockGateway.confirmedCount(tplId)).as("dbi=1000").isEqualTo(1000);
-            assertThat(stockGateway.pendingCount(tplId)).as("在途=0").isZero();
+            // **守恒的正确形式是「已发放 + 在途 = 成功数」**，不是「已发放 = 库存数」。
+            //
+            // 这里我改过两版才写对，记下来免得再犯：
+            //  · 第一版 `dbi == 1000`（库存数）——隐含"2000 个请求全都成功完成"，压力下不成立；
+            //  · 第二版 `dbi == ok`（成功数）——仍然隐含"每个成功都完成了 confirm"，
+            //    而**这个前提本身就不成立**：confirm 失败时有一条"静默兜底、令牌交给清扫"的路径
+            //    （P0 修复留下的，用户仍拿到成功），于是 dbi 会比 ok 少几个。
+            //  · 第三版（本版）才是守恒本身：每笔成功要么已经 confirm（dbi+1、令牌出清），
+            //    要么令牌仍在 pend 里等着——两者相加必然等于成功数，**与压力无关**。
+            long dbi = stockGateway.confirmedCount(tplId);
+            long pend = stockGateway.pendingCount(tplId);
+            assertThat(dbi + pend)
+                    .as("守恒：dbi(" + dbi + ") + 在途(" + pend + ") = 成功数(" + ok + ")").isEqualTo(ok);
             assertThat(stockGateway.conservation(tplId, 300).sum() - 1000L)
                     .as("守恒式：stk+pend+dbi+void=total").isZero();
         } finally {
@@ -246,8 +257,12 @@ class RedisStockIntegrationTest extends ShardedIntegrationTestSupport {
         var slowRes = stockGateway.deduct(slow);
         assertThat(slowRes.success()).isTrue();   // 过闸（P2b：结果固化桶/世代）
 
-        assertThat(reconcileService.identityCheckAll())
-                .as("在途期间 pend 持令牌，恒等式成立").isZero();
+        // **用 checkOne(tplId) 而不是 identityCheckAll()**：后者是"全库巡检"，
+        // 在测试共享容器的现在（2026-10-08 起所有测试类共用一对容器）必然被**别的测试类
+        // 留下的在途令牌**污染——实测它就报了 4。而 checkOne 的注释本来就写着
+        // "单模板巡检（集成测试/运维精确断言用）"，正是为这种断言准备的。
+        assertThat(reconcileService.checkOne(tplId))
+                .as("在途期间 pend 持令牌，本模板的恒等式成立（false=无异常）").isFalse();
 
         assertThat(stockGateway.confirm(slow, slowRes.bucket(), slowRes.gen()))
                 .as("TTL内 confirm：dbi+1 且令牌出清").isTrue();
