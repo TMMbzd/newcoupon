@@ -2,9 +2,8 @@ package com.newcoupon.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.alibaba.csp.sentinel.slots.block.RuleConstant;
-import com.alibaba.csp.sentinel.slots.block.flow.FlowRule;
-import com.alibaba.csp.sentinel.slots.block.flow.FlowRuleManager;
+import com.alibaba.csp.sentinel.slots.system.SystemRule;
+import com.alibaba.csp.sentinel.slots.system.SystemRuleManager;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
@@ -49,7 +48,7 @@ class SentinelBlockContractTest extends ShardedIntegrationTestSupport {
 
     @AfterEach
     void clearRules() {
-        FlowRuleManager.loadRules(List.of());   // 规则是 JVM 级静态状态，用完必须清
+        SystemRuleManager.loadRules(List.of());   // 系统规则也是 JVM 级静态状态，用完必须清
     }
 
     private ResponseEntity<String> call() {
@@ -60,14 +59,30 @@ class SentinelBlockContractTest extends ShardedIntegrationTestSupport {
                         + "\",\"userId\":1,\"templateId\":999999}", h), String.class);
     }
 
-    /** 灌一条"全拒"的规则：count=0 在 Sentinel 里表示全部拒绝，一发就拦，与请求快慢无关 */
-    private void rejectAll() {
-        FlowRule rule = new FlowRule();
-        rule.setResource(RESOURCE);
-        rule.setGrade(RuleConstant.FLOW_GRADE_QPS);
-        rule.setCount(0);
-        rule.setLimitApp("default");
-        FlowRuleManager.loadRules(List.of(rule));
+    /**
+     * 拦下**所有**请求：用系统规则（"系统总 QPS 不能超过 0"），而不是 FlowRule。
+     *
+     * <p><b>为什么从 FlowRule 换成 SystemRule（第 6 步改）</b>：{@code FlowRuleManager} 的规则位
+     * **已经被自建的规则源接管了**（{@code SentinelRuleConfig} → 那个数据源每 10 秒把
+     * 全量租户规则推一次）。手工 {@code loadRules} 灌的规则会被下一次刷新**整个冲掉**——
+     * 实测症状就是这条用例在全量里红、单跑绿（"预期 429，实际 200"）。
+     *
+     * <p>这不是新问题：第 3 步就在另一个用例里踩过同一件事（"数据源与 loadRules 互相覆盖"），
+     * 当时的结论是"测试要走生产同一条路径"。本类保留的价值是**拒绝响应的形状**——
+     * 而"形状"与"是哪条规则拦的"无关，所以改用 {@code SystemRuleManager}
+     * （规则源不碰它，因此确定、不受刷新影响）。
+     *
+     * <p>顺带覆盖到一处本来没人验的映射：{@code SystemBlockException} → 5000（系统繁忙）
+     * 而不是 6006（请求超限）。6006/6007 这两条映射由
+     * {@code OpenApiQuotaIntegrationTest} 与 {@code SentinelIpDimensionTest} 覆盖。
+     */
+    private void blockAllBySystemRule() {
+        SystemRule rule = new SystemRule();
+        // 0 = "系统总 QPS 超过 0 就拒"。源码核实：SystemRuleManager 的判据是
+        // `getQps() >= 0`（所以 0 是**有效配置**，不是"没配"），而比较是
+        // `当前QPS + 本次count > 阈值` → 1 > 0 恒真，一发就拦，与请求快慢无关。
+        rule.setQps(0);
+        SystemRuleManager.loadRules(List.of(rule));
     }
 
     // ------------------------------------------------------------------
@@ -75,7 +90,7 @@ class SentinelBlockContractTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("被限时：HTTP 429 + **JSON 业务码** + Retry-After + 说明维度（四要素齐全）")
     void blockResponseKeepsOurContract() {
-        rejectAll();
+        blockAllBySystemRule();
 
         var resp = call();
 
@@ -84,13 +99,14 @@ class SentinelBlockContractTest extends ShardedIntegrationTestSupport {
                 .as("必须是本项目的 JSON 格式，而不是 Sentinel 默认的纯文本。实际=" + resp.getBody())
                 .startsWith("{");
         assertThat(resp.getBody())
-                .as("业务码要与迁移前一致（6006=请求速率超限）").contains("6006");
+                .as("业务码要与迁移前一致（5000=系统繁忙；系统自适应保护不是「谁打太快」，"
+                        + "所以它不该用 6006）").contains("5000");
         assertThat(resp.getHeaders().getFirst("Retry-After"))
                 .as("429 必须告诉对方多久后重试——否则接入方只能瞎猜或死循环重试").isNotNull();
         assertThat(resp.getBody())
                 .as("要说清是哪个维度被限 + 是哪个资源（接入方据此区分「我打太快」"
                         + "与「接口被平台限了」，也便于排障定位）。实际=" + resp.getBody())
-                .contains("超限")
+                .contains("自适应")
                 .contains(RESOURCE);
     }
 

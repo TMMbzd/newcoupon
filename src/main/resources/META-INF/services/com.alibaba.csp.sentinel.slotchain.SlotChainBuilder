@@ -1,4 +1,4 @@
-# Sentinel 的 SlotChainBuilder SPI（迁移第 5 步）。
+# Sentinel 的 SlotChainBuilder SPI（迁移第 5 步建立，第 6 步加了第二个自建 Slot）。
 # 注册自定义构建器会**替换**默认实现，所以这里指向的那个类继承了 DefaultSlotChainBuilder
-# （见 DailyQuotaSlotChainBuilder 的注释）——丢掉默认 slot 是一个很隐蔽的自伤。
-com.newcoupon.infrastructure.ratelimit.DailyQuotaSlotChainBuilder
+# （见 OpenApiSlotChainBuilder 的注释）——丢掉默认 slot 是一个很隐蔽的自伤。
+com.newcoupon.infrastructure.ratelimit.OpenApiSlotChainBuilder

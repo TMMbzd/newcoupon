@@ -44,8 +44,13 @@ public class GlobalExceptionHandler {
             response.setStatus(httpStatus);
         }
         // 429 必须带 Retry-After——否则接入方只能瞎猜或死循环重试。
-        // （迁移第 5 步：日配额改由 Sentinel 的 slot 抛出 BizException 之后，
-        //   这个头原来是在过滤器里手写的，现在统一在这里补，两条路径都不会漏。）
+        //
+        // 注意分工（第 6 步澄清）：**限流被拒不走这里**。Sentinel 的拒绝抛的是
+        // BlockException 的子类，而配额过滤器在 Filter 层、它的异常到不了本类
+        // （Filter 的异常交给 Servlet 容器）——那条路的响应由 `BlockRejection` 写。
+        // 本类只负责"业务代码里抛出的 6xxx BizException"（如接口拦截器的越权、版本不符）。
+        // 下面的 6007 分支是**防御性**的：目前没有代码路径会带它走到这里，但真出现时
+        // "多久后重试"的正确答案仍然是"到明天"。
         if (httpStatus == 429 && response.getHeader("Retry-After") == null) {
             response.setHeader("Retry-After", retryAfterOf(e.getErrorCode()));
         }

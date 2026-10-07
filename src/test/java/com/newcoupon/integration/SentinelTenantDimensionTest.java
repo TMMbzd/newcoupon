@@ -35,6 +35,10 @@ import org.springframework.beans.factory.annotation.Value;
  * <p>若这条绿不了，说明 origin 没传对——那么"按租户限流"整条路走不通，
  * 迁移方案要么改用"每个租户一个资源名"，要么退回去自己实现。**所以它是第 2 步的验收。**
  */
+// **必须显式开启 observability**：@SpringBootTest 默认会应用
+// DisableObservabilityContextCustomizer（"测试不需要指标导出"），于是 /actuator/prometheus 是 404。
+// 本类的最后一条用例要断言"拒绝必须留下指标"，所以必须把它打开。
+@org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability
 @Timeout(value = 120, unit = TimeUnit.SECONDS)
 @org.springframework.boot.test.context.SpringBootTest(
         webEnvironment = org.springframework.boot.test.context.SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -71,6 +75,10 @@ class SentinelTenantDimensionTest extends ShardedIntegrationTestSupport {
 
     @Autowired
     private org.springframework.data.redis.core.StringRedisTemplate redis;
+
+    /** 抓 /actuator/prometheus 用（断言的是**最终产物**，中间那层 Micrometer 命名转换也一并验了） */
+    @Autowired
+    private org.springframework.boot.test.web.client.TestRestTemplate rest;
 
     private static OpenApiTestClient client;
     private static String secretA;
@@ -136,6 +144,45 @@ class SentinelTenantDimensionTest extends ShardedIntegrationTestSupport {
         assertThat(b1.status())
                 .as("配额是按租户分开的，乙不该被甲拖累。响应=" + b1.body())
                 .isNotEqualTo(429);
+    }
+
+    /**
+     * 拒绝必须留下指标（第 6 步补的用例，<b>红在"迁移丢了打点"</b>）。
+     *
+     * <p><b>为什么单独一条</b>：迁移把租户维度的判定搬进了 Sentinel 的处理链，
+     * 拒绝响应改由一个统一出口写。搬的过程中**打点掉了**——响应还是那个 429，
+     * 唯独 {@code coupon_ratelimit_rejected_total} 不再增长。
+     * 这种"行为对、只是没人看得见"的退化，只有指标用例能发现。
+     *
+     * <p>用**日配额**驱动而不是 QPS：日配额的判据与请求快慢无关（QPS 规则要"落在同一秒内"，
+     * 而集成测试里一发请求要 1 秒多——那是不可控的量，第 10 步踩过）。
+     */
+    @Test
+    @DisplayName("被拒必须计入指标：coupon_ratelimit_rejected_total{dimension=\"tenant_daily\"}")
+    void tenantRejectionIsCounted() throws Exception {
+        // **自带一个独有租户**（共享容器之后的硬纪律）：日配额的 Redis 计数键是
+        // `c:open:quota:{appId}:{日期}`，**不会**随"清掉租户配置"而复位——
+        // 借用上面那两个 appId 的话，本用例会把计数推高，让另一条断言"第一发放行"的用例变红
+        // （跑的顺序一变就红/绿互变，那是测试之间共享状态，不是被测代码的问题）。
+        String appId = "t-reject-metric-" + (System.nanoTime() % 1_000_000);
+        String ownSecret = appService.create(
+                new CreateAppRequest(appId, "拒绝打点验证", 0, 0, null)).secret();
+        tenantConfigService.put(appId, Map.of("rate_limit.daily_quota", "1"), "test");
+        dataSource.refreshNow();
+
+        client.get(RESOURCE, "userId=1", appId, ownSecret);                  // 第 1 发：放行（配额 1）
+        var rejected = client.get(RESOURCE, "userId=1", appId, ownSecret);   // 第 2 发：被拒
+        assertThat(rejected.status())
+                .as("前提：这一发真的被拒了，否则下面的指标断言没有意义。响应=" + rejected.body())
+                .isEqualTo(429);
+
+        var scrape = rest.getForEntity("/actuator/prometheus", String.class);
+        assertThat(scrape.getStatusCode().value()).as("抓取端点必须可用").isEqualTo(200);
+
+        assertThat(scrape.getBody())
+                .as("被拒了却没有任何指标 → 仪表盘上「限流在起作用」与「没人被打过」完全一样")
+                .contains("coupon_ratelimit_rejected_total")
+                .contains("dimension=\"tenant_daily\"");
     }
 
 }

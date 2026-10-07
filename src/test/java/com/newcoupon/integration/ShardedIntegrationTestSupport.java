@@ -22,7 +22,14 @@ public abstract class ShardedIntegrationTestSupport {
     protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0")
             // 与 dev compose 对齐：不设 TZ 时容器 UTC，NOW() 比 JVM(+08) 慢 8 小时——
             // "到点即扫"类断言（如 L5 的 next_scan_time<=NOW()）要等 8 小时才成立
-            .withEnv("TZ", "Asia/Shanghai");
+            .withEnv("TZ", "Asia/Shanghai")
+            // **必须抬高连接上限**（2026-10-08 全量测试实测）：共享容器之后，
+            // "每个测试类一个上下文"变成"每个**配置组合**一个上下文"，而这些上下文**整场不销毁**——
+            // 每个上下文都带着自己那一套连接池（ShardingSphere + Hikari）活到 JVM 结束。
+            // MySQL 默认 max_connections=151 被这点池子吃穿，症状是一片
+            // `Too many connections` → 上下文加载失败 → 后续用例**连锁报错**（一次全量里 59 个 error）。
+            // 抬高上限是这里唯一正确的修法：**不是连接泄漏**，是"共享容器"这个设计的容量前提变了。
+            .withCommand("--max-connections=500");
 
     /**
      * **整个测试 JVM 只启动一对容器**（2026-10-08 测试基础设施优化）。

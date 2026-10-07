@@ -2,12 +2,10 @@ package com.newcoupon.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.alibaba.csp.sentinel.slots.block.RuleConstant;
-import com.alibaba.csp.sentinel.slots.block.flow.FlowRule;
-import com.alibaba.csp.sentinel.slots.block.flow.FlowRuleManager;
-import java.util.List;
+import com.alibaba.csp.sentinel.EntryType;
+import com.alibaba.csp.sentinel.node.ClusterNode;
+import com.alibaba.csp.sentinel.slots.clusterbuilder.ClusterBuilderSlot;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -62,52 +60,51 @@ class SentinelFeasibilityTest extends ShardedIntegrationTestSupport {
     @Autowired
     private TestRestTemplate rest;
 
-    @AfterEach
-    void clearRules() {
-        // 规则是**全局静态**状态（FlowRuleManager 是 JVM 级单例），不清会污染别的用例
-        FlowRuleManager.loadRules(List.of());
-    }
+    // **@AfterEach 清理已删（第 6 步）**：本类原来在用例后清 FlowRuleManager，
+    // 因为那时规则是它自己灌的。现在规则由自建规则源接管、本类也不再灌规则，
+    // 而"清空全局规则"反而会误伤别的用例。本类留下的只有 Sentinel 的统计计数
+    // （ClusterNode），它不参与任何断言之外的行为。
 
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("可行性①：规则灌进去后真的能拦住请求（用 count=0，不依赖请求快慢）")
-    void flowRuleActuallyBlocks() {
-        // **用 `count=0` 而不是 `count=1`**：Sentinel 里 0 表示"全部拒绝"，一发就拦，
-        // 与请求快慢、统计窗口、秒边界都无关。
+    @DisplayName("可行性①：适配器真的装上了——请求走完之后，这个资源在 Sentinel 里有统计")
+    void adapterRecordsTheResource() {
+        // **为什么这条断言改成看统计，而不是"灌规则 → 看 429"（第 6 步改）**：
+        // `FlowRuleManager` 的规则位已经被自建的规则源接管（每 10 秒全量推一次），
+        // 手工 `loadRules` 灌的规则会被下一次刷新冲掉——那样这条用例就变成"单跑绿、全量红"。
+        // 而本类当初要回答的问题其实是**前半个**：拦截器装上了吗？资源名对吗？
+        // （第 0 步的坑：第一版按直觉把资源名写成 "sentinel-probe"，规则灌进去纹丝不动，
+        //   因为没有任何请求的资源名会等于它。）
+        // 这两件事用**统计**来验更直接，而且与"规则归谁管"无关。
         //
-        // 这里踩过一个大坑，值得记：我最初写的是 `count=1` + "连打 20 次至少拦一次"，
-        // 结果 20 次**全都放行**。加了耗时测量才看清楚——**每次请求要 1.3 秒，20 次跨了 26 秒**，
-        // 而 1 QPS 正好是"每秒放一个"，于是**永远不超限**。
-        // 集成测试的请求很慢（要走完整个 Spring + 数据库链路），
-        // 所以"连打 N 次"这类判据在集成测试里几乎总是错的——这与我在限流用例里
-        // 反复踩的"用不可控的量卡边界"是同一个坑，只是这次的量是**请求耗时**。
-        FlowRule rule = new FlowRule();
-        rule.setResource(PROBE_RESOURCE);
-        rule.setGrade(RuleConstant.FLOW_GRADE_QPS);
-        rule.setCount(0);              // 0 = 全部拒绝
-        rule.setLimitApp("default");
-        FlowRuleManager.loadRules(List.of(rule));
+        // "规则能拦住请求"这件事仍然被测——走的是生产同一条路径（配置 → 数据源 → 规则），
+        // 见 SentinelTenantDimensionTest 与 SentinelIpDimensionTest。
+        ClusterNode before = ClusterBuilderSlot.getClusterNode(PROBE_RESOURCE, EntryType.IN);
+        long beforeCount = before == null ? 0 : before.totalRequest();
 
-        var blocked = callProbe();
-        assertThat(blocked.getStatusCode().value())
-                .as("count=0 的规则下，第一发就该被拦。若仍是 200，说明拦截器没装上或规则没生效——"
-                        + "整条链路没接通，迁移方案不成立。实际响应：" + blocked.getBody())
-                .isEqualTo(429);
-        assertThat(blocked.getBody())
-                .as("拦下时应当是 Sentinel 的默认处理器（这一步先确认是它拦的，"
-                        + "第 4 步才会换成我们自己的 429 契约）")
-                .contains("Blocked by Sentinel");
+        var resp = callProbe();
+        assertThat(resp.getStatusCode().value())
+                .as("探针接口本身要通（业务上是「模板不存在」，不是被拦）。实际响应：" + resp.getBody())
+                .isEqualTo(200);
+
+        ClusterNode node = ClusterBuilderSlot.getClusterNode(PROBE_RESOURCE, EntryType.IN);
+        assertThat(node)
+                .as("资源名对不上就永远不会有节点——这正是第 0 步踩过的那个坑。"
+                        + "所以这条断言验的是「拦截器装上了」+「资源名就是匹配到的路径模式」")
+                .isNotNull();
+        assertThat(node.totalRequest())
+                .as("这一发请求必须被 Sentinel 记到账上（**与请求前比**：ClusterNode 是 JVM 级的，"
+                        + "别的上下文可能早就打过同一个资源，所以不能直接断言大于 0）")
+                .isGreaterThan(beforeCount);
     }
 
     @Test
-    @DisplayName("可行性②：没有规则时不拦（证明上一条的 429 来自规则，不是别的东西）")
+    @DisplayName("可行性②（对照）：探针接口在没有规则时是通的")
     void withoutRuleNothingBlocks() {
-        FlowRuleManager.loadRules(List.of());
-
-        assertThat(callProbe().getStatusCode().value()).isEqualTo(200);
         assertThat(callProbe().getStatusCode().value())
-                .as("没有规则就该一路放行——否则上一条的 429 无法归因到规则上")
+                .as("没有规则就该一路放行——否则上一条里「资源被 Sentinel 看见」这件事"
+                        + "就无法与「被别的规则拦下」区分开")
                 .isEqualTo(200);
     }
 

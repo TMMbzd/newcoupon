@@ -60,6 +60,23 @@ public class TenantFlowRuleDataSource
         this.tenantConfig = tenantConfig;
     }
 
+    /**
+     * **把本数据源的推送目标改成 JVM 级的共享槽位**（第 6 步全量测试暴露后修正）。
+     *
+     * <p>父类 {@code AbstractDataSource} 的 {@code property} 是 {@code protected final}，
+     * 换不掉；但父类的定时刷新任务走的是 {@code getProperty()}（字节码实测：
+     * {@code invokevirtual getProperty → SentinelProperty.updateValue}），
+     * 所以**重写这个方法**就能让"周期刷新"与"主动推送"两条路都进同一个槽位。
+     *
+     * <p>为什么必须这么做：{@code FlowRuleManager} 只认一个属性，多上下文（测试里十几个）
+     * 各自的注册会把别人摘掉——于是"数据源读得到、规则却是空的"，且**取决于上下文创建顺序**。
+     * 详见 {@link SharedRuleProperty} 的类注释。
+     */
+    @Override
+    public com.alibaba.csp.sentinel.property.SentinelProperty<List<FlowRule>> getProperty() {
+        return SharedRuleProperty.instance();
+    }
+
     @Override
     public List<TenantFlowRuleMapper.TenantQuota> readSource() {
         try {

@@ -6,10 +6,13 @@ import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.domain.open.OpenApp;
 import com.newcoupon.domain.repository.OpenAppRepository;
+import com.newcoupon.infrastructure.metrics.GovernanceMetrics;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -39,23 +42,62 @@ import org.springframework.stereotype.Component;
 @Component
 public class RedisDailyQuotaChecker implements DailyQuotaSlot.DailyQuotaChecker {
 
+    private static final Logger log = LoggerFactory.getLogger(RedisDailyQuotaChecker.class);
+
     /** 与迁移前一致的前缀（运维的既有排查习惯不要因为换实现而失效） */
     static final String DAILY_KEY_PREFIX = "c:open:quota:";
+
+    /**
+     * 指标标签（ASCII 维度码）。迁移前这条 fail-open 指标打在过滤器里
+     * （{@code OpenApiQuotaFilter.acquireSafely}），现在打在这里——
+     * 因为这是**故障发生的地方**。（拒绝的打点仍在出口 {@code BlockRejection}：
+     * 拒绝是结果，故障是原因，两者不是一回事。）
+     */
+    static final String METRIC_DIMENSION = "tenant_daily";
 
     private final StringRedisTemplate redis;
     private final TenantConfigService tenantConfig;
     private final OpenAppRepository appRepository;
+    private final GovernanceMetrics metrics;
 
     public RedisDailyQuotaChecker(StringRedisTemplate redis,
                                   TenantConfigService tenantConfig,
-                                  OpenAppRepository appRepository) {
+                                  OpenAppRepository appRepository,
+                                  GovernanceMetrics metrics) {
         this.redis = redis;
         this.tenantConfig = tenantConfig;
         this.appRepository = appRepository;
+        this.metrics = metrics;
     }
 
+    /**
+     * <b>fail-open 必须在这里做完，不能"让异常自己飞出去"</b>（2026-10-08，第 6 步补）。
+     *
+     * <p>迁移到 Sentinel 之后，本方法是在 {@code ProcessorSlot} 里被调用的：
+     * 抛出的 {@code RuntimeException} 会被 {@code CtSph} 的 {@code catch (Throwable)}
+     * 当成"slot 自己的内部错误"吞掉并放行——**行为上确实是 fail-open（放行），但指标没了**。
+     * 于是"Redis 挂了、日配额形同虚设"与"流量本来就小"在监控上完全一样，
+     * 而那正是 {@link GovernanceMetrics#recordLimitFailOpen} 存在的理由。
+     *
+     * <p>所以：**故障在这里被捕获、打点、放行**；而"超限"照旧抛
+     * {@link DailyQuotaBlockException} 上去（拒绝不是故障，两者不能混在一个 catch 里）。
+     */
     @Override
     public void check(String appId) throws DailyQuotaBlockException {
+        try {
+            doCheck(appId);
+        } catch (DailyQuotaBlockException block) {
+            throw block;   // 拒绝：照常抛给 Sentinel，由出口写 429
+        } catch (RuntimeException e) {
+            // 捕获范围刻意用 RuntimeException 而不是"精确到 RedisConnectionFailureException"：
+            // 任何**没预料到**的失败都会走到这里，而"放行 + 打点 + ERROR 日志"是唯一
+            // 既保持可用性、又不会静默的处置。窄捕获的代价是那些失败会变成"静默放行"。
+            log.error("日配额检查失败（依赖故障），放行：appId={}", appId, e);
+            metrics.recordLimitFailOpen(METRIC_DIMENSION);
+        }
+    }
+
+    private void doCheck(String appId) throws DailyQuotaBlockException {
         int limit = resolveDailyLimit(appId);
         if (limit <= 0) {
             return;   // 0 = 不限（与迁移前同一语义）
@@ -74,6 +116,8 @@ public class RedisDailyQuotaChecker implements DailyQuotaSlot.DailyQuotaChecker 
         if (count != null && count > limit) {
             // **必须抛 BlockException 的子类**：抛业务异常会被 CtSph 的 catch(Throwable)
             // 当成 slot 内部错误吞掉并放行（见 DailyQuotaBlockException 的注释）
+            log.warn("日配额拒绝：appId={} 已用 {}，上限 {}（到明天 {} 秒）",
+                    appId, count, limit, secondsUntilTomorrow());
             throw new DailyQuotaBlockException(appId, secondsUntilTomorrow());
         }
     }

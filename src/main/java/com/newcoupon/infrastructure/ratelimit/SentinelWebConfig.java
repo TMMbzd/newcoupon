@@ -31,9 +31,12 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 public class SentinelWebConfig implements WebMvcConfigurer {
 
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+    private final com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics;
 
-    public SentinelWebConfig(com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
+    public SentinelWebConfig(com.fasterxml.jackson.databind.ObjectMapper objectMapper,
+                             com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics) {
         this.objectMapper = objectMapper;
+        this.governanceMetrics = governanceMetrics;
     }
 
     @Override
@@ -50,7 +53,7 @@ public class SentinelWebConfig implements WebMvcConfigurer {
         // **必须显式设置**：v6x 适配器的默认值是 DefaultBlockExceptionHandler
         // （429 + 纯文本 "Blocked by Sentinel (flow limiting)"），
         // 官方文档说"可以配"，但代码里默认就是它——不改就等于把契约退化成纯文本。
-        config.setBlockExceptionHandler(new OpenApiBlockExceptionHandler(objectMapper));
+        config.setBlockExceptionHandler(new OpenApiBlockExceptionHandler(objectMapper, governanceMetrics));
 
         registry.addInterceptor(new SentinelWebInterceptor(config)).addPathPatterns("/**");
     }

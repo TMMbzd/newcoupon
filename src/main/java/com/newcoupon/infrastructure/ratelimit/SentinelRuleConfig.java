@@ -1,6 +1,5 @@
 package com.newcoupon.infrastructure.ratelimit;
 
-import com.alibaba.csp.sentinel.slots.block.flow.FlowRuleManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Configuration;
@@ -25,16 +24,23 @@ public class SentinelRuleConfig {
     private static final Logger log = LoggerFactory.getLogger(SentinelRuleConfig.class);
 
     public SentinelRuleConfig(TenantFlowRuleDataSource dataSource,
-                              RedisDailyQuotaChecker dailyQuotaChecker) {
-        // 把日配额检查器装进 Slot（SPI 加载的 Slot 不受 Spring 管理，只能用静态桥接——
-        // 这一步**必须**在首次访问资源之前完成，否则 Slot 拿到的是 null、日配额静默失效）
+                              RedisDailyQuotaChecker dailyQuotaChecker,
+                              RedisIpExactChecker ipExactChecker) {
+        // 把自建检查器装进自建 Slot（SPI 加载的 Slot 不受 Spring 管理，只能用静态桥接——
+        // 这一步**必须**在首次访问资源之前完成，否则 Slot 拿到的是 null、
+        // 对应维度**静默失效**：请求照常通过，什么都不会报）
         DailyQuotaSlot.install(dailyQuotaChecker);
+        IpExactSlot.install(ipExactChecker);
 
-        // ① 注册（此后 dataSource 每次刷新都会把新规则推进 FlowRuleManager）
-        FlowRuleManager.register2Property(dataSource.getProperty());
+        // ① 注册（此后 dataSource 每次刷新都会把新规则推进 FlowRuleManager）。
+        //    **注册的是 JVM 级的共享槽位，且只注册一次**——`FlowRuleManager` 只有一个属性位，
+        //    重复注册会把前一个的监听摘掉（详见 SharedRuleProperty 的类注释：
+        //    那正是"多上下文时数据源读得到、规则却是空的"那个坑）。
+        SharedRuleProperty.instance().registerOnce();
 
         // ② 立刻加载一次——不等第一个刷新周期（默认 10 秒后）。
         // 否则应用刚起来的这 10 秒里，**所有租户配额都是"无规则=全放行"**。
+        // （每次上下文启动都会推一次：槽位是共享的，谁推都算数——这正是共享槽位的好处。）
         dataSource.refreshNow();
 
         log.info("租户配额规则源已注册：每 {} ms 刷新一次（管理面改动会主动推）",

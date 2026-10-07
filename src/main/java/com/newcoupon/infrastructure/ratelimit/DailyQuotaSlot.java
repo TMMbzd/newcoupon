@@ -21,7 +21,7 @@ import org.slf4j.LoggerFactory;
  * 也对不上 {@code Retry-After = 到明天的秒数}。
  *
  * <p><b>怎么挂上去</b>：实现官方 {@code ProcessorSlot} SPI，由
- * {@link DailyQuotaSlotChainBuilder} 追加到标准链的末尾，
+ * {@link OpenApiSlotChainBuilder} 追加到标准链的末尾，
  * 再通过 {@code META-INF/services} 注册（见 {@code resources/META-INF/services/}）。
  *
  * <p><b>SPI 带来的一个麻烦</b>：SPI 加载的类**不受 Spring 管理**，拿不到容器里的 bean
@@ -40,6 +40,10 @@ public class DailyQuotaSlot extends AbstractLinkedProcessorSlot<Object> {
     /** 由 Spring 启动时注入的检查器（SPI 类不受容器管理，只能用静态桥接） */
     private static volatile DailyQuotaChecker checker;
 
+    /** "检查器没装上"只报一次——它是接线错误，不是每请求都要刷的错误 */
+    private static final java.util.concurrent.atomic.AtomicBoolean MISSING_CHECKER_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
     /** 安装实现——只应由 Spring 在启动时调用一次 */
     public static void install(DailyQuotaChecker impl) {
         checker = impl;
@@ -51,13 +55,22 @@ public class DailyQuotaSlot extends AbstractLinkedProcessorSlot<Object> {
         // ① 只对聚合资源生效（Slot 是全链共享的，别的资源必须原样放行）
         if (TenantFlowRuleMapper.OPEN_API_RESOURCE.equals(resource.getName())) {
             DailyQuotaChecker impl = checker;
+            if (impl == null && MISSING_CHECKER_LOGGED.compareAndSet(false, true)) {
+                // 接线错误：SPI 加载的 Slot 拿到了 null 检查器 → 日配额会**静默失效**
+                log.error("日配额检查器未安装（SentinelRuleConfig 的静态桥接没生效），日配额将静默失效");
+            }
             if (impl != null) {
                 String appId = context.getOrigin();   // 租户身份来自适配器的 originParser
                 if (appId != null && !appId.isBlank()) {
                     // 直接抛（checker 内部抛的是 BlockException 的子类）。
                     // **不能改成"返回 boolean 再自己抛业务异常"**：那样会被 CtSph 的
                     // catch(Throwable) 当成 slot 内部错误吞掉并放行——见 DailyQuotaBlockException。
-                    log.warn("日配额拒绝：appId={}", appId);
+                    //
+                    // （2026-10-08 第 6 步修：这里原先有一行 `log.warn("日配额拒绝：appId={}")`
+                    //  写在 check() **之前**——那是第 5 步调试时留下的诊断日志，结果是
+                    //  **每一个放行的请求都会打一条"拒绝"的 WARN**。按请求速率刷 WARN 日志
+                    //  会把真正的告警淹掉；现在拒绝与故障的日志都在 checker 里、
+                    //  只在真的发生时打。）
                     impl.check(appId);
                 }
             }
