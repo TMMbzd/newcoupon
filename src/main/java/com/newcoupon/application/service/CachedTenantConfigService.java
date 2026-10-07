@@ -42,6 +42,9 @@ public class CachedTenantConfigService implements TenantConfigService {
 
     private static final long MAX_ENTRIES = 10_000;
 
+    /** 配额变更事件发布器（迁移第 5 步：让 Sentinel 的规则源立刻跟上，而不是等刷新周期） */
+    private final org.springframework.context.ApplicationEventPublisher eventPublisher;
+
     private final OpenAppConfigMapper mapper;
     private final OpenAppConfigLogMapper logMapper;
     private final OpenAppRepository openAppRepository;
@@ -54,8 +57,10 @@ public class CachedTenantConfigService implements TenantConfigService {
     public CachedTenantConfigService(OpenAppConfigMapper mapper,
                                      OpenAppConfigLogMapper logMapper,
                                      OpenAppRepository openAppRepository,
+                                     org.springframework.context.ApplicationEventPublisher eventPublisher,
                                      @Value("${coupon.tenant-config.ttl-ms:60000}") long ttlMillis,
                                      @Value("${coupon.tenant-config.refresh-ms:30000}") long refreshMillis) {
+        this.eventPublisher = eventPublisher;
         this.mapper = mapper;
         this.logMapper = logMapper;
         this.openAppRepository = openAppRepository;
@@ -183,6 +188,9 @@ public class CachedTenantConfigService implements TenantConfigService {
             writeLog(appId, e.getKey(), old, e.getValue(), operator);
         }
         invalidate(appId);   // ③ 改完立刻失效缓存（本实例马上生效，不等 30 秒刷新）
+        // ④ 通知 Sentinel 的规则源也立刻跟上——否则限流阈值要等下一个刷新周期才变
+        eventPublisher.publishEvent(new com.newcoupon.infrastructure.ratelimit.TenantQuotaChangedEvent(
+                "配置变更：" + appId));
     }
 
     @Override
@@ -196,6 +204,10 @@ public class CachedTenantConfigService implements TenantConfigService {
         mapper.delete(new QueryWrapper<OpenAppConfigPO>().eq("app_id", appId).eq("config_key", key));
         writeLog(appId, key, old, null, operator);
         invalidate(appId);
+        // 删除同样要通知规则源（2026-10-08：第一版只给了 put 加事件，remove 漏了——
+        // 症状是"清掉配置后限流阈值不收敛"，实测让一条用例红）
+        eventPublisher.publishEvent(new com.newcoupon.infrastructure.ratelimit.TenantQuotaChangedEvent(
+                "配置删除：" + appId + "/" + key));
     }
 
     @Override

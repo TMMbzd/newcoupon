@@ -35,6 +35,9 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class OpenAppService {
 
+    /** 配额变更事件发布器（迁移第 5 步：新建/启停接入方后让 Sentinel 规则立刻跟上） */
+    private final org.springframework.context.ApplicationEventPublisher eventPublisher;
+
     private static final Pattern APP_ID = Pattern.compile(OpenApp.APP_ID_PATTERN);
 
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -53,10 +56,12 @@ public class OpenAppService {
     public OpenAppService(OpenAppRepository repository,
                           SecretCipher cipher,
                           CachedOpenAppReader authReader,
+                          org.springframework.context.ApplicationEventPublisher eventPublisher,
                           @Value("${coupon.open.secret-rotation-hours:168}") long rotationHours) {
         this.repository = repository;
         this.cipher = cipher;
         this.authReader = authReader;
+        this.eventPublisher = eventPublisher;
         this.rotationWindow = Duration.ofHours(rotationHours);
     }
 
@@ -95,6 +100,10 @@ public class OpenAppService {
         repository.insertSecret(appId, cipher.encrypt(secret), SecretRecord.STATUS_CURRENT, null);
         authReader.invalidate(appId);   // 让认证缓存立刻看到新密钥（不等 TTL）
 
+        // 通知 Sentinel 规则源：新租户的配额要立刻生效，否则它在最多 10 秒内不受限
+        eventPublisher.publishEvent(new com.newcoupon.infrastructure.ratelimit.TenantQuotaChangedEvent(
+                "新建接入方：" + appId));
+
         return new AppWithSecret(appId, appName, secret, OpenApp.STATUS_ENABLED, qpsLimit, dailyQuota);
     }
 
@@ -124,6 +133,9 @@ public class OpenAppService {
         }
         // 停用必须立刻生效——"等 60 秒 TTL 自然过期"意味着这 60 秒里被停用的接入方还能调
         authReader.invalidate(appId);
+        // 同理：停用后它的配额规则也该消失（模板的 mapper 里会跳过停用租户）
+        eventPublisher.publishEvent(new com.newcoupon.infrastructure.ratelimit.TenantQuotaChangedEvent(
+                "接入方状态变更：" + appId + " → " + status));
     }
 
     /** 密钥轮换：签发新 SK，旧 SK 进入轮换期（默认 7 天）。返回**新 SK 明文（只此一次）** */

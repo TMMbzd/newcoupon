@@ -43,7 +43,28 @@ public class GlobalExceptionHandler {
         if (httpStatus != 200) {
             response.setStatus(httpStatus);
         }
+        // 429 必须带 Retry-After——否则接入方只能瞎猜或死循环重试。
+        // （迁移第 5 步：日配额改由 Sentinel 的 slot 抛出 BizException 之后，
+        //   这个头原来是在过滤器里手写的，现在统一在这里补，两条路径都不会漏。）
+        if (httpStatus == 429 && response.getHeader("Retry-After") == null) {
+            response.setHeader("Retry-After", retryAfterOf(e.getErrorCode()));
+        }
         return Result.fail(e.getErrorCode(), detailOf(e));
+    }
+
+    /**
+     * 429 的 {@code Retry-After}：**告诉对方多久后重试**。
+     *
+     * <p>两种 429 的答案不同：请求速率超限（6006）下一秒就是新窗口，所以是 1 秒；
+     * 日配额用尽（6007）要等到**次日 0 点**——给出这个准确的秒数，接入方才不用猜。
+     */
+    private static String retryAfterOf(ErrorCode code) {
+        if (code == ErrorCode.DAILY_QUOTA_EXCEEDED) {
+            return String.valueOf(Math.max(1, java.time.Duration.between(
+                    java.time.LocalDateTime.now(),
+                    java.time.LocalDate.now().plusDays(1).atStartOfDay()).getSeconds()));
+        }
+        return "1";
     }
 
     /** 6xxx 接入域 → HTTP 状态（与 docs/S1-开放接入层-需求与设计-2026-10-01.md §4.10 的表一致） */

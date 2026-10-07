@@ -30,6 +30,12 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 @Configuration
 public class SentinelWebConfig implements WebMvcConfigurer {
 
+    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+
+    public SentinelWebConfig(com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
+    }
+
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         // 注意 API 形状：setOriginParser / setBlockExceptionHandler 在 **config** 上，
@@ -40,6 +46,11 @@ public class SentinelWebConfig implements WebMvcConfigurer {
         // 于是 limitApp=appId 的规则匹配不上、只有 limitApp="default" 的规则对它生效。
         // 这是**期望行为**：认不出身份的请求，不该享受"某个租户的配额"。
         config.setOriginParser(request -> RequestContext.current().appId());
+
+        // **必须显式设置**：v6x 适配器的默认值是 DefaultBlockExceptionHandler
+        // （429 + 纯文本 "Blocked by Sentinel (flow limiting)"），
+        // 官方文档说"可以配"，但代码里默认就是它——不改就等于把契约退化成纯文本。
+        config.setBlockExceptionHandler(new OpenApiBlockExceptionHandler(objectMapper));
 
         registry.addInterceptor(new SentinelWebInterceptor(config)).addPathPatterns("/**");
     }

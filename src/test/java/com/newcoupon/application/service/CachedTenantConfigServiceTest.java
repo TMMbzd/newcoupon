@@ -45,6 +45,7 @@ class CachedTenantConfigServiceTest {
     /** TTL 很短（300ms）、refresh 很长（10 分钟）——把两个机制**分开**测，避免 refresh 掩盖 TTL 的问题 */
     private CachedTenantConfigService serviceWithTtl(long ttlMillis) {
         return new CachedTenantConfigService(mapper, logMapper, openAppRepository,
+                event -> { },   // 事件发布器：单测里不需要真的发（ApplicationEventPublisher 是函数式接口）
                 ttlMillis, 600_000L);
     }
 

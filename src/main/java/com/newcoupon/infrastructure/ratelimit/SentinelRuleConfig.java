@@ -24,7 +24,12 @@ public class SentinelRuleConfig {
 
     private static final Logger log = LoggerFactory.getLogger(SentinelRuleConfig.class);
 
-    public SentinelRuleConfig(TenantFlowRuleDataSource dataSource) {
+    public SentinelRuleConfig(TenantFlowRuleDataSource dataSource,
+                              RedisDailyQuotaChecker dailyQuotaChecker) {
+        // 把日配额检查器装进 Slot（SPI 加载的 Slot 不受 Spring 管理，只能用静态桥接——
+        // 这一步**必须**在首次访问资源之前完成，否则 Slot 拿到的是 null、日配额静默失效）
+        DailyQuotaSlot.install(dailyQuotaChecker);
+
         // ① 注册（此后 dataSource 每次刷新都会把新规则推进 FlowRuleManager）
         FlowRuleManager.register2Property(dataSource.getProperty());
 

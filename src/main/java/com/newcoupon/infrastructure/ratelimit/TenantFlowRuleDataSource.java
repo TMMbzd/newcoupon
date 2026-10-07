@@ -104,6 +104,18 @@ public class TenantFlowRuleDataSource
     }
 
     /**
+     * 收到"配额可能变了"的事件时主动推一次（2026-10-08）。
+     *
+     * <p>覆盖三个入口：新建接入方、启停接入方、改租户配置。
+     * 少了它，"新建的租户在最多 10 秒内不受限"——那是实测出来的真实缺口。
+     */
+    @org.springframework.context.event.EventListener
+    public void onQuotaChanged(TenantQuotaChangedEvent event) {
+        log.debug("租户配额变更（{}），主动推送规则", event.reason());
+        refreshNow();
+    }
+
+    /**
      * 主动推一次（管理面改完配置后调用）。
      *
      * <p>不等下一个刷新周期——"改配置 → 立刻生效"是本项目对运维的承诺

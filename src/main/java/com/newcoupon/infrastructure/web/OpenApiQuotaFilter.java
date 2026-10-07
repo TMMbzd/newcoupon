@@ -5,6 +5,7 @@ import com.newcoupon.application.service.CachedOpenAppReader;
 import com.newcoupon.application.service.TenantConfigKey;
 import com.newcoupon.application.service.TenantConfigService;
 import com.newcoupon.application.service.CachedOpenAppReader.AppAuth;
+import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.Result;
 import com.newcoupon.common.context.RequestContext;
@@ -141,15 +142,120 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
                 resourceQps, resourceEnabled, response)) {
             return;
         }
-        if (!withinQps(appId, app.qpsLimit(), response)) {
-            return;
+        // 租户维度（QPS + 日配额）：**一次 entry 同时承载两者**（2026-10-08 迁移到 Sentinel）
+        //   · QPS 由 Sentinel 的 FlowRule(resource=open_api, limitApp=appId) 判
+        //   · 日配额由处理链上的 DailyQuotaSlot 判（官方规则模型表达不了，见那个类的注释）
+        // 为什么用聚合资源名而不是接口路径：租户配额的语义是"**该租户跨所有接口的总量**"，
+        // 按接口各自限会让总量随接口数放大（详见 TenantFlowRuleMapper 的注释）。
+        if (!enterTenantDimension(appId, response)) {
+            return;   // 拒绝响应已在本方法内写出（Filter 层抛异常到不了 @RestControllerAdvice）
         }
-        if (!withinDailyQuota(appId, app.dailyQuota(), response)) {
-            return;
+        try {
+            chain.doFilter(request, response);
+        } finally {
+            // **必须 exit**：Entry 与 exit 要同线程 LIFO 配对，漏了统计会错乱，
+            // 而且 Tomcat 复用线程时会把上下文串给下一个请求（与 RequestContext 同一个道理）。
+            exitTenantDimension(appId);
         }
-        chain.doFilter(request, response);
     }
 
+    /**
+     * 进入租户维度的聚合资源。
+     *
+     * <p><b>为什么抛 BizException 而不是自己写响应</b>：手写 {@code SphU.entry} 不会经过
+     * 适配器的 {@code BlockExceptionHandler}（那个只服务适配器自己的埋点），
+     * 所以要把 {@code BlockException} 转成项目自己的异常，交给
+     * {@code GlobalExceptionHandler} 统一输出——这样"限流被拒"与"日配额被拒"
+     * 的响应形态完全一致（429 + 业务码 + Retry-After）。
+     *
+     * @return true = 放行；false = 已被拒（响应已写出）
+     */
+    private boolean enterTenantDimension(String appId, HttpServletResponse response) throws IOException {
+        // **必须自己建立上下文**（否则 origin 为空，按租户的规则与检查全都匹配不上）。
+        //
+        // 这里踩过一个坑：origin 是由 `ContextUtil.enter(name, origin)` 建立的，
+        // 而适配器是在 **Interceptor** 里做的——我们的 entry 在 **Filter** 里，
+        // Filter 先于 Interceptor 执行，那时上下文还没建，于是 origin 是空串。
+        // 症状极具迷惑性：Slot 被调用了、资源名也对、checker 也在，**只有 origin 是空的**。
+        //
+        // 在这里 enter 还有个好处：`ContextUtil.enter` 只在"调用链入口第一次"生效，
+        // 所以随后适配器在 Interceptor 里再 enter 不会覆盖——**整条链共用同一个 origin**。
+        com.alibaba.csp.sentinel.context.ContextUtil.enter(CONTEXT_NAME, appId);
+        try {
+            // 签名是 entry(name, EntryType, count, args...)——**没有** resourceType 参数的那个变体
+            // （研读提到的 "(name, resourceType, EntryType)" 是另一个只有 3 参的重载）
+            tenantDimensionEntry.set(com.alibaba.csp.sentinel.SphU.entry(
+                    com.newcoupon.infrastructure.ratelimit.TenantFlowRuleMapper.OPEN_API_RESOURCE,
+                    com.alibaba.csp.sentinel.EntryType.IN,
+                    1,
+                    appId));
+            return true;
+        } catch (com.alibaba.csp.sentinel.slots.block.BlockException e) {
+            // **必须在这里自己写响应**（2026-10-08 踩坑）：
+            // 这是 **Filter** 层，而 `@RestControllerAdvice` 只处理 **Controller** 层抛出的异常。
+            // 第一版我把 BlockException 转成 BizException 往外抛，结果响应是 **500**——
+            // Filter 的异常交给的是 Servlet 容器，不是 Spring MVC 的异常处理器。
+            //
+            // 而适配器那条路径（Interceptor 里的埋点）走的是 `BlockExceptionHandler`，
+            // 所以两条路径的处理方式不同：**手写埋点要对自己的拒绝负责**。
+            writeBlockResponse(response, e);
+            exitTenantDimension(appId);
+            return false;
+        }
+    }
+
+    /**
+     * 把 Sentinel 的拒绝写成项目契约（429 + JSON + Retry-After + 维度）。
+     *
+     * <p>与 {@code OpenApiBlockExceptionHandler} 负责的是**同一份契约**，只是入口不同
+     * （那条路是适配器的 Interceptor，这条路是 Filter 里的手写埋点）——
+     * 两处的输出必须一致，否则接入方会看到两种 429。
+     */
+    private void writeBlockResponse(HttpServletResponse response,
+                                    com.alibaba.csp.sentinel.slots.block.BlockException e)
+            throws IOException {
+        ErrorCode code = ErrorCode.QPS_LIMIT_EXCEEDED;
+        String dimension = "请求速率超限";
+        String retryAfter = "1";
+
+        // 日配额被拒时，异常自己带着"到明天还有多少秒"——那是 Retry-After 最准确的答案
+        if (e instanceof com.newcoupon.infrastructure.ratelimit.DailyQuotaBlockException daily) {
+            code = ErrorCode.DAILY_QUOTA_EXCEEDED;
+            dimension = "日配额已用尽";
+            retryAfter = String.valueOf(daily.retryAfterSeconds());
+        }
+
+        log.warn("SENTINEL BLOCK（过滤器层）：resource={} —— 按 {} 拒绝",
+                com.newcoupon.infrastructure.ratelimit.TenantFlowRuleMapper.OPEN_API_RESOURCE, code.getCode());
+
+        response.setStatus(429);
+        response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        response.setCharacterEncoding("UTF-8");
+        response.setHeader("Retry-After", retryAfter);
+        response.getWriter().write(objectMapper.writeValueAsString(
+                Result.fail(code, dimension + "（资源："
+                        + com.newcoupon.infrastructure.ratelimit.TenantFlowRuleMapper.OPEN_API_RESOURCE + "）")));
+    }
+
+    private void exitTenantDimension(String appId) {
+        com.alibaba.csp.sentinel.Entry entry = tenantDimensionEntry.get();
+        if (entry != null) {
+            entry.exit(1, appId);
+            tenantDimensionEntry.remove();
+        }
+        // 与 enter 配对。不清会把 Context 留在 Tomcat 线程池的线程上，
+        // 下一个请求会串味——与 RequestContext 必须 finally clear 是同一个道理。
+        com.alibaba.csp.sentinel.context.ContextUtil.exit();
+    }
+
+    /** 这个调用链的名字（Sentinel 的 context name，与资源名不是一回事） */
+    private static final String CONTEXT_NAME = "open-api";
+
+    /** 当前请求的聚合资源 Entry（ThreadLocal：Entry/exit 必须同线程配对） */
+    private static final ThreadLocal<com.alibaba.csp.sentinel.Entry> tenantDimensionEntry =
+            new ThreadLocal<>();
+
+    @SuppressWarnings("unused")
     private boolean withinQps(String appId, int registeredLimit, HttpServletResponse response) throws IOException {
         int limit = resolveLimit(appId, TenantConfigKey.RATE_LIMIT_QPS, registeredLimit);
         if (limit <= 0) {
