@@ -58,7 +58,7 @@ class TenantFlowRuleDataSourceTest {
         OpenInterfaceCatalog catalog = new OpenInterfaceCatalog(
                 mock(org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping.class),
                 event -> { }, false, 0, 0, 0);
-        dataSource = new TenantFlowRuleDataSource(repository, config, 3_600_000L, metrics, catalog);
+        dataSource = new TenantFlowRuleDataSource(repository, config, 3_600_000L, metrics, catalog, false);
         return dataSource;
     }
 

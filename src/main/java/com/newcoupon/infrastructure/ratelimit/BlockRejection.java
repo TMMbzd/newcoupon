@@ -112,7 +112,9 @@ public final class BlockRejection {
         if (e instanceof FlowException) {
             // 租户维度与接口维度**抛的是同一个类型**（都是 FlowRule 命中），只能按资源名分：
             // 聚合资源 open_api 上挂的是"该租户跨所有接口的总量"，其余是"某个接口被平台限了"。
-            return TenantFlowRuleMapper.OPEN_API_RESOURCE.equals(resourceName)
+            // 集群模式下租户维度用的是"每租户一个资源名"（open_api:<appId>），所以用前缀判
+            return resourceName != null
+                    && resourceName.startsWith(TenantFlowRuleMapper.OPEN_API_RESOURCE)
                     ? new BlockRejection(ErrorCode.QPS_LIMIT_EXCEEDED, "租户请求速率超限",
                             METRIC_TENANT_QPS, ONE_SECOND, HTTP_TOO_MANY_REQUESTS)
                     // 非聚合资源的 FlowRule = 平台给"某个接口"设的上限（第 8 步从 Bucket4j 迁过来）。

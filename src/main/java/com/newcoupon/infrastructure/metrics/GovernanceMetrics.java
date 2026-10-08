@@ -70,6 +70,23 @@ public class GovernanceMetrics {
     }
 
     /**
+     * 集群 token 请求**降级**（第 9 步）。
+     *
+     * <p>什么时候会涨：连不上 Token Server / 超时 / 服务端没有这条规则 / 请求非法。
+     * 这些情况都会让规则**静默回退到本地单机限制**——也就是**跨实例精确当场失效**
+     * （两个实例合计 2 倍配额）。这个计数是唯一能让它可见的地方。
+     *
+     * @param reason 有界的状态码标签（fail / too_many / no_rule / …），不是异常消息
+     */
+    public void recordClusterTokenFallback(String reason) {
+        Counter.builder("coupon_sentinel_cluster_token_fallback_total")
+                .tag("reason", reason)
+                .description("集群 token 降级次数——开始涨说明集群流控已经退化成单机（合计配额会翻倍）")
+                .register(registry)
+                .increment();
+    }
+
+    /**
      * Sentinel 处理链**内部异常**（迁移第 7 步）。
      *
      * <p>为什么它必须存在：链里抛出的非 {@code BlockException} 会被 {@code CtSph} 的

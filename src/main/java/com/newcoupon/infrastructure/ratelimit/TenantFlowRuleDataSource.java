@@ -59,7 +59,8 @@ public class TenantFlowRuleDataSource
             TenantConfigService tenantConfig,
             @Value("${coupon.sentinel.rule-refresh-ms:10000}") long refreshMs,
             GovernanceMetrics metrics,
-            OpenInterfaceCatalog interfaceCatalog) {
+            OpenInterfaceCatalog interfaceCatalog,
+            @Value("${coupon.sentinel.cluster.enabled:false}") boolean clusterEnabled) {
         // Converter：原始形态（租户配额列表）→ Sentinel 规则列表。
         // 翻译逻辑在 TenantFlowRuleMapper 里（纯函数，单独测过）。
         //
@@ -69,7 +70,7 @@ public class TenantFlowRuleDataSource
         super(quotas -> {
             // **两类规则合并成一个列表再推**（第 8 步）：FlowRuleManager 只有一个属性位、
             // 且推送是**全量替换**——分成两个数据源必然互相冲掉（第 6 步的"单跑绿、全量红"就是这么来的）。
-            TenantFlowRuleMapper.Mapping tenant = TenantFlowRuleMapper.map(quotas);
+            TenantFlowRuleMapper.Mapping tenant = TenantFlowRuleMapper.map(quotas, clusterEnabled);
             InterfaceFlowRuleMapper.Mapping iface = interfaceCatalog.toRules();
 
             metrics.recordSentinelRulesDropped(tenant.dropped().size() + iface.dropped().size());

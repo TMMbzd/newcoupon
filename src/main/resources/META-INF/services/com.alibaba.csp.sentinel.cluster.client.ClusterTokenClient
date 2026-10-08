@@ -1,0 +1,11 @@
+# 集群 token 客户端的实现（第 9 步）。
+#
+# 官方 jar 里也有一份同名的 services 文件（注册的是 DefaultClusterTokenClient）。
+# SpiLoader.loadFirstInstance() 取的是**类路径里枚举到的第一个**——不是 @Spi(order)，
+# 所以"我们这份会不会被选中"取决于类路径顺序（本应用的 classes 目录/jar 在最前面，
+# 正常情况下是我们）。**不能只靠这个假设**：启动期会断言实际装载的是不是这个类，
+# 不是就打 ERROR，并把它做成 coupon_sentinel_cluster_decorator_active 这条 gauge。
+#
+# 为什么要有装饰器：集群降级（连不上/超时/服务端没这条规则）会让规则**静默回退到单机限制**
+# ——"跨实例精确"当场失效，而框架自己不产出任何指标。见 MetricsClusterTokenClient 的注释。
+com.newcoupon.infrastructure.ratelimit.cluster.MetricsClusterTokenClient

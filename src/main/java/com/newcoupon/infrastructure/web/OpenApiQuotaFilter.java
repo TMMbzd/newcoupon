@@ -18,6 +18,7 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import org.springframework.beans.factory.annotation.Value;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -75,12 +76,17 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     private final ObjectMapper objectMapper;
     private final GovernanceMetrics governanceMetrics;
 
+    /** 集群模式（第 9 步）：决定租户维度的资源名怎么算（每租户一个资源名） */
+    private final boolean clusterEnabled;
+
     public OpenApiQuotaFilter(CachedOpenAppReader appReader,
                               ObjectMapper objectMapper,
-                              GovernanceMetrics governanceMetrics) {
+                              GovernanceMetrics governanceMetrics,
+                              @Value("${coupon.sentinel.cluster.enabled:false}") boolean clusterEnabled) {
         this.appReader = appReader;
         this.objectMapper = objectMapper;
         this.governanceMetrics = governanceMetrics;
+        this.clusterEnabled = clusterEnabled;
     }
 
     @Override
@@ -190,12 +196,14 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     private boolean enterTenantDimension(String appId, HttpServletResponse response) throws IOException {
         try {
             // 签名是 entry(name, EntryType, count, args...)——**没有** resourceType 参数的那个变体
+            // 集群模式下租户在**资源名**里（集群不匹配 origin，见 resourceFor 的注释）；
+            // 单机模式下仍是聚合资源 + limitApp=appId
             tenantDimensionEntry.set(SphU.entry(
-                    TenantFlowRuleMapper.OPEN_API_RESOURCE, EntryType.IN, 1, appId));
+                    TenantFlowRuleMapper.resourceFor(appId, clusterEnabled), EntryType.IN, 1, appId));
             return true;
         } catch (BlockException e) {
             // 被拒时 CtSph 内部已经 exit 过，ThreadLocal 不会被赋值 → finally 里不会重复 exit
-            writeRejection(response, e, TenantFlowRuleMapper.OPEN_API_RESOURCE);
+            writeRejection(response, e, TenantFlowRuleMapper.resourceFor(appId, clusterEnabled));
             return false;
         }
     }

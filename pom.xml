@@ -112,6 +112,34 @@
       <version>${sentinel.version}</version>
     </dependency>
 
+    <!-- 集群流控的客户端（第 9 步）：租户配额要跨实例精确（k 个副本不能各自限一份）。
+         核实过它的传递依赖：只有 sentinel-cluster-common-default + netty-handler，
+         **不会**把 sentinel-transport 拖进来（我们不用控制台，也不需要命令口）。 -->
+    <dependency>
+      <groupId>com.alibaba.csp</groupId>
+      <artifactId>sentinel-cluster-client-default</artifactId>
+      <version>${sentinel.version}</version>
+    </dependency>
+
+    <!-- Token Server 的依赖**只进测试作用域**（第 9 步）：
+         它是个独立进程（内存 ~65MB，而应用是 ~500MB），不属于应用的可部署产物。
+         放在 test 作用域有两个好处：① 生产 jar 里不会多出服务端代码；②
+         验证脚本用 test classpath 就能把它跑起来（见 scripts/cluster/）。
+         代价：这个 Token Server 是"教学/验证形态"（直接读同一个库当规则源），
+         生产上应当独立部署并配独立的规则通道——这一点写在 docs/S3 §10.8。 -->
+    <dependency>
+      <groupId>com.alibaba.csp</groupId>
+      <artifactId>sentinel-cluster-server-default</artifactId>
+      <version>${sentinel.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.alibaba.csp</groupId>
+      <artifactId>sentinel-parameter-flow-control</artifactId>
+      <version>${sentinel.version}</version>
+      <scope>test</scope>
+    </dependency>
+
     <!-- S2 第 11 步（RQ-10）：把熔断状态接进 Micrometer。
          为什么用官方集成而不是自建 Gauge：它会**自动跟进**熔断器的懒创建、按租户动态创建与移除
          （实测：绑定之后新建的熔断器也会被补上指标，evict 之后序列真实消失）——
