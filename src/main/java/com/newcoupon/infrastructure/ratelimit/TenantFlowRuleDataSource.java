@@ -6,6 +6,7 @@ import com.newcoupon.application.service.TenantConfigKey;
 import com.newcoupon.application.service.TenantConfigService;
 import com.newcoupon.domain.open.OpenApp;
 import com.newcoupon.domain.repository.OpenAppRepository;
+import com.newcoupon.infrastructure.metrics.GovernanceMetrics;
 import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
@@ -46,18 +47,44 @@ public class TenantFlowRuleDataSource
     private static final java.util.concurrent.atomic.AtomicLong LOAD_FAILURES =
             new java.util.concurrent.atomic.AtomicLong();
 
+    /** 指标标签（ASCII 维度码）：规则源读不到 → 防线失效，必须与"流量本来就小"区分得开 */
+    static final String METRIC_DIMENSION = "rule_source";
+
     private final OpenAppRepository appRepository;
     private final TenantConfigService tenantConfig;
+    private final GovernanceMetrics metrics;
 
     public TenantFlowRuleDataSource(
             OpenAppRepository appRepository,
             TenantConfigService tenantConfig,
-            @Value("${coupon.sentinel.rule-refresh-ms:10000}") long refreshMs) {
+            @Value("${coupon.sentinel.rule-refresh-ms:10000}") long refreshMs,
+            GovernanceMetrics metrics) {
         // Converter：原始形态（租户配额列表）→ Sentinel 规则列表。
         // 翻译逻辑在 TenantFlowRuleMapper 里（纯函数，单独测过）。
-        super(quotas -> TenantFlowRuleMapper.map(quotas).rules(), refreshMs);
+        //
+        // 在这里顺手上报"被丢弃的规则条数"（第 7 步）：mapper 已经把丢弃原因整理好了，
+        // 而唯一的生产调用点原来把它**扔掉了**——那等于白预检。
+        // 注意 lambda 捕获的是构造器参数（不是 this 的字段），所以不依赖字段赋值顺序。
+        super(quotas -> {
+            TenantFlowRuleMapper.Mapping mapping = TenantFlowRuleMapper.map(quotas);
+            metrics.recordSentinelRulesDropped(mapping.dropped().size());
+            return mapping.rules();
+        }, refreshMs);
         this.appRepository = appRepository;
         this.tenantConfig = tenantConfig;
+        this.metrics = metrics;
+    }
+
+    /**
+     * 关掉父类的定时刷新线程（第 7 步补）。
+     *
+     * <p>少了它，每次上下文销毁都会留下一个每 10 秒查一次库的线程——**测试里尤其明显**
+     * （共享容器之后同一 JVM 里有十几个上下文）。这是个 daemon 线程、不影响进程退出，
+     * 但"用完就关"是数据源这种有生命周期的对象该有的纪律。
+     */
+    @jakarta.annotation.PreDestroy
+    public void shutdown() throws Exception {
+        close();
     }
 
     /**
@@ -77,11 +104,35 @@ public class TenantFlowRuleDataSource
         return SharedRuleProperty.instance();
     }
 
+    /**
+     * 读一轮租户配额。
+     *
+     * <p><b>第 7 步加的一道守卫，理由值得单独说</b>：Sentinel 的
+     * {@code AutoRefreshDataSource} 只在 {@code loadConfig()} **抛异常**时才保留旧规则
+     * （fail-static）；**返回空列表或 null 会被它一路推到 {@code FlowRuleManager} 把规则整表清空**
+     * （源码级核实 + 在 1.8.10 jar 上实跑：rules 2 → 0）。
+     *
+     * <p>而"登记表一行都读不到"这种情况，在旧写法里返回的恰好是空列表且不抛异常——
+     * 后果是**所有租户静默变成不限流**，应用日志里只有一行 debug。
+     * 这是整套机制里唯一一处"错一下就是全体失守"的路径，所以这里**宁可报错**：
+     * 抛出去就走 fail-static 保旧规则，同时把这次"防线失效"打进指标。
+     *
+     * <p><b>刻意不拦的两种"合法的空"</b>（拦它们反而更糟，见 {@code TenantFlowRuleDataSourceTest}）：
+     * ① 租户行存在但**全部停用**——那意味着所有调用方都过不了验签，规则有无都一样，
+     * 而拦住它会把"紧急停掉所有接入方"这个运维操作冻住；② 租户配额**全为 0（不限）**——
+     * 那是运维的正常操作，"以为关了其实没关"比不关更糟。
+     */
     @Override
     public List<TenantFlowRuleMapper.TenantQuota> readSource() {
         try {
+            List<com.newcoupon.domain.open.OpenApp> apps = appRepository.findAllApps();
+            if (apps.isEmpty()) {
+                throw new IllegalStateException(
+                        "登记表读不到任何接入方：拒绝把规则清空（保留上一轮规则）。"
+                                + "若这是真的（全新环境），去建一个接入方即可");
+            }
             List<TenantFlowRuleMapper.TenantQuota> quotas = new ArrayList<>();
-            for (OpenApp app : appRepository.findAllApps()) {
+            for (OpenApp app : apps) {
                 // 停用的租户不发规则：它们连签名认证都过不了，不需要限流保护。
                 // （而且给它们发规则只是白白增加 FlowRuleManager 的全量重建成本。）
                 if (!app.enabled()) {
@@ -95,6 +146,9 @@ public class TenantFlowRuleDataSource
             // 打点 + 记应用日志，然后**抛出去**——让 AutoRefreshDataSource 走它的
             // "保留旧规则"路径（那是我们要的 fail-static 行为），同时让失败可见。
             LOAD_FAILURES.incrementAndGet();
+            // 第 7 步补：以前只有一条 ERROR 日志与一个**没人消费**的静态计数器。
+            // 现在接进治理指标——"规则源读不到导致限流全失效"必须能在仪表盘上看见。
+            metrics.recordLimitFailOpen(METRIC_DIMENSION);
             log.error("租户配额规则回源失败（本轮保留旧规则）：{}", e.toString());
             throw e;
         }

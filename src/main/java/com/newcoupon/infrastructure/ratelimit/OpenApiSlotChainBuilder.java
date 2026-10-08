@@ -29,6 +29,13 @@ public class OpenApiSlotChainBuilder extends DefaultSlotChainBuilder {
     @Override
     public ProcessorSlotChain build() {
         ProcessorSlotChain chain = super.build();
+        // **看门狗挂在链头**（第 7 步）：它要接住的是"下游任何一处冒上来的异常"——
+        // 而 CtSph 在外层把它吞掉了（记一行日志然后放行），所以在链外根本看不见。
+        // 挂链头 = 唯一能看见整条链的位置（见 SentinelWatchdogSlot 的类注释）。
+        // 它**不改变任何行为**：接住、计数、原样重抛。
+        chain.addFirst(new SentinelWatchdogSlot());
+        // 两个自建检查槽位仍在链尾：Sentinel 自己的规则是纯内存快路径，我们的检查要访问 Redis，
+        // 慢的放后面——前面已经拒绝了就不必再碰 Redis。
         chain.addLast(new DailyQuotaSlot());
         chain.addLast(new IpExactSlot());
         return chain;

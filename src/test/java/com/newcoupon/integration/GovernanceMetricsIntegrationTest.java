@@ -164,6 +164,21 @@ class GovernanceMetricsIntegrationTest extends ShardedIntegrationTestSupport {
                 .contains("app_id=\"unverified\"");
     }
 
+    @Test
+    @DisplayName("Sentinel 自身的失效路径进 Prometheus：全局开关 + 处理链数量（迁移第 7 步）")
+    void sentinelSelfMetricsAreExposed() {
+        String text = scrape();
+
+        assertThat(text)
+                .as("Constants.ON=false 时 Sentinel 连处理链都不建——所有规则静默失效、请求全部放行。"
+                        + "它是我们唯一能读到的『总开关』信号（正常恒为 1，=0 应立即告警）")
+                .contains("coupon_sentinel_enabled");
+        assertThat(text)
+                .as("处理链按资源名建、有 6000 的硬上限，超了之后新资源**完全不受检查且零日志**。"
+                        + "这条 gauge 让它可见（本项目正常是『控制器映射数 + 2』的量级）")
+                .contains("coupon_sentinel_slot_chain_count");
+    }
+
     // ------------------------------------------------------------------
 
     /** 打一发会触发 IP 频控的请求（RiskControlFilter 只拦这个路径） */

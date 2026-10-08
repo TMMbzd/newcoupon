@@ -70,6 +70,41 @@ public class GovernanceMetrics {
     }
 
     /**
+     * Sentinel 处理链**内部异常**（迁移第 7 步）。
+     *
+     * <p>为什么它必须存在：链里抛出的非 {@code BlockException} 会被 {@code CtSph} 的
+     * {@code catch (Throwable)} 吞掉并**放行**——也就是说这一发的限流判定实际上没生效，
+     * 而它在应用日志与指标里原本一点痕迹都没有（只写 Sentinel 自己的日志文件）。
+     *
+     * <p>**零标签**是刻意的：这里的维度要么是资源名、要么是异常类型，基数无法先验保证；
+     * 按项目的基数纪律，不确定就不加标签，具体是谁出问题去看日志。
+     */
+    public void recordSentinelInternalError() {
+        Counter.builder("coupon_sentinel_internal_error_total")
+                .description("Sentinel 处理链内部异常次数——每一次都意味着那一发请求的限流判定没生效")
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * 被预检丢弃的 Sentinel 规则数（迁移第 7 步）。
+     *
+     * <p>Sentinel 对过不了 {@code isValidRule} 的规则**只写一行 WARN 到它自己的日志文件**
+     * （{@code ~/logs/csp/sentinel-record.log}，**不进应用日志**）——于是"管理面显示保存成功、
+     * 运行时静默无效"。我们已经做了预检（{@code TenantFlowRuleMapper}），
+     * 但那个 {@code dropped} 列表在调用点被丢掉了，等于白预检。这里把它接进指标。
+     */
+    public void recordSentinelRulesDropped(int count) {
+        if (count <= 0) {
+            return;   // 没丢就不创建时间序列（否则每个启动都会多一条恒为 0 的序列）
+        }
+        Counter.builder("coupon_sentinel_rules_dropped_total")
+                .description("被预检丢弃的 Sentinel 规则数——它们**不会生效**，必须能被看见")
+                .register(registry)
+                .increment(count);
+    }
+
+    /**
      * 一次开放面调用（租户用量）。
      *
      * @param appId   **验签通过**的接入方；未验签传 {@code null}（会归入固定桶）

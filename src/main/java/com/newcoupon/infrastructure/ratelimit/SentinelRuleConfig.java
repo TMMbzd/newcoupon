@@ -25,7 +25,10 @@ public class SentinelRuleConfig {
 
     public SentinelRuleConfig(TenantFlowRuleDataSource dataSource,
                               RedisDailyQuotaChecker dailyQuotaChecker,
-                              RedisIpExactChecker ipExactChecker) {
+                              RedisIpExactChecker ipExactChecker,
+                              com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics) {
+        // 看门狗也要拿到指标（同样是 SPI 类，只能用静态桥接）
+        SentinelWatchdogSlot.install(governanceMetrics);
         // 把自建检查器装进自建 Slot（SPI 加载的 Slot 不受 Spring 管理，只能用静态桥接——
         // 这一步**必须**在首次访问资源之前完成，否则 Slot 拿到的是 null、
         // 对应维度**静默失效**：请求照常通过，什么都不会报）
