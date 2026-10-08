@@ -161,6 +161,22 @@ state=$(breaker_state redis || echo "?")
 ok "熔断器状态 = OPEN（读 /api/switches/breakers 得到）"
 PASS=$((PASS + 3))
 
+# ---------------------------------------------------------------- 新增：防线失效的可见性
+step "4'. 防线失效必须**看得见**（S3 第 6.5/7 步的承诺，在这里验）"
+text=$(curl -sS "$BASE/actuator/prometheus" 2>/dev/null || echo "")
+# ① 风控闸（Redis 频控）在故障期间是 fail-open 的——但它必须留下痕迹，
+#    否则"风控闸已经失效"与"今天没人刷"在监控上完全一样。
+printf '%s' "$text" | grep -q 'coupon_ratelimit_failopen_total{dimension="risk_ip"}' \
+  || fail "Redis 故障期间没有出现 fail-open 指标（dimension=risk_ip）——防线失效变成静默的了"
+ok "fail-open 指标已出现：coupon_ratelimit_failopen_total{dimension=\"risk_ip\"}"
+# ② Sentinel 自身那两条 gauge（全局开关 / 处理链数量）——它们回答的是"整套限流还在不在"
+printf '%s' "$text" | grep -q 'coupon_sentinel_enabled' \
+  || fail "抓取里没有 coupon_sentinel_enabled（Sentinel 全局开关不可见）"
+printf '%s' "$text" | grep -q 'coupon_sentinel_slot_chain_count' \
+  || fail "抓取里没有 coupon_sentinel_slot_chain_count（处理链数量不可见）"
+ok "Sentinel 自身状态可见（全局开关 + 处理链数量）"
+PASS=$((PASS + 3))
+
 # ---------------------------------------------------------------- 恢复故障
 step "5. 恢复故障：熔断应当自己闭合（半开探测 → 闭合）"
 docker unpause "$REDIS_CONTAINER" >/dev/null
