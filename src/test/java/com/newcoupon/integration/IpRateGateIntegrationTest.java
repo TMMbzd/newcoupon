@@ -37,6 +37,9 @@ class IpRateGateIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired
     private StringRedisTemplate redis;
 
+    @Autowired
+    private io.micrometer.core.instrument.MeterRegistry meterRegistry;
+
     private static final AtomicInteger IP_SEQ = new AtomicInteger(1);
 
     private String freshIp() {
@@ -45,26 +48,35 @@ class IpRateGateIntegrationTest extends ShardedIntegrationTestSupport {
 
     @Test
     @Timeout(60)
-    @DisplayName("阈值内放行、超阈拒绝、窗口翻转恢复")
+    @DisplayName("阈值内放行、超阈拒绝、随补充恢复")
     void allowsWithinLimitBlocksOverLimitAndRecovers() {
         String ip = freshIp();
 
         assertThat(gate.allow(ip)).as("第1次放行").isTrue();
         assertThat(gate.allow(ip)).as("第2次放行").isTrue();
-        assertThat(gate.allow(ip)).as("第3次放行（=阈值）").isTrue();
-
-        // 确定性拒绝断言：预填"当前+下一"两个窗口的计数到阈值——消除断言与窗口边界的赛跑
-        //（直接写 Redis 而不是多调几次 allow：多调恰跨边界时会落新窗口，纯时序竞态）
-        long ws = System.currentTimeMillis() / 2000L;
-        redis.opsForValue().set("c:risk:ip:" + ip + ":" + ws, "3");
-        redis.opsForValue().set("c:risk:ip:" + ip + ":" + (ws + 1), "3");
+        assertThat(gate.allow(ip)).as("第3次放行（=容量）").isTrue();
+        // **第 6.5 步换了计数实现**：原来是手写固定窗口（键带窗口号，断言要"预填当前+下一窗口"
+        // 才能避开与窗口边界的赛跑）；现在是统一的令牌桶（容量 3、每 2 秒补 3 个 = 每 667ms 一个）。
+        // 上面三发是连续调用（毫秒级），此刻桶是空的 → 紧接着的第四发必被拒。**与边界无关**。
         assertThat(gate.allow(ip)).as("第4次拒绝——脚本高频形态被挡在业务逻辑之前").isFalse();
-        assertThat(gate.allow(ip)).as("继续拒绝").isFalse();
 
-        // 恢复：清计数后放行（窗口翻转的语义=惩罚有时限，非永久拉黑）
-        redis.delete("c:risk:ip:" + ip + ":" + ws);
-        redis.delete("c:risk:ip:" + ip + ":" + (ws + 1));
-        assertThat(gate.allow(ip)).as("计数清除后恢复放行").isTrue();
+        // 恢复：不靠"手动清键"，而是等令牌自己补回来。宽容地轮询到 5 秒上限——
+        // "多久恢复"是实现的细节，"最终会恢复"才是契约（同一个写法见 RateLimitContractTest）。
+        boolean recovered = false;
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (System.currentTimeMillis() < deadline) {
+            if (gate.allow(ip)) {
+                recovered = true;
+                break;
+            }
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        assertThat(recovered).as("令牌会补回来——频控是「暂时挡住」，不是「永久拉黑」").isTrue();
     }
 
     @Test
@@ -81,20 +93,50 @@ class IpRateGateIntegrationTest extends ShardedIntegrationTestSupport {
 
     @Test
     @Timeout(60)
-    @DisplayName("键带 TTL（无残留；窗口键自然过期）")
+    @DisplayName("桶有 TTL（无残留）")
     void keysHaveTtl() {
         String ip = freshIp();
         gate.allow(ip);
-        Long ttl = redis.getExpire(
-                java.util.Objects.requireNonNull(redis.keys("c:risk:ip:" + ip + ":*")).iterator().next());
-        assertThat(ttl).as("窗口键设置了过期（2倍窗口=4s 内）").isBetween(1L, 4L);
+
+        // 键的**精确形态**由实现（Bucket4j 的分布式桶）决定，所以这里用前缀匹配后再断言
+        // "确实是我们的键"——真正要守的是**运维的排查习惯**：`redis-cli --scan 'c:risk:ip:*'`
+        // 必须仍然能找到它。（第 6.5 步换实现时，前缀与主体一字未改。）
+        var keys = redis.keys("c:risk:ip:" + ip + "*");
+        assertThat(keys).as("按既有前缀应当能找到桶键").isNotEmpty();
+        String key = keys.iterator().next();
+        assertThat(key).startsWith("c:risk:ip:" + ip);
+        assertThat(redis.getExpire(key)).as("桶会自然过期，不留残留").isGreaterThan(0L);
     }
 
     @Test
     @Timeout(60)
-    @DisplayName("Redis 不可达时 fail-open（可用性防线不误杀全量——资损另有独立防线）")
+    @DisplayName("Redis 不可达时 fail-open，且留下 failopen 指标（防线失效必须可见）")
     void failOpenWhenRedisDown() {
-        IpRateGate brokenGate = new IpRateGate(null, true, 60, 30);   // redis=null → NPE → catch → 放行
-        assertThat(brokenGate.allow("1.2.3.4")).as("Redis 故障时放行：频控失效好过全站拒绝").isTrue();
+        // 用一个"一用就炸"的限流器代表 Redis 不可达（比 mock 更直白，且异常类型与真实故障同型）
+        com.newcoupon.infrastructure.ratelimit.RateLimiter broken =
+                new com.newcoupon.infrastructure.ratelimit.RateLimiter() {
+                    @Override
+                    public boolean tryAcquire(String subject, int limit, java.time.Duration window) {
+                        throw new org.springframework.data.redis.RedisConnectionFailureException(
+                                "模拟 Redis 不可用");
+                    }
+
+                    @Override
+                    public String algorithm() {
+                        return "broken";
+                    }
+                };
+        IpRateGate brokenGate = new IpRateGate(broken,
+                new com.newcoupon.infrastructure.metrics.GovernanceMetrics(meterRegistry), true, 60, 30);
+
+        assertThat(brokenGate.allow("1.2.3.4"))
+                .as("Redis 故障时放行：频控失效好过全站拒绝（资损另有库存闸门/DB 双防线）")
+                .isTrue();
+
+        assertThat(meterRegistry.find("coupon_ratelimit_failopen_total")
+                .tag("dimension", "risk_ip").counter())
+                .as("**放行必须可见**：改之前这里连异常都丢掉了，于是「风控闸已失效」"
+                        + "与「今天没人刷」在监控上完全一样")
+                .isNotNull();
     }
 }

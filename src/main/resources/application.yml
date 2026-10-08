@@ -26,6 +26,25 @@ server:
   # 优雅停机：收到 SIGTERM 后先停止接新请求，等在途请求完成（最多30s）再退出。
   # 没有它，每次发版都会切断在途领券/核销请求，制造出一批"扣了库存没落库"的不一致。
   shutdown: graceful
+  # 客户端 IP 的**信任边界交给容器**（Tomcat RemoteIpValve），应用层只读 getRemoteAddr()。
+  #
+  # 为什么不是应用自己解析 X-Forwarded-For：那个头由请求方决定。取它的"首跳"= 谁都能换一个
+  # 假地址换一个干净的限流桶（按 IP 的限流形同虚设），审计里的来源 IP 也变成攻击者写的字符串
+  # （Spring Cloud Gateway 官方文档把这个反模式点名成 "vulnerable to spoofing"）。
+  # 阀门的规则才是对的：① 只在"直连对端是可信代理"时才看这些头（公网直连伪造无效）；
+  # ② **从右往左**跳过内部/可信跳、取第一个不可信的（代理一般往右追加真实来源）。
+  # 这样"Nginx 是覆盖还是追加代理头"就不再是安全前提——两种写法都能拿到真实客户端。
+  #
+  # 关于 internal-proxies：**保持 Spring Boot 的默认值**（私网 + 127/8，含 IPv6 环回），
+  # 即"来自本机/私网的直连对端算可信代理"。注意两件事：
+  #   · 不要把这里配成空——Boot 文档说"置空=信任所有代理"，但代码里是让**整个阀门失效**
+  #     （文档与实现不符，实测过），表现为所有客户端塌缩成代理 IP 一个限流键；
+  #   · **生产应收窄成"代理→应用"的实际来源**（同机 Nginx 就是 127\.0\.0\.1，否则填网段），
+  #     这属于部署前置条件，写进 docs/11 与 STATUS——仓库里无法验证运维实际用的是哪个地址。
+  # 另外：阀门按 X-Forwarded-Proto/Port/Host 改写 scheme/端口/主机名（同样只在可信对端时），
+  # 这是反代后应有的行为；若哪天不希望它改动，把对应 header 名指到一个永不出现的头名上
+  # （用空值关不掉——Boot 会把空值替换回默认头名）。
+  forward-headers-strategy: native
 
 # ShardingSphere 真实库连接（dev 默认本机 compose；测试容器由 DynamicPropertySource 注入；
 # 生产用环境变量覆盖）。业务数据源=ShardingSphere 驱动（分片路由见 ShardingDataSourceConfig）

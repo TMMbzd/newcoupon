@@ -126,6 +126,36 @@ class OpenApiAuditIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(row.getPath()).isEqualTo("/open/v1/coupons");
     }
 
+    /**
+     * **多级代理下取哪一跳**（2026-10-08 第 6.5 步）。
+     *
+     * <p><b>红</b>：改前取的是 {@code X-Forwarded-For} 的**最左**那个值——而最左边恰恰是
+     * 请求方自己塞得进去的位置（代理通常是往右边**追加**真实来源）。于是"审计记的来源 IP"
+     * 变成了攻击者写的字符串，而按 IP 的限流只要每次换个假地址就失效。
+     *
+     * <p><b>改后</b>：由容器（Tomcat {@code RemoteIpValve}）判定——它只看"直连对端是否可信代理"，
+     * 然后**从右往左跳过可信跳、取第一个不可信的**。所以本用例里攻击者塞的 {@code 1.2.3.4}
+     * 会被跳过，取到的是真实来源 {@code 198.51.100.7}。
+     *
+     * <p>这条断言是这次改动的**唯一回归钉子**：仓库里此前没有任何用例断言过
+     * "IP 等于头里的某一个值"（审计用例只断言过非空），所以语义变了也没人会红。
+     */
+    @Test
+    @DisplayName("多级代理：来源 IP 取「从右往左第一个不可信跳」，不是最左那个")
+    void clientIpIgnoresSpoofedLeftmostHop() throws Exception {
+        // 真实形态：客户端(198.51.100.7) → 我们的 Nginx(127.0.0.1，可信) → 应用。
+        // 攻击者在最左边塞了一个假地址——这正是"取首跳"会被骗的地方。
+        OpenApiTestClient.Response r = client.get("/open/v1/coupons", "userId=1", APP_ID, secret,
+                "X-Forwarded-For", "1.2.3.4, 198.51.100.7");
+        assertThat(r.status()).as("这一发本身要通（审计留痕与状态码无关）").isEqualTo(200);
+
+        OpenApiAuditPO row = latest();
+        assertThat(row.getClientIp())
+                .as("取最左 = 攻击者想写什么就写什么：限流键与审计来源全被污染。"
+                        + "取最右的不可信跳才是客户端地址。实际记的是=" + row.getClientIp())
+                .isEqualTo("198.51.100.7");
+    }
+
     // ------------------------------------------------------------------
 
     private OpenApiAuditPO latest() {

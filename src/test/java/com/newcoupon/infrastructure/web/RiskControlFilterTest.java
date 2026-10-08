@@ -35,6 +35,56 @@ class RiskControlFilterTest {
         return request;
     }
 
+    /**
+     * **客户端 IP 由容器解析，应用层不读任何代理头**（2026-10-08 第 6.5 步）。
+     *
+     * <p><b>红</b>：改前这里读的是 {@code X-Forwarded-For} 的**首跳**。那个值完全由请求方决定——
+     * 攻击者每次换一个假地址，就得到一个干净的限流桶（限流形同虚设），审计里的来源 IP 也随之被污染。
+     * Spring Cloud Gateway 的官方文档把这个反模式直接点名成
+     * "This approach is vulnerable to spoofing"。
+     *
+     * <p><b>改法</b>：把"哪些头可信"交给容器（Tomcat 的 {@code RemoteIpValve}，
+     * 由 {@code server.forward-headers-strategy=native} 启用）：它只在"直连对端是可信代理"时才看这些头，
+     * 而且**从右往左跳过可信跳、取第一个不可信的**——那才是客户端地址。
+     * 应用层只读 {@code getRemoteAddr()}，不给自己留任何"头优先"的兜底分支。
+     */
+    @Test
+    @DisplayName("客户端 IP 只认容器解析的结果：带代理头也必须返回 remoteAddr")
+    void clientIpDoesNotTrustHeaders() {
+        MockHttpServletRequest request = post("/api/coupons/receive", "198.51.100.7");
+        request.addHeader("X-Forwarded-For", "1.2.3.4");
+        request.addHeader("X-Real-IP", "5.6.7.8");
+
+        assertThat(RiskControlFilter.clientIp(request))
+                .as("XFF / X-Real-IP 都是请求方可控的头。应用层直接采信 = 限流可被一个请求头绕过"
+                        + "（换一个假地址就换一个干净的桶），审计里的来源 IP 也一起失真。"
+                        + "容器已经替我们把这件事做对了：应用层只读 getRemoteAddr()")
+                .isEqualTo("198.51.100.7");
+    }
+
+    /**
+     * **429 的四要素对风控闸同样成立**（2026-10-08 第 6.5 步补）。
+     *
+     * <p><b>红</b>：改前这个 429 **没有 {@code Retry-After}**。接入方（或客户端重试中间件）
+     * 拿不到"多久后可以再试"，只能瞎猜或立刻重试——后者会把限流变成自我加压。
+     * 本项目在开放面配额那条路上早就补齐了这个头（S1 的 429 契约），风控这条漏了。
+     */
+    @Test
+    @DisplayName("频控拒绝也要带 Retry-After（四要素对每条 429 都成立）")
+    void deniedResponseCarriesRetryAfter() throws Exception {
+        when(gate.allow("1.2.3.4")).thenReturn(false);
+        when(gate.retryAfterSeconds()).thenReturn(2L);
+        MockHttpServletRequest request = post("/api/coupons/receive", "1.2.3.4");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        filter.doFilter(request, response, new MockFilterChain());
+
+        assertThat(response.getStatus()).isEqualTo(429);
+        assertThat(response.getHeader("Retry-After"))
+                .as("429 必须告诉对方多久后重试——否则客户端只能瞎猜，或立刻重试（把限流变成自杀）")
+                .isEqualTo("2");
+    }
+
     @Test
     @DisplayName("真实路径 /api/coupons/receive + 频控拒绝 → 429 + 7001，且不放行")
     void realPath_denied_returns429() throws Exception {
