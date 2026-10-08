@@ -60,6 +60,18 @@ public abstract class ShardedIntegrationTestSupport {
      * **不依赖 {@code @Container}**——但要求容器已启动，所以下面用静态块先启。
      */
     static {
+        // **测试里关掉 Sentinel 规则源的周期刷新**（2026-10-08 第 8 步补）。
+        //
+        // 规则表（FlowRuleManager）是 **JVM 级**的，而本基座让十几个**配置各不相同**的
+        // Spring 上下文共处一个 JVM：每个上下文的数据源都在每 10 秒把**自己那一份**规则
+        // 全量推上去 → 规则表在上下文之间来回横跳。对"断言某条规则在起作用"的用例，
+        // 那就是"单跑绿、全量红"（实测：排队用例被别的上下文顶掉）。
+        //
+        // 周期刷新本来是多实例场景下的收敛机制，测试里不需要它——用例用**显式推送**
+        // （dataSource.refreshNow()）来制造自己要的前置状态，这才是可控的量。
+        // 顺带还有个好效果：几十个后台定时线程不再每 10 秒查一次库。
+        System.setProperty("coupon.sentinel.rule-refresh-ms", String.valueOf(3_600_000L));
+
         if (!MYSQL.isRunning()) {
             MYSQL.start();
         }

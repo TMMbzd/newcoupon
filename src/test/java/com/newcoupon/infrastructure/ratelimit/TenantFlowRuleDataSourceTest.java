@@ -53,7 +53,12 @@ class TenantFlowRuleDataSourceTest {
         TenantConfigService config = mock(TenantConfigService.class);
         when(config.get(anyString(), any())).thenReturn(null);   // 未配置 → 回落登记表
         // 刷新周期给得很大：用例只手动调 readSource()，不要让定时线程插进来
-        dataSource = new TenantFlowRuleDataSource(repository, config, 3_600_000L, metrics);
+        // 接口维度**关着**（enabled=false）：本类只验"租户配额"这条路的读取语义，
+        // 接口维度的规则由 InterfaceFlowRuleMapperTest 单独验
+        OpenInterfaceCatalog catalog = new OpenInterfaceCatalog(
+                mock(org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping.class),
+                event -> { }, false, 0, 0, 0);
+        dataSource = new TenantFlowRuleDataSource(repository, config, 3_600_000L, metrics, catalog);
         return dataSource;
     }
 

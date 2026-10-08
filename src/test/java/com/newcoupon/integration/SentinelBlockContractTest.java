@@ -7,6 +7,7 @@ import com.alibaba.csp.sentinel.slots.system.SystemRuleManager;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -43,12 +44,27 @@ class SentinelBlockContractTest extends ShardedIntegrationTestSupport {
     /** 用内部面：它没有 origin，所以配 limitApp=default 的规则即可命中，不必造签名请求 */
     private static final String RESOURCE = "/api/coupons/receive";
 
+    /** 本用例开始前的系统规则（**用例里取**：类加载时 Spring 上下文还没起来，那时还是空的） */
+    private static List<SystemRule> rulesBeforeTest;
+
     @Autowired
     private TestRestTemplate rest;
 
+    /**
+     * 用完**恢复启动时的规则**，而不是清空。
+     *
+     * <p>第 8 步修：原来这里是 {@code loadRules(List.of())}——那会把启动时加载的
+     * **生产默认系统规则**一起清掉，而且因为是 JVM 级静态状态，还会影响同一 JVM 里
+     * 后续的用例（"顺序相关"的那类问题，第 6 步刚踩过同款）。
+     */
+    @BeforeEach
+    void snapshotRules() {
+        rulesBeforeTest = SystemRuleManager.getRules();
+    }
+
     @AfterEach
-    void clearRules() {
-        SystemRuleManager.loadRules(List.of());   // 系统规则也是 JVM 级静态状态，用完必须清
+    void restoreRules() {
+        SystemRuleManager.loadRules(rulesBeforeTest);
     }
 
     private ResponseEntity<String> call() {
@@ -94,7 +110,12 @@ class SentinelBlockContractTest extends ShardedIntegrationTestSupport {
 
         var resp = call();
 
-        assertThat(resp.getStatusCode().value()).isEqualTo(429);
+        assertThat(resp.getStatusCode().value())
+                .as("**系统过载用 503，不是 429**（第 8 步改）：429 的语义是「你打太快了，慢点再来」，"
+                        + "503 才是「这台机器现在扛不住」。接入方对两者的处置完全不同——"
+                        + "前者该退避重试同一个实例，后者该认为整个服务不可用。业务码里的 5000（系统繁忙）"
+                        + "本来就是按这个语义定的，状态码一直没跟上。实际=" + resp.getStatusCode().value())
+                .isEqualTo(503);
         assertThat(resp.getBody())
                 .as("必须是本项目的 JSON 格式，而不是 Sentinel 默认的纯文本。实际=" + resp.getBody())
                 .startsWith("{");

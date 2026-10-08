@@ -58,23 +58,29 @@ public final class BlockRejection {
     /** 限流类拒绝建议的重试间隔（秒）：QPS 窗口是 1 秒，下一秒就是新窗口 */
     private static final String ONE_SECOND = "1";
 
+    private static final int HTTP_TOO_MANY_REQUESTS = 429;
+    private static final int HTTP_SERVICE_UNAVAILABLE = 503;
+
     private final ErrorCode code;
     private final String dimension;
     private final String metricDimension;
     private final String retryAfterSeconds;
+    /** HTTP 状态码：限流类用 429；**系统过载用 503**（第 8 步改，见 {@link #of} 里的说明） */
+    private final int httpStatus;
 
     private BlockRejection(ErrorCode code, String dimension,
-                           String metricDimension, String retryAfterSeconds) {
+                           String metricDimension, String retryAfterSeconds, int httpStatus) {
         this.code = code;
         this.dimension = dimension;
         this.metricDimension = metricDimension;
         this.retryAfterSeconds = retryAfterSeconds;
+        this.httpStatus = httpStatus;
     }
 
     /** 非异常路径（如"限流器返回 false"）构造一个拒绝——与异常路径共用同一份契约 */
     public static BlockRejection of(ErrorCode code, String dimension,
                                     String metricDimension, String retryAfterSeconds) {
-        return new BlockRejection(code, dimension, metricDimension, retryAfterSeconds);
+        return new BlockRejection(code, dimension, metricDimension, retryAfterSeconds, HTTP_TOO_MANY_REQUESTS);
     }
 
     /**
@@ -88,31 +94,36 @@ public final class BlockRejection {
         if (e instanceof DailyQuotaBlockException daily) {
             // 日配额：**唯一一个 Retry-After 不是 1 秒的维度**（它要答"到明天还有多久"）
             return new BlockRejection(ErrorCode.DAILY_QUOTA_EXCEEDED, "日配额已用尽",
-                    METRIC_TENANT_DAILY, String.valueOf(daily.retryAfterSeconds()));
+                    METRIC_TENANT_DAILY, String.valueOf(daily.retryAfterSeconds()), HTTP_TOO_MANY_REQUESTS);
         }
         if (e instanceof IpExactBlockException) {
             return new BlockRejection(ErrorCode.QPS_LIMIT_EXCEEDED, "IP 维度请求速率超限",
-                    METRIC_IP, ONE_SECOND);
+                    METRIC_IP, ONE_SECOND, HTTP_TOO_MANY_REQUESTS);
         }
         if (e instanceof SystemBlockException) {
-            // 系统自适应保护（BBR）触发：不是"谁打太快"，而是"这台机器自己扛不住了"。
-            // 用 5000（系统繁忙）而不是 6006（请求超限）——前者的语义更准，也更能指导对方退避。
+            // 系统自适应保护触发：不是"谁打太快"，而是"这台机器自己扛不住了"。
+            // 业务码用 5000（系统繁忙）而不是 6006（请求超限）；**状态码也改成 503**
+            // （第 8 步）：429 的语义是"你打太快了，慢点再来"，503 才是"服务现在不可用"——
+            // 接入方对两者的处置完全不同（前者退避后重试同一个实例，后者该认为整体不可用）。
+            // 业务码本来就是按这个语义定的，状态码一直没跟上。
             return new BlockRejection(ErrorCode.SYSTEM_ERROR, "系统自适应保护",
-                    METRIC_SYSTEM, ONE_SECOND);
+                    METRIC_SYSTEM, ONE_SECOND, HTTP_SERVICE_UNAVAILABLE);
         }
         if (e instanceof FlowException) {
             // 租户维度与接口维度**抛的是同一个类型**（都是 FlowRule 命中），只能按资源名分：
             // 聚合资源 open_api 上挂的是"该租户跨所有接口的总量"，其余是"某个接口被平台限了"。
             return TenantFlowRuleMapper.OPEN_API_RESOURCE.equals(resourceName)
                     ? new BlockRejection(ErrorCode.QPS_LIMIT_EXCEEDED, "租户请求速率超限",
-                            METRIC_TENANT_QPS, ONE_SECOND)
-                    : new BlockRejection(ErrorCode.QPS_LIMIT_EXCEEDED, "请求速率超限",
-                            METRIC_RESOURCE, ONE_SECOND);
+                            METRIC_TENANT_QPS, ONE_SECOND, HTTP_TOO_MANY_REQUESTS)
+                    // 非聚合资源的 FlowRule = 平台给"某个接口"设的上限（第 8 步从 Bucket4j 迁过来）。
+                    // 指标标签仍是 resource（对 Prometheus 是长期契约，改名等于历史序列清零）
+                    : new BlockRejection(ErrorCode.QPS_LIMIT_EXCEEDED, "接口维度请求速率超限",
+                            METRIC_RESOURCE, ONE_SECOND, HTTP_TOO_MANY_REQUESTS);
         }
         // 其余子类（热点参数 / 熔断 / 授权）本项目暂时没有用到，但**不能让它落到默认处理器**——
         // 那又变回纯文本了。用类名当维度文案，并打上 other 标签，让"没预料到的东西"可被发现。
         return new BlockRejection(ErrorCode.QPS_LIMIT_EXCEEDED, e.getClass().getSimpleName(),
-                METRIC_OTHER, ONE_SECOND);
+                METRIC_OTHER, ONE_SECOND, HTTP_TOO_MANY_REQUESTS);
     }
 
     /**
@@ -129,7 +140,7 @@ public final class BlockRejection {
         log.warn("SENTINEL BLOCK：resource={} 维度={} 业务码={} Retry-After={}s",
                 resourceName, metricDimension, code.getCode(), retryAfterSeconds);
 
-        response.setStatus(429);
+        response.setStatus(httpStatus);
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         // 不声明字符集时 Servlet 默认 ISO-8859-1，手写的中文会变乱码
         response.setCharacterEncoding("UTF-8");

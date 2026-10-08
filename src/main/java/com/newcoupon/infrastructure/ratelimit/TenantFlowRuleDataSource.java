@@ -58,7 +58,8 @@ public class TenantFlowRuleDataSource
             OpenAppRepository appRepository,
             TenantConfigService tenantConfig,
             @Value("${coupon.sentinel.rule-refresh-ms:10000}") long refreshMs,
-            GovernanceMetrics metrics) {
+            GovernanceMetrics metrics,
+            OpenInterfaceCatalog interfaceCatalog) {
         // Converter：原始形态（租户配额列表）→ Sentinel 规则列表。
         // 翻译逻辑在 TenantFlowRuleMapper 里（纯函数，单独测过）。
         //
@@ -66,9 +67,16 @@ public class TenantFlowRuleDataSource
         // 而唯一的生产调用点原来把它**扔掉了**——那等于白预检。
         // 注意 lambda 捕获的是构造器参数（不是 this 的字段），所以不依赖字段赋值顺序。
         super(quotas -> {
-            TenantFlowRuleMapper.Mapping mapping = TenantFlowRuleMapper.map(quotas);
-            metrics.recordSentinelRulesDropped(mapping.dropped().size());
-            return mapping.rules();
+            // **两类规则合并成一个列表再推**（第 8 步）：FlowRuleManager 只有一个属性位、
+            // 且推送是**全量替换**——分成两个数据源必然互相冲掉（第 6 步的"单跑绿、全量红"就是这么来的）。
+            TenantFlowRuleMapper.Mapping tenant = TenantFlowRuleMapper.map(quotas);
+            InterfaceFlowRuleMapper.Mapping iface = interfaceCatalog.toRules();
+
+            metrics.recordSentinelRulesDropped(tenant.dropped().size() + iface.dropped().size());
+
+            List<FlowRule> merged = new ArrayList<>(tenant.rules());
+            merged.addAll(iface.rules());
+            return merged;
         }, refreshMs);
         this.appRepository = appRepository;
         this.tenantConfig = tenantConfig;
@@ -180,6 +188,18 @@ public class TenantFlowRuleDataSource
      * <p>覆盖三个入口：新建接入方、启停接入方、改租户配置。
      * 少了它，"新建的租户在最多 10 秒内不受限"——那是实测出来的真实缺口。
      */
+    /**
+     * 开放面路径模式目录就绪 → 立刻重推一次。
+     *
+     * <p>首次推送发生在 {@code SentinelRuleConfig} 的构造器里，那时 Spring MVC 的 handler
+     * 还没探测完、目录是空的——不补这一推，接口维度要等下一个刷新周期（默认 10 秒）才生效。
+     */
+    @org.springframework.context.event.EventListener
+    public void onInterfaceCatalogReady(OpenInterfaceCatalog.Event event) {
+        log.debug("开放面路径模式目录就绪（{} 条），重推规则", event.patternCount());
+        refreshNow();
+    }
+
     @org.springframework.context.event.EventListener
     public void onQuotaChanged(TenantQuotaChangedEvent event) {
         log.debug("租户配额变更（{}），主动推送规则", event.reason());

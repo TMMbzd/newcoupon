@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.newcoupon.application.service.OpenAppService;
 import com.newcoupon.application.service.OpenAppService.CreateAppRequest;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,6 +53,13 @@ class MultiDimensionRateLimitTest extends ShardedIntegrationTestSupport {
 
     @Autowired
     private OpenAppService appService;
+
+    /**
+     * 规则是 JVM 级的：同一 JVM 里十几个测试上下文会各自按自己的配置周期重推规则。
+     * 所以断言前**自己推一次**（走生产同一条路径），否则测的可能是别人的配置。
+     */
+    @Autowired
+    private com.newcoupon.infrastructure.ratelimit.TenantFlowRuleDataSource dataSource;
 
     private static OpenApiTestClient client;
     private static String secret;
@@ -110,19 +118,43 @@ class MultiDimensionRateLimitTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("接口维度：同一个接口被反复打 → 429（与是哪个 IP、哪个租户无关）")
+    @DisplayName("接口维度：同一个接口被并发打 → 429（与是哪个 IP、哪个租户无关）")
     void resourceDimension_limits() throws Exception {
-        // 每次都换 IP：这样 IP 维度永远不会触发，能被拦下来说明是接口维度在起作用
-        OpenApiTestClient.Response last = null;
-        for (int i = 0; i < 6; i++) {
-            last = client.get("/open/v1/coupons", "userId=3", APP_ID, secret,
-                    "X-Forwarded-For", "10.9.9." + i + "-" + (System.nanoTime() % 100));
-            if (last.status() == 429) {
-                break;
+        dataSource.refreshNow();
+        // **第 8 步改了两处**：
+        //  ① 判定搬到了 Sentinel 的规则上（原来是过滤器里直接调 Bucket4j，为了给预热/排队腾地方）；
+        //  ② 判据从"连打 6 次"改成**并发 8 发**——顺序连打在一秒多一发的节奏下，
+        //     对一条 2/秒的规则**永远不会超限**（那个坑本项目踩过四次了：判据里藏着"请求够快"）。
+        // 每次请求换一个来源 IP：让 IP 维度永远不触发，于是被拦下就只可能是接口维度。
+        int n = 8;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(n);
+        try {
+            var start = new java.util.concurrent.CountDownLatch(1);
+            List<java.util.concurrent.Future<OpenApiTestClient.Response>> futures = new java.util.ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                String ip = "10.9.9." + i + "." + (System.nanoTime() % 250);
+                futures.add(pool.submit(() -> {
+                    start.await();
+                    return client.get("/open/v1/coupons", "userId=3", APP_ID, secret,
+                            "X-Forwarded-For", ip);
+                }));
             }
-        }
+            start.countDown();
+            List<OpenApiTestClient.Response> all = new java.util.ArrayList<>();
+            for (var f : futures) {
+                all.add(f.get(30, java.util.concurrent.TimeUnit.SECONDS));
+            }
 
-        assertThat(last.status()).as(last.body()).isEqualTo(429);
-        assertThat(last.body()).contains("接口");
+            var blocked = all.stream().filter(r -> r.status() == 429).findFirst();
+            assertThat(blocked)
+                    .as("上限 2/秒，8 发并发里必须至少有一个被接口维度拒掉。状态分布="
+                            + all.stream().map(OpenApiTestClient.Response::status).sorted().toList())
+                    .isPresent();
+            assertThat(blocked.get().body())
+                    .as("要说清是接口维度被限。实际=" + blocked.get().body())
+                    .contains("接口");
+        } finally {
+            pool.shutdownNow();
+        }
     }
 }

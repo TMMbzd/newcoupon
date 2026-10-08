@@ -8,11 +8,9 @@ import com.alibaba.csp.sentinel.slots.block.BlockException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.newcoupon.application.service.CachedOpenAppReader;
 import com.newcoupon.application.service.CachedOpenAppReader.AppAuth;
-import com.newcoupon.common.ErrorCode;
 import com.newcoupon.infrastructure.metrics.GovernanceMetrics;
 import com.newcoupon.infrastructure.ratelimit.BlockRejection;
 import com.newcoupon.infrastructure.ratelimit.IpExactSlot;
-import com.newcoupon.infrastructure.ratelimit.RateLimiter;
 import com.newcoupon.infrastructure.ratelimit.TenantFlowRuleMapper;
 import com.newcoupon.common.context.RequestContext;
 import jakarta.servlet.FilterChain;
@@ -20,11 +18,9 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.time.Duration;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
@@ -37,7 +33,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
  *
  * <pre>
  *   IP      open_api_ip 资源 → 自建 IpExactSlot（Redis 精确计数，官方规则模型表达不了）
- *   接口    c:rl:res:{接口}  → RateLimiter（令牌桶；第 8 步迁移到 FlowRule，届时可配预热/排队）
+ *   接口    {路径模式} 资源 → Sentinel FlowRule(limitApp=default)（第 8 步从 Bucket4j 迁过来）
  *   租户    open_api   资源 → Sentinel FlowRule(limitApp=appId) + 自建 DailyQuotaSlot
  * </pre>
  *
@@ -69,24 +65,8 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
 
     private static final String OPEN_PREFIX = "/open/";
 
-    /** 接口维度的键前缀（与迁移前一致，运维的排查习惯不因换实现而失效） */
-    static final String RESOURCE_KEY_PREFIX = "c:rl:res:";
-
     /** 这个调用链的名字（Sentinel 的 context name，与资源名不是一回事） */
     private static final String CONTEXT_NAME = "open-api";
-
-    /**
-     * **窗口 = 1 秒**。配置项叫 {@code qps}（每秒上限），窗口就必须是 1 秒。
-     *
-     * <p>迁移前这里传的是 {@code Duration.ofSeconds(2)}——那个 2 是固定窗口时代"键的 TTL"
-     * 的遗留值，换成令牌桶之后它变成了**桶的补充周期**，于是"qps=2"实际每秒只放 1 个
-     * （详见 {@code RedisIpExactChecker} 的类注释，那里有源码级理由）。
-     * 同一处缺陷在 IP 维度也有一份，一并修正。
-     */
-    private static final Duration ONE_SECOND = Duration.ofSeconds(1);
-
-    /** 限流类拒绝建议的重试间隔（秒） */
-    private static final String RETRY_AFTER_ONE_SECOND = "1";
 
     /** 当前请求的租户维度 Entry（ThreadLocal：Entry/exit 必须同线程配对） */
     private static final ThreadLocal<Entry> tenantDimensionEntry = new ThreadLocal<>();
@@ -95,31 +75,12 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
     private final ObjectMapper objectMapper;
     private final GovernanceMetrics governanceMetrics;
 
-    /** 接口维度的限流器（2026-10-08 起只剩它还用 RateLimiter；第 8 步会迁到 FlowRule） */
-    private final RateLimiter limiter;
-
-    /**
-     * 接口维度（平台级，S2 第 6 步）。
-     *
-     * <p>它与 IP 维度一样是**平台级**的——"一个接口最多打多少"是自我保护，
-     * 与具体客户无关，所以放全站配置而不是租户配置。
-     * <p>**默认关闭**：打开它会改变所有接入方的可见行为，应当由运维显式决定。
-     */
-    private final boolean resourceEnabled;
-    private final int resourceQps;
-
     public OpenApiQuotaFilter(CachedOpenAppReader appReader,
-                              RateLimiter limiter,
                               ObjectMapper objectMapper,
-                              GovernanceMetrics governanceMetrics,
-                              @Value("${coupon.ratelimit.resource.enabled:false}") boolean resourceEnabled,
-                              @Value("${coupon.ratelimit.resource.qps:0}") int resourceQps) {
+                              GovernanceMetrics governanceMetrics) {
         this.appReader = appReader;
-        this.limiter = limiter;
         this.objectMapper = objectMapper;
         this.governanceMetrics = governanceMetrics;
-        this.resourceEnabled = resourceEnabled;
-        this.resourceQps = resourceQps;
     }
 
     @Override
@@ -158,9 +119,8 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
             if (!enterIpDimension(request, response)) {
                 return;
             }
-            if (!withinResourceDimension(response)) {
-                return;
-            }
+            // 接口维度已经交给 Sentinel 的规则（第 8 步迁走）——它现在和租户维度一样，
+            // 是规则表里的一条 FlowRule，由适配器的埋点判，这里不需要再管。
             // 租户维度（QPS + 日配额）：**一次 entry 同时承载两者**
             //   · QPS 由 Sentinel 的 FlowRule(resource=open_api, limitApp=appId) 判
             //   · 日配额由处理链上的 DailyQuotaSlot 判
@@ -217,38 +177,6 @@ public class OpenApiQuotaFilter extends OncePerRequestFilter {
                 entry.exit();
             }
         }
-    }
-
-    /**
-     * 接口维度（平台级，键 {@code c:rl:res:{接口}}）。
-     *
-     * <p>它还没有迁到 Sentinel（第 8 步做，那时才能配预热与匀速排队），
-     * 所以这里仍是直接调用限流器——但**拒绝的出口已经统一**
-     * （{@link BlockRejection}），接入方看不出两种 429。
-     */
-    private boolean withinResourceDimension(HttpServletResponse response) throws IOException {
-        if (!resourceEnabled || resourceQps <= 0) {
-            return true;
-        }
-        String subject = RESOURCE_KEY_PREFIX + RequestContext.current().resourceName();
-        boolean allowed;
-        try {
-            allowed = limiter.tryAcquire(subject, resourceQps, ONE_SECOND);
-        } catch (RuntimeException e) {
-            log.error("接口维度限流检查失败（Redis 不可用），放行：subject={}", subject, e);
-            // **fail-open 必须可见**：限流是可用性防线，依赖故障时放行是对的，
-            // 但那样仪表盘上会呈现「拒绝数为 0、一切正常」的假象——实际上防线已经失效。
-            governanceMetrics.recordLimitFailOpen("resource");
-            return true;
-        }
-        if (allowed) {
-            return true;
-        }
-        String resourceName = RequestContext.current().resourceName();
-        BlockRejection.of(ErrorCode.QPS_LIMIT_EXCEEDED, "接口维度", "resource",
-                        RETRY_AFTER_ONE_SECOND)
-                .writeTo(response, objectMapper, governanceMetrics, resourceName);
-        return false;
     }
 
     /**
