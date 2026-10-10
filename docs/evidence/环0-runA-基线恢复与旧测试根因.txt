@@ -1,0 +1,9 @@
+════ Run A（旧代码·修库后）总结 ════
+[ERROR] Tests run: 447, Failures: 0, Errors: 5, Skipped: 6
+[INFO] BUILD FAILURE
+
+── 旧在途测试 ERROR 根因（裸 @SpringBootTest 依赖本机 Redis）──
+Caused by: org.springframework.beans.factory.UnsatisfiedDependencyException: Error creating bean with name 'bucket4jRateLimiter' defined in file [/home/tmm/java-pro/newcoupon/target/classes/com/newcoupon/infrastructure/ratelimit/Bucket4jRateLimiter.class]: Unsatisfied dependency expressed through constructor parameter 0: Error creating bean with name 'bucket4jProxyManager' defined in class path resource [com/newcoupon/infrastructure/ratelimit/Bucket4jConfig.class]: Failed to instantiate [io.github.bucket4j.distributed.proxy.ProxyManager]: Factory method 'bucket4jProxyManager' threw exception with message: Unable to connect to localhost/<unresolved>:6379
+════ red1：旧判据下新测试无法编译（连可断言的接口都缺）════
+[ERROR] /home/tmm/java-pro/newcoupon/src/test/java/com/newcoupon/infrastructure/web/AdminSurfaceProtectionTest.java:[45,36] cannot find symbol
+[ERROR] /home/tmm/java-pro/newcoupon/src/test/java/com/newcoupon/infrastructure/web/AdminSurfaceProtectionTest.java:[46,36] cannot find symbol

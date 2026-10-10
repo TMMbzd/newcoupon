@@ -7,6 +7,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,21 +19,22 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
- * 管理面最小鉴权（L27 清偿，G 簇裁决提前实施——2026-09-21）。
+ * 管理面鉴权——<b>判据反转版</b>（2026-10-10 第 0 环裁定，治"漏列=裸奔"的结构性缺口）。
  *
- * <p>为什么现在必须锁：P2b 后 publish 的效力从"重置 Redis 记账（对账可兜）"升格为
- * "铸造 DB allocated 配额 + 开桶"——无鉴权等于把"凭空造额度"的入口敞着。完整体系
- * （HMAC 签名/防重放/双人复核）仍按计划在 P7 管理面，这里先落最小版。
+ * <p><b>旧判据（白名单放行）的问题</b>：只保护显式列举的路径前缀，新增管理写接口
+ * 忘了登记前缀 = 无鉴权写口——每一次加接口都在赌记性。
  *
- * <p>规则：POST /api/templates、/api/apps 开头的写操作必须带 X-Admin-Token 且与配置一致。
- * GET 查询不设防（只读面）。配置为空时 fail-closed（拒绝所有管理写——钱的方向宁严勿松）。
+ * <p><b>新判据（默认拒绝）</b>：管理面（/api/**、/console/**）的**非 GET** 请求默认必须带
+ * X-Admin-Token；只有显式登记在 {@link #BUSINESS_WRITE_PATHS} 里的<b>业务面写接口</b>豁免
+ * ——它们是 C 端功能口（领券/锁券/核销/释放），有各自的防线（风控闸、幂等、状态机），
+ * 不该被管理令牌挡住。新增管理写接口<b>不需要</b>做任何登记即受保护；
+ * 新增业务写接口才需要显式豁免（白名单是有意决策，看得见、审得出）。
  *
- * <p>S1 扩展（2026-10-01）：接入方管理（/api/apps）纳入防线——注册应用会签发出可用于
- * 调用的密钥，与"铸造库存额度"同级，必须同样挡在令牌后面。
- * 比对用 {@link MessageDigest#isEqual}（恒定时间）——防时序侧信道逐字节猜令牌。
+ * <p>结构性守卫：AdminSurfaceProtectionTest 遍历全部写映射断言"受保护或显式豁免"二态必居其一——
+ * 以后任何人加了第三态（既不在防线也不在白名单的 /api 写口）测试直接红。
  *
- * <p>拒绝形态：401 + 错误码 7002（7xxx 安全域，与 IP 频控的 7001 同族）。
- * 审计：放行/拒绝各一行日志（完整审计表随 P7 变更治理）。
+ * <p>其余语义不变：GET 不设防（只读面）；令牌未配置 fail-closed（拒绝所有管理写）；
+ * 恒定时间比对（防时序侧信道）；401 + 7002；放行/拒绝各一行日志。
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE + 20)   // RiskControlFilter(+10) 之后
@@ -40,8 +42,16 @@ public class AdminTokenFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(AdminTokenFilter.class);
 
-    /** 受保护的管理面路径前缀：模板管理 + 接入方管理（S1） */
-    private static final String[] ADMIN_PATH_PREFIXES = {"/api/templates", "/api/apps"};
+    /**
+     * 业务面写接口白名单（完整路径精确匹配）：C 端功能口，防线是风控闸/幂等/状态机而非管理令牌。
+     * 注意：/open/v1/** 的同名接口走签名链，不经过本过滤器（前缀不含 /open）。
+     */
+    static final Set<String> BUSINESS_WRITE_PATHS = Set.of(
+            "/api/coupons/receive",
+            "/api/coupons/lock",
+            "/api/coupons/confirm",
+            "/api/coupons/release");
+
     private static final String TOKEN_HEADER = "X-Admin-Token";
 
     private final String adminToken;
@@ -54,7 +64,7 @@ public class AdminTokenFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
-        if (isWriteMethod(request.getMethod()) && isAdminPath(request.getServletPath())) {
+        if (isProtected(request.getMethod(), request.getServletPath())) {
             String provided = request.getHeader(TOKEN_HEADER);
             if (!StringUtils.hasText(adminToken)) {
                 log.error("ADMIN BLOCKED (fail-closed): 管理令牌未配置（coupon.admin.token 为空）——拒绝所有管理写操作");
@@ -73,30 +83,24 @@ public class AdminTokenFilter extends OncePerRequestFilter {
     }
 
     /**
-     * 是否是需要保护的管理面写方法。
-     *
-     * <p><b>S2 修复（2026-10-04）</b>：原先只拦 POST。S2 要给租户配置加一个 PUT 接口——
-     * 那个接口会绕过令牌检查。<b>"只拦 POST"是一个会随接口演进而失效的判据</b>：
-     * 新增一个写方法就多一个缺口。改成列举"什么是写方法"，漏掉的可能就小得多。
+     * 判据本体（包内可见，供结构性测试直接调用）：写方法 && 管理面前缀 && 非业务白名单。
      */
+    static boolean isProtected(String method, String servletPath) {
+        return isWriteMethod(method)
+                && (servletPath.startsWith("/api/") || servletPath.startsWith("/console"))
+                && !BUSINESS_WRITE_PATHS.contains(servletPath);
+    }
+
+    /** 列举"什么是写方法"——比列举"要拦的方法"漏掉的可能性小（S2 教训）。 */
     private static boolean isWriteMethod(String method) {
         return "POST".equals(method) || "PUT".equals(method)
                 || "DELETE".equals(method) || "PATCH".equals(method);
     }
 
-    /** 是否属于受保护的管理面写路径（前缀匹配；注意用 getServletPath 而非 getRequestURI） */
-    private static boolean isAdminPath(String servletPath) {
-        for (String prefix : ADMIN_PATH_PREFIXES) {
-            if (servletPath.startsWith(prefix)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private void reject(HttpServletResponse response, String message) throws IOException {
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        response.setCharacterEncoding("UTF-8");
         response.getWriter().write("{\"code\":7002,\"message\":\"" + message + "\"}");
     }
 }

@@ -40,6 +40,16 @@ import org.springframework.beans.factory.annotation.Autowired;
 })
 class SentinelRuleSourceTest extends ShardedIntegrationTestSupport {
 
+    @org.springframework.test.context.DynamicPropertySource
+    static void shardingProperties(org.springframework.test.context.DynamicPropertyRegistry registry) {
+        // 2026-10-10 环0 补写：本类此前漏写注入块，一直在悄悄连 dev 库（dev 容器停了才暴露）
+        registry.add("coupon.sharding.url", () -> MYSQL.getJdbcUrl()
+                + "?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai");
+        registry.add("coupon.sharding.username", MYSQL::getUsername);
+        registry.add("coupon.sharding.password", MYSQL::getPassword);
+    }
+
+
     private static final AtomicInteger SEQ = new AtomicInteger();
 
     @Autowired

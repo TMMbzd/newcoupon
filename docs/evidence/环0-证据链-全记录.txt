@@ -1,0 +1,54 @@
+环 0（修复地基）证据链全记录 —— 2026-10-10
+================================================================
+口径：每次全量 = mvn clean test（WSL2 单机；测试用 Testcontainers 一次性容器，不依赖 dev 容器）。
+
+【Run A｜旧代码 + 迁移账本已修复 + dev mysql 开】
+[ERROR] Tests run: 447, Failures: 0, Errors: 5, Skipped: 6 → BUILD FAILURE
+解读：442 例既有用例全绿（基线恢复证明——V17 半失败迁移之毒解除）；
+5 个 ERROR 全部是旧版在途优惠计算测试，根因=裸 @SpringBootTest 依赖本机 Redis
+（报错原文：bucket4jProxyManager ... Unable to connect to localhost/<unresolved>:6379）。
+
+【red1｜旧鉴权判据（HEAD 版）+ 新结构性测试】
+编译失败：cannot find symbol: isProtected(...)
+解读：旧判据（显式前缀列举）连可供断言的接口都没有——新测试在旧代码上无法编译。
+
+【green1/green2｜返工代码定向】
+- DiscountCalculatorServiceTest：15/15 绿（T1~T10 黄金用例 + X1~X5 防线用例）
+  （green1 首跑 2 例 ERROR 系注入歧义 controllerEndpointHandlerMapping，@Qualifier 修复后 green2 全绿）
+- AdminSurfaceProtectionTest：2/2 绿（语义 + 结构扫描）
+- P2cAdminAuthTest（既有管理面鉴权）：4/4 绿（判据反转未破坏既有行为）
+
+【mut1｜双变异红灯复演（变异验证）】
+同时改坏两处跑一轮：17 例中 5 失败——
+- 计算策略还原硬编码 FULL_REDUCTION → t3_discountCoupon / t4_chooseBest / t10_discountCap / x3_rounding 四条红
+- 鉴权还原旧判据（前缀列举） → semantics_defaultDenyForUnlistedWritePaths 红
+  （structural 用例保持绿——恰好证明"真实映射都落在旧前缀下"的缺口只有语义测试能暴露）
+还原后全部恢复绿。结论：新用例有效且定位精确。
+
+【Run B｜返工代码 + 按纪律停 dev 容器】
+[ERROR] Tests run: 459, Failures: 0, Errors: 20, Skipped: 6 → BUILD FAILURE
+解读：新用例全绿；20 个 ERROR 全部是上下文加载失败，集中在 7 个限流/Sentinel 测试类。
+根因（一手核实）：这 7 个类挂了容器基座却漏写 @DynamicPropertySource——
+一直在悄悄连 dev 库（dev 停了才暴露；历史"全绿"的隐藏前提=dev 容器开着）。
+处置：补注入块（7 类各一段标准块，见提交 diff）。
+
+【Run C｜补注入块后】
+[ERROR] Tests run: 459, Failures: 1, Errors: 0, Skipped: 6 → BUILD FAILURE
+失败：P2bFaultInjectionTest.confirmFailure_doesNotBreakIssue_andReconcileHeals
+（期望镜像合计=1 实得=0；该用例含 Thread.sleep(400) 越过 300ms 在途 TTL + 两轮巡检的时序链）
+单跑验证（solo1）：17/17 全绿 → 单跑绿、全量红 = 环境敏感，非回归。
+
+【Run D｜复跑验证】
+[ERROR] Tests run: 459, Failures: 1, Errors: 0, Skipped: 6 → BUILD FAILURE
+失败换了一条：SentinelQueueingTest.overLimitRequestsWaitInsteadOfBeingRejected
+（匀速排队等待类时序用例）。
+单跑验证（solo2）：1/1 全绿 → 同 P2b 用例，单跑绿、全量红 = 环境敏感，非回归。
+判定：C/D 两轮各红 1 条且用例不同、均属毫秒级时序链、单跑均绿 → 游走型负载敏感
+（7 类补挂容器后全量真实负载上升所致），与 L60 先例同形态。
+处置：登记债（L62：两条时序用例在全量高负载下偶红，根治=固定 sleep 改条件轮询），
+不改断言、不阻塞基线——基线口径与历史 L60 处理一致。
+
+【最终基线口径（环 0 收官）】
+459 例：0 错误；失败 0~1 条且在全量轮次间游走（单跑均绿、已登记 L62）；6 例门控跳过不变。
+环比环 0 前：447 例中 5 错误（在途废测试）+ 1 处资损级硬编码 + 1 处越权缺口 + 鉴权旧判据。
+================================================================

@@ -39,6 +39,8 @@ public enum ErrorCode {
     STOCK_OUT(3001, "已售罄"),
     USER_LIMIT_EXCEEDED(3002, "已达限领上限"),
     DAILY_LIMIT_EXCEEDED(3003, "已达每日发放上限"),
+    /** 券当前不可参与优惠计算（过期/未生效/状态不对/未达门槛）——业务不可用族，与参数错误(1000)区分 */
+    COUPON_NOT_USABLE(3004, "优惠券当前不可用"),
 
     // ---- 4xxx 用券域 ----
     USER_COUPON_NOT_FOUND(4001, "用户券不存在"),
