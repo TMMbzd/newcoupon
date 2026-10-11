@@ -70,11 +70,14 @@ class P2dOutboxIntegrationTest extends ShardedIntegrationTestSupport {
         receiveAppService.receive(new ReceiveRequest("ob-1", uid, tpl));
         receiveAppService.receive(new ReceiveRequest("ob-1", uid, tpl));   // 同 requestId 重放→幂等命中（无新事件）
 
-        List<CouponOutboxPO> rows = outboxMapper.selectDispatchable(LocalDateTime.now().plusMinutes(1), 10);
-        long mine = rows.stream().filter(r -> r.getPayload().contains("\"requestId\":\"ob-1\"")).count();
-        long dup = rows.stream().filter(r -> r.getEventNo().endsWith(":ob-1")).count();
-        assertThat(mine).as("成功领取产生一行待投递").isEqualTo(1);
-        assertThat(dup).as("幂等命中的重放不产生新行（仍是那一行）").isEqualTo(1);
+        // 2026-10-11 修复（Run F 全量偶红、单跑绿；机制已查清）：原断言读"当前待投递窗口"
+        // （selectDispatchable），与各上下文每秒一轮的背景投递器存在竞态——背景线程可能在本用例
+        // 读取前就把 ob-1 行投递走（同文件 dispatcher_marksDispatched 于 2026-09-30 L40④ 修过
+        // 同款竞态，本条当时漏改）。改为按自己的 event_no 直查全表：行数与投递状态无关，
+        // 竞态消失；断言语义不变（同事务写入恰一行 + 幂等重放不产生新行）。
+        long mine = new JdbcTemplate(dataSource).queryForObject(
+                "SELECT COUNT(*) FROM coupon_outbox WHERE event_no LIKE '%:ob-1'", Long.class);
+        assertThat(mine).as("成功领取产生一行（同事务写入，与投递状态无关）+ 幂等重放不产生新行").isEqualTo(1);
         assertThat(outboxMapper.issuedEventMinusOutbox()).as("守恒：发放事件数 ≡ 发件箱行数").isZero();
     }
 

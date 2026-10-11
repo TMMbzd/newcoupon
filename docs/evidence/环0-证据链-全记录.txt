@@ -74,3 +74,24 @@ Run E（补丁后全量）：
 （零失败零错误；L62 游走红本轮未出现，符合"偶发"定性）
 范围说明：本次只改试算路径（本环交付的代码）；领券/锁券等其他开放接口仍是显式 6011，
 存在性语义统一登记为债务（触发=第 1 环审计落地时一并处理）。
+
+【2026-10-11 续｜X6 组装契约测试 + P2dOutbox 竞态修复（用户两问触发）】
+
+Run F（新增 X6 责任链组装契约测试后的全量）：
+[ERROR] Tests run: 460, Failures: 1, Errors: 0, Skipped: 6
+失败：P2dOutboxIntegrationTest.outbox_writtenInSameTx（expected 1L）
+DiscountCalculatorServiceTest 16/16 绿（X6 通过——组装契约钉死：成员+顺序 containsExactly）。
+
+solo3（分诊）：P2dOutbox 单跑 3/3 绿 → 单跑绿全量红。
+查清机制（非猜测，同文件注释为证）：用例读"当前待投递窗口"（selectDispatchable limit 10），
+与各上下文每秒一轮的背景投递器竞态——背景线程先搬走 ob-1 行则数到 0；
+同文件 dispatcher_marksDispatched 于 2026-09-30 L40④ 修过同款竞态，本条当时漏改。
+修复：改按自己的 event_no 直查全表（行数与投递状态无关，竞态消失；断言语义不变：
+同事务写入恰一行 + 幂等重放不产生新行）。竞态型偶红无法确定性复现红灯，以"机制查清+
+先例同源+修复后单跑绿"为证据链。
+
+solo4（修复后）：3/3 绿 → BUILD SUCCESS
+Run G（两项改动后全量）：
+[WARNING] Tests run: 460, Failures: 0, Errors: 0, Skipped: 6
+[INFO] BUILD SUCCESS
+（零失败零错误；基线 459→460：新增 X6 组装契约用例）

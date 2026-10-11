@@ -1,10 +1,10 @@
 package com.newcoupon.application.service.discount;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 import com.newcoupon.application.service.CachedTemplateReader;
+import com.newcoupon.application.service.discount.checker.EligibilityChecker;
 import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.domain.coupon.CouponStatus;
 import com.newcoupon.domain.coupon.CouponTemplate;
@@ -49,6 +49,10 @@ class DiscountCalculatorServiceTest extends ShardedIntegrationTestSupport {
 
     @Autowired
     private DiscountCalculatorService service;
+
+    /** 直接注入列表本身——证明"集合注入"在任何声明处都给到同一套排好序的零件 */
+    @Autowired
+    private List<EligibilityChecker> assembledChain;
 
     @MockBean
     private UserCouponRepository userCouponRepository;
@@ -350,5 +354,15 @@ class DiscountCalculatorServiceTest extends ShardedIntegrationTestSupport {
 
         assertThat(r.discountAmount()).isEqualTo(0L);
         assertThat(r.unusableCoupons().get(0).reason()).isEqualTo("模板不存在或已删除");
+    }
+
+    @Test
+    @DisplayName("X6: 责任链组装契约——集合注入自动收集三个校验器并按 @Order 排序（顺序=对外文案契约）")
+    void x6_chainAssemblyOrderPinned() {
+        // containsExactly 同时钉死两件事：成员（恰好这三个，多一个少一个都红）与顺序（时间→状态→门槛）。
+        // 新增校验器时此测试必红——强迫作者显式决定它插在哪一环（顺序是对外文案契约，见 3.3.0）。
+        assertThat(assembledChain)
+                .extracting(c -> c.getClass().getSimpleName())
+                .containsExactly("TimeRangeChecker", "StatusChecker", "ThresholdChecker");
     }
 }
