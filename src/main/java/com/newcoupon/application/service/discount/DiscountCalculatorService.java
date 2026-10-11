@@ -6,7 +6,9 @@ import com.newcoupon.application.service.discount.checker.EligibilityChecker;
 import com.newcoupon.application.service.discount.strategy.DiscountStrategy;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.Result;
+import com.newcoupon.domain.coupon.ApplicableScope;
 import com.newcoupon.domain.coupon.CouponTemplate;
+import com.newcoupon.domain.coupon.StackingLayer;
 import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.model.discount.OrderContext;
 import com.newcoupon.domain.repository.UserCouponRepository;
@@ -22,37 +24,26 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
- * 优惠计算引擎主服务：协调责任链校验和策略计算，返回最优优惠方案。
+ * 优惠计算引擎主服务（第 2 环升级：两层叠加 + 行级分摊）。
  *
- * <p>职责：
+ * <p>第 2 环新增三项能力：
  * <ul>
- *   <li>接收订单商品 + 用户选中的券（身份来自开放面签名，不在请求体里重复携带）；</li>
- *   <li>逐券解析：归属校验（越权防线）→ 模板解析（券类型在模板上）→ 责任链校验 → 策略计算；</li>
- *   <li>择优：返回优惠金额最大的单张券（优惠金额相同取券 ID 较小者——结果确定，测试可断言）；</li>
- *   <li>构建响应：原价、优惠金额、最终价格、使用的券、不可用的券及原因（每张券都有裁决）。</li>
+ *   <li><b>两层叠加</b>：店铺级券（SHOP）与平台级券（PLATFORM）跨层可叠加（各减各的），
+ *       同层互斥（选优惠金额最大的）；总优惠不超过订单金额。</li>
+ *   <li><b>范围校验</b>（五维第二维）：全场券不限商品；品类/单品券要求订单中至少一件商品匹配范围。</li>
+ *   <li><b>行级分摊</b>：总优惠按各商品行金额比例分摊到行，前 n-1 行整除取整、末行取余数
+ *       （保证分摊合计 = 总优惠，资损防线）；退款按分摊行反向冲回。</li>
  * </ul>
  *
- * <p>关键设计决策（2026-10-10 返工裁定，对应 02-现状审查 §2 的 B2/B4/M4）：
- * <ul>
- *   <li><b>券类型从模板取，不在快照上另造列</b>（B2）：券模板核心字段创建后不可改、发布后锁定，
- *       模板即事实源；用户券快照只有面额/门槛/封顶三列（领取时固化），够策略计算用。
- *       读取走 {@link CachedTemplateReader}（本地缓存+负缓存，读路径安全）。</li>
- *   <li><b>每张券先过归属校验</b>（B4，2026-10-11 补丁后语义）：开放面请求带 appId（来自签名认证），
- *       与券归属列不符时<b>对外按"券不存在或不可见"应答</b>——与查不到券完全一致，防存在性探测
- *       （旧实现抛 6011 等于向探测者确认券存在）；<b>对内留痕</b>：安全日志 OWNERSHIP_VIOLATION
- *       标签，后续环接审计与告警。信号在日志里，不在应答里。</li>
- *   <li><b>时间可注入</b>（M4）：{@code calculate(request)} 委托给 {@code calculate(request, now)}，
- *       测试传固定时间——"测试里写死日期"是定时炸弹（过几天全量假红）。</li>
- * </ul>
+ * <p>计价顺序（对标有赞/抖音/淘宝官方规则）：同层互斥、跨层叠加。
+ * 骨架按八层位次建模（单品级→限时折扣→满减→商家券→平台券→积分→运费→收尾），
+ * 本期实装两层（SHOP=第 4 层 / PLATFORM=第 5 层），其余层留接口写明点亮条件。
  *
- * <p>责任链顺序契约：Checker 按 @Order 定序——时间(100) → 状态(200) → 门槛(300)。
- * 顺序决定"用户看到的第一个失败原因"：先说时间问题、再说状态、最后说门槛。
- * 改顺序=改对外文案契约，须同步改测试。
- *
- * <p>Phase 1 边界（第 2 步将扩展）：单券择优（不做叠加组合）；适用范围暂不校验（全部按全场）；
- * 计算不锁券（锁券核销在交易侧）。
+ * <p>注意：试算是只读操作（不改状态、不动钱、频率极高），不挂 @AuditLog——
+ * 审计只给"动钱"的写操作用（核销/发布模板等），高频只读操作靠 open_api_audit 访问日志覆盖。
  */
 @Service
 public class DiscountCalculatorService {
@@ -64,12 +55,6 @@ public class DiscountCalculatorService {
     private final UserCouponRepository userCouponRepository;
     private final CachedTemplateReader templateReader;
 
-    /**
-     * @param checkers            全部校验器（Spring 按 @Order 排序注入）
-     * @param strategies          全部策略（key = Bean 名称 = {@link com.newcoupon.domain.coupon.CouponType} 枚举名）
-     * @param userCouponRepository 用户券仓储
-     * @param templateReader      模板读取（带本地缓存；模板核心字段发布后不可变，缓存读安全）
-     */
     public DiscountCalculatorService(
             List<EligibilityChecker> checkers,
             Map<String, DiscountStrategy> strategies,
@@ -81,12 +66,7 @@ public class DiscountCalculatorService {
         this.templateReader = templateReader;
     }
 
-    /**
-     * 生产入口：用系统当前时间。
-     * 注意：试算是只读操作（不改状态、不动钱、可重复调用），不挂 @AuditLog——
-     * 审计只给"动钱"的写操作用（核销/发布模板等），高频只读操作靠 open_api_audit 访问日志覆盖。
-     * （2026-10-11 用户评审纠正：试算频率极高且不造成资金变动，挂审计既浪费存储又可被灌爆。）
-     */
+    /** 生产入口：用系统当前时间。 */
     public CalculateResponse calculate(CalculateRequest request) {
         return calculate(request, LocalDateTime.now());
     }
@@ -99,7 +79,7 @@ public class DiscountCalculatorService {
         List<CalculateResponse.CouponReason> unusableCoupons = new ArrayList<>();
 
         for (Long couponId : request.couponIds()) {
-            // ① 查券（带分片键 userId，单表命中）；查不到也要给裁决——"每张券都有说法"，不静默丢弃
+            // ① 查券
             Optional<UserCoupon> found = userCouponRepository.findByIdForUser(couponId, request.userId());
             if (found.isEmpty()) {
                 unusableCoupons.add(new CalculateResponse.CouponReason(couponId, "券不存在或不可见"));
@@ -107,20 +87,16 @@ public class DiscountCalculatorService {
             }
             UserCoupon coupon = found.get();
 
-            // ② 归属校验（越权防线）——对外不可区分 + 对内留痕（2026-10-11 补丁，存在性泄露修复）：
-            //    归属不匹配按"券不存在或不可见"应答，与查不到券完全一致——探测者无法从应答差异
-            //    推断券是否存在（旧实现抛 6011"不属于应用X"，等于向探测者确认券存在）。
-            //    内部面（无 appId，平台自己）放行。安全日志带可检索标签 OWNERSHIP_VIOLATION，
-            //    是统计告警的信号源——信号在日志里，不在应答里。
+            // ② 归属校验——对外不可区分 + 对内留痕（详见环 0 讲解）
             String callerAppId = AppOwnership.currentAppId();
             if (callerAppId != null && !callerAppId.equals(coupon.getAppId())) {
-                log.warn("OWNERSHIP_VIOLATION appId={} 探测非本租户券 couponId={} userId={}（对外按'不存在或不可见'应答）",
+                log.warn("OWNERSHIP_VIOLATION appId={} 探测非本租户券 couponId={} userId={}",
                         callerAppId, couponId, request.userId());
                 unusableCoupons.add(new CalculateResponse.CouponReason(couponId, "券不存在或不可见"));
                 continue;
             }
 
-            // ③ 模板解析：券类型在模板上（快照没有类型列）；模板没了按不可用处理（防御）
+            // ③ 查模板（拿类型 + 范围 + 层级）
             Optional<CouponTemplate> templateOpt = templateReader.get(coupon.getTemplateId());
             if (templateOpt.isEmpty()) {
                 unusableCoupons.add(new CalculateResponse.CouponReason(couponId, "模板不存在或已删除"));
@@ -128,49 +104,79 @@ public class DiscountCalculatorService {
             }
             CouponTemplate template = templateOpt.get();
 
-            // ④ 责任链校验：时间 → 状态 → 门槛（@Order 定序）
+            // ④ 责任链校验（时间→状态→门槛）
             String failureReason = checkEligibility(coupon, context);
             if (failureReason != null) {
                 unusableCoupons.add(new CalculateResponse.CouponReason(couponId, failureReason));
                 continue;
             }
 
-            // ⑤ 策略计算：按模板券类型选策略（满减/满折/无门槛）
+            // ④.5 范围校验（五维第二维：applicable_scope）
+            if (!isScopeMatched(template, context)) {
+                unusableCoupons.add(new CalculateResponse.CouponReason(couponId,
+                        "商品不在券的适用范围内（" + template.getApplicableScope().getDesc() + "）"));
+                continue;
+            }
+
+            // ⑤ 按类型选策略算钱
             DiscountStrategy strategy = strategies.get(template.getCouponType().name());
             if (strategy == null) {
-                // 三种类型都有策略后此分支理论不可达——保留显式失败，防"新增类型忘了写策略"静默漏算
                 throw new IllegalStateException("未注册的券类型策略：" + template.getCouponType());
             }
             long discountAmount = strategy.calculate(coupon, context);
 
             if (discountAmount > 0) {
-                eligibleCoupons.add(new CouponWithDiscount(coupon, template.getName(), discountAmount));
+                eligibleCoupons.add(new CouponWithDiscount(coupon, template, discountAmount));
             } else {
-                // 走到这里说明校验全过但金额算出 0——只有订单金额为 0 一种可能
                 unusableCoupons.add(new CalculateResponse.CouponReason(couponId, "订单金额为 0，无优惠可用"));
             }
         }
 
-        // ⑥ 择优：优惠金额降序、同额取券 ID 升序（结果确定）
-        Optional<CouponWithDiscount> bestCoupon = eligibleCoupons.stream()
-                .sorted(Comparator.comparingLong(CouponWithDiscount::discountAmount).reversed()
-                        .thenComparing(c -> c.coupon().getId()))
-                .findFirst();
+        // ════ 两层择优（第 2 环新增）════
+        // 跨层可叠加（SHOP + PLATFORM 各选一张），同层互斥（选优惠金额最大的）
+        CouponWithDiscount bestShop = pickBestByLayer(eligibleCoupons, StackingLayer.SHOP);
+        CouponWithDiscount bestPlatform = pickBestByLayer(eligibleCoupons, StackingLayer.PLATFORM);
 
-        return buildResponse(context, bestCoupon, unusableCoupons);
+        long orderAmount = context.getOrderAmount();
+        long shopDiscount = bestShop != null ? bestShop.discountAmount() : 0;
+        long platformDiscount = bestPlatform != null ? bestPlatform.discountAmount() : 0;
+        long totalDiscount = Math.min(shopDiscount + platformDiscount, orderAmount);
+
+        // ════ 行级分摊（第 2 环新增）════
+        List<CouponWithDiscount> usedCoupons = new ArrayList<>();
+        if (bestShop != null) {
+            usedCoupons.add(bestShop);
+        }
+        if (bestPlatform != null) {
+            usedCoupons.add(bestPlatform);
+        }
+        List<CalculateResponse.LineAllocation> allocations =
+                usedCoupons.isEmpty() ? List.of() : allocateToLines(context.getItems(), usedCoupons, orderAmount);
+
+        // ════ 构建响应 ════
+        List<CalculateResponse.CouponUsage> usageList = usedCoupons.stream()
+                .map(cwd -> new CalculateResponse.CouponUsage(
+                        cwd.coupon().getId(),
+                        cwd.template().getName(),
+                        cwd.template().getStackingLayer().name(),
+                        cwd.discountAmount()))
+                .toList();
+
+        long finalPrice = orderAmount - totalDiscount;
+        return new CalculateResponse(orderAmount, totalDiscount, finalPrice,
+                usageList, allocations, unusableCoupons);
     }
 
-    /** 构建订单上下文：明细累加为订单金额，时间用入参（可注入）。 */
+    // ════ 私有方法 ════
+
     private OrderContext buildOrderContext(CalculateRequest request, LocalDateTime now) {
         long orderAmount = request.items().stream()
                 .mapToLong(item -> item.price() * item.quantity())
                 .sum();
-
         List<OrderContext.OrderItem> orderItems = request.items().stream()
                 .map(item -> new OrderContext.OrderItem(
                         item.skuId(), item.categoryId(), item.price(), item.quantity()))
                 .toList();
-
         return OrderContext.builder()
                 .userId(request.userId())
                 .orderAmount(orderAmount)
@@ -179,7 +185,6 @@ public class DiscountCalculatorService {
                 .build();
     }
 
-    /** 责任链：任一校验失败即短路，返回失败原因文案；全部通过返回 null。 */
     private String checkEligibility(UserCoupon coupon, OrderContext context) {
         for (EligibilityChecker checker : checkers) {
             Result<Void> result = checker.check(coupon, context);
@@ -190,26 +195,82 @@ public class DiscountCalculatorService {
         return null;
     }
 
-    private CalculateResponse buildResponse(
-            OrderContext context,
-            Optional<CouponWithDiscount> bestCoupon,
-            List<CalculateResponse.CouponReason> unusableCoupons) {
+    /**
+     * 范围校验（五维第二维）——券的 applicable_scope 与订单商品的匹配判断。
+     * 规则：ALL 全通过；CATEGORY/SKU 要求订单中至少一件商品匹配（不是"全部商品都要匹配"——
+     * 食品类券在"食品+饮料"的购物车里也能用，只是门槛和分摊基于全量商品）。
+     */
+    private boolean isScopeMatched(CouponTemplate template, OrderContext context) {
+        ApplicableScope scope = template.getApplicableScope();
+        if (scope == ApplicableScope.ALL) {
+            return true;
+        }
+        String scopeIds = template.getScopeIds();
+        if (scopeIds == null || scopeIds.isBlank()) {
+            return true; // 范围值为空 = 不限制
+        }
+        // 解析 JSON 数组 ["1001","1002"] → Set<String>
+        String cleaned = scopeIds.replaceAll("[\\[\\]\"]", "").trim();
+        if (cleaned.isEmpty()) {
+            return true;
+        }
+        Set<String> allowedIds = Set.of(cleaned.split(",\\s*"));
 
-        long originalPrice = context.getOrderAmount();
-        long discountAmount = bestCoupon.map(CouponWithDiscount::discountAmount).orElse(0L);
-        long finalPrice = originalPrice - discountAmount;
-
-        List<CalculateResponse.CouponUsage> usedCoupons = bestCoupon
-                .map(c -> List.of(new CalculateResponse.CouponUsage(
-                        c.coupon().getId(),
-                        c.templateName(),
-                        c.discountAmount())))
-                .orElse(List.of());
-
-        return new CalculateResponse(originalPrice, discountAmount, finalPrice, usedCoupons, unusableCoupons);
+        return context.getItems().stream().anyMatch(item -> {
+            String itemValue = scope == ApplicableScope.CATEGORY
+                    ? item.getCategoryId()
+                    : item.getSkuId();
+            return allowedIds.contains(itemValue);
+        });
     }
 
-    /** 中间结果：券 + 模板名 + 优惠金额（模板名来自模板而非 templateCode——给人看的字段要可读）。 */
-    private record CouponWithDiscount(UserCoupon coupon, String templateName, long discountAmount) {
+    /** 同层择优：优惠金额降序、同额取券 ID 小者（结果确定，测试可断言） */
+    private CouponWithDiscount pickBestByLayer(List<CouponWithDiscount> coupons, StackingLayer layer) {
+        return coupons.stream()
+                .filter(cwd -> cwd.template().getStackingLayer() == layer)
+                .sorted(Comparator.comparingLong(CouponWithDiscount::discountAmount).reversed()
+                        .thenComparing(cwd -> cwd.coupon().getId()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /**
+     * 行级分摊：每张券的优惠按行金额比例分摊到各商品行。
+     * 前 n-1 行整除取整（floor），末行 = 券优惠 - 前面之和（保证合计精确）。
+     * 分摊合计 = 所有券优惠之和 = 总优惠（资损防线：断言在测试中验证）。
+     */
+    private List<CalculateResponse.LineAllocation> allocateToLines(
+            List<OrderContext.OrderItem> items,
+            List<CouponWithDiscount> coupons,
+            long orderAmount) {
+        if (orderAmount <= 0 || coupons.isEmpty() || items.isEmpty()) {
+            return List.of();
+        }
+
+        long[] lineTotals = new long[items.size()];
+        for (CouponWithDiscount cwd : coupons) {
+            long discount = cwd.discountAmount();
+            long allocatedSoFar = 0;
+            for (int i = 0; i < items.size() - 1; i++) {
+                long lineAmount = items.get(i).getPrice() * items.get(i).getQuantity();
+                long share = lineAmount * discount / orderAmount;  // 整除取整
+                lineTotals[i] += share;
+                allocatedSoFar += share;
+            }
+            // 末行取余数（保证该券的分摊合计 = 该券的优惠金额）
+            lineTotals[items.size() - 1] += discount - allocatedSoFar;
+        }
+
+        List<CalculateResponse.LineAllocation> result = new ArrayList<>();
+        for (int i = 0; i < items.size(); i++) {
+            long lineAmount = items.get(i).getPrice() * items.get(i).getQuantity();
+            result.add(new CalculateResponse.LineAllocation(
+                    items.get(i).getSkuId(), lineAmount, lineTotals[i]));
+        }
+        return result;
+    }
+
+    /** 中间结果：券 + 模板（含层级/范围信息）+ 优惠金额 */
+    private record CouponWithDiscount(UserCoupon coupon, CouponTemplate template, long discountAmount) {
     }
 }

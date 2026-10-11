@@ -2,7 +2,10 @@ package com.newcoupon.infrastructure.persistence.converter;
 
 import com.newcoupon.domain.coupon.ApproveStatus;
 import com.newcoupon.domain.coupon.CouponTemplate;
+import com.newcoupon.domain.coupon.ApplicableScope;
+import com.newcoupon.domain.coupon.BudgetOwner;
 import com.newcoupon.domain.coupon.CouponType;
+import com.newcoupon.domain.coupon.StackingLayer;
 import com.newcoupon.domain.coupon.PublishStatus;
 import com.newcoupon.domain.coupon.ValidType;
 import com.newcoupon.infrastructure.persistence.po.CouponTemplatePO;
@@ -40,6 +43,13 @@ public final class TemplatePOConverter {
         p.setApproveStatus(d.getApproveStatus().getCode());
         p.setPublishStatus(d.getPublishStatus().getCode());
         p.setAppId(d.getAppId());   // S1 多租户归属
+        // ---- 五维模型（第 2 环 V19）----
+        p.setScopeType(d.getApplicableScope().getCode());
+        p.setScopeIds(d.getScopeIds());
+        p.setStackingLayer(d.getStackingLayer().getCode());
+        p.setExclusionGroup(d.getExclusionGroup());
+        p.setFunderType(d.getBudgetOwner().getCode());
+        p.setBudgetRatio(d.getBudgetRatio());
         p.setVersion(0);
         return p;
     }
@@ -69,6 +79,15 @@ public final class TemplatePOConverter {
                         .validEnd(p.getValidEnd())
                         .validDays(p.getValidDays())
                         .appId(p.getAppId())
+                        .applicableScope(p.getScopeType() != null
+                                ? ApplicableScope.of(p.getScopeType()) : ApplicableScope.ALL)
+                        .scopeIds(p.getScopeIds())
+                        .stackingLayer(p.getStackingLayer() != null
+                                ? StackingLayer.of(p.getStackingLayer()) : StackingLayer.SHOP)
+                        .exclusionGroup(p.getExclusionGroup())
+                        .budgetOwner(p.getFunderType() != null
+                                ? BudgetOwner.of(p.getFunderType()) : BudgetOwner.PLATFORM)
+                        .budgetRatio(p.getBudgetRatio())
                         .build(),
                 p.getIssuedCount(),
                 ApproveStatus.of(p.getApproveStatus()),

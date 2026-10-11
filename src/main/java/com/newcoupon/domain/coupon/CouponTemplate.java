@@ -49,6 +49,13 @@ public final class CouponTemplate {
     private final long issuedCount;
     /** S1：归属接入方（多租户隔离维度）。内部面创建 = 内置应用；券行写入时从这里冗余 */
     private final String appId;
+    // ---- 五维模型（第 2 环）----
+    private final ApplicableScope applicableScope;
+    private final String scopeIds;
+    private final StackingLayer stackingLayer;
+    private final String exclusionGroup;
+    private final BudgetOwner budgetOwner;
+    private final Integer budgetRatio;
 
     private CouponTemplate(Creation c, ApproveStatus approveStatus, PublishStatus publishStatus) {
         this.id = null;
@@ -71,6 +78,12 @@ public final class CouponTemplate {
         this.publishStatus = publishStatus;
         this.issuedCount = 0L;   // 新建模板已发放量为 0
         this.appId = c.appId();
+        this.applicableScope = c.applicableScope();
+        this.scopeIds = c.scopeIds();
+        this.stackingLayer = c.stackingLayer();
+        this.exclusionGroup = c.exclusionGroup();
+        this.budgetOwner = c.budgetOwner();
+        this.budgetRatio = c.budgetRatio();
     }
 
     private CouponTemplate(CouponTemplate src, Long id) {
@@ -98,6 +111,12 @@ public final class CouponTemplate {
         this.approveStatus = src.approveStatus;
         this.publishStatus = src.publishStatus;
         this.appId = src.appId;
+        this.applicableScope = src.applicableScope;
+        this.scopeIds = src.scopeIds;
+        this.stackingLayer = src.stackingLayer;
+        this.exclusionGroup = src.exclusionGroup;
+        this.budgetOwner = src.budgetOwner;
+        this.budgetRatio = src.budgetRatio;
     }
 
     /**
@@ -136,6 +155,21 @@ public final class CouponTemplate {
                 require(c.threshold() == 0, "无门槛券门槛必须为 0");
                 require(c.discountCap() == null, "无门槛券不设折扣上限");
             }
+        }
+
+        // ---- 五维模型不变量（第 2 环）----
+        // 范围一致性：ALL 不设范围值；CATEGORY/SKU 必须提供
+        if (c.applicableScope() == ApplicableScope.ALL) {
+            require(c.scopeIds() == null, "全场券不设范围值（scopeIds 必须为 null）");
+        } else {
+            require(notBlank(c.scopeIds()), "品类/单品券必须提供范围值（scopeIds，JSON 数组）");
+        }
+        // 出资方一致性：SPLIT 必须配百分比 1~99；非 SPLIT 不设
+        if (c.budgetOwner() == BudgetOwner.SPLIT) {
+            require(c.budgetRatio() != null && c.budgetRatio() >= 1 && c.budgetRatio() <= 99,
+                    "共担出资必须配平台百分比 1~99（如 70 = 平台 70% + 商家 30%）");
+        } else {
+            require(c.budgetRatio() == null, "非共担出资不设百分比（budgetRatio 必须为 null）");
         }
 
         // —— 有效期不变量 ——
@@ -273,6 +307,13 @@ public final class CouponTemplate {
         return appId;
     }
 
+    public ApplicableScope getApplicableScope() { return applicableScope; }
+    public String getScopeIds() { return scopeIds; }
+    public StackingLayer getStackingLayer() { return stackingLayer; }
+    public String getExclusionGroup() { return exclusionGroup; }
+    public BudgetOwner getBudgetOwner() { return budgetOwner; }
+    public Integer getBudgetRatio() { return budgetRatio; }
+
     public int getPerUserLimit() {
         return perUserLimit;
     }
@@ -330,7 +371,14 @@ public final class CouponTemplate {
             LocalDateTime validEnd,
             Integer validDays,
             /** S1：归属接入方（多租户隔离维度）。默认内置应用——内部面与既有代码无需显式传 */
-            String appId) {
+            String appId,
+            // ---- 五维模型新增四维（第 2 环）----
+            ApplicableScope applicableScope,
+            String scopeIds,
+            StackingLayer stackingLayer,
+            String exclusionGroup,
+            BudgetOwner budgetOwner,
+            Integer budgetRatio) {
 
         /** 手写 Builder：15 个字段的长构造器可读性极差（"第 7 个参数是啥"），测试里只改一个字段的写法依赖它 */
         public static CreationBuilder builder() {
@@ -355,6 +403,13 @@ public final class CouponTemplate {
             private Integer validDays;
             /** 默认归属内置应用：内部面创建与单元测试不传也合法（S1 多租户隔离的兼容策略） */
             private String appId = com.newcoupon.domain.open.OpenApp.BUILTIN_APP_ID;
+            // ---- 五维模型（第 2 环）：Builder 默认值 = 存量行为不变 ----
+            private ApplicableScope applicableScope = ApplicableScope.ALL;
+            private String scopeIds = null;
+            private StackingLayer stackingLayer = StackingLayer.SHOP;
+            private String exclusionGroup = null;
+            private BudgetOwner budgetOwner = BudgetOwner.PLATFORM;
+            private Integer budgetRatio = null;
 
             private CreationBuilder() {
             }
@@ -376,10 +431,18 @@ public final class CouponTemplate {
             public CreationBuilder validDays(Integer v) { this.validDays = v; return this; }
             public CreationBuilder appId(String v) { this.appId = v; return this; }
 
+            public CreationBuilder applicableScope(ApplicableScope v) { this.applicableScope = v; return this; }
+            public CreationBuilder scopeIds(String v) { this.scopeIds = v; return this; }
+            public CreationBuilder stackingLayer(StackingLayer v) { this.stackingLayer = v; return this; }
+            public CreationBuilder exclusionGroup(String v) { this.exclusionGroup = v; return this; }
+            public CreationBuilder budgetOwner(BudgetOwner v) { this.budgetOwner = v; return this; }
+            public CreationBuilder budgetRatio(Integer v) { this.budgetRatio = v; return this; }
+
             public Creation build() {
                 return new Creation(templateCode, activityId, name, couponType, faceValue,
                         discountCap, threshold, totalCount, perUserLimit, dailyLimit,
-                        perUserDailyLimit, validType, validStart, validEnd, validDays, appId);
+                        perUserDailyLimit, validType, validStart, validEnd, validDays, appId,
+                        applicableScope, scopeIds, stackingLayer, exclusionGroup, budgetOwner, budgetRatio);
             }
         }
     }

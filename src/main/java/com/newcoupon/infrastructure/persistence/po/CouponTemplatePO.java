@@ -55,6 +55,14 @@ public class CouponTemplatePO {
     private String appId;      // S1：归属接入方（V14）
     private Integer version;
 
+    // ---- 五维模型新增四维（第 2 环 V19）----
+    private Integer scopeType;         // 0=ALL(全场) 1=CATEGORY(品类) 2=SKU(单品) — V9 列 scope_type
+    private String scopeIds;           // JSON数组如 [1001,1002]；ALL时为NULL
+    private Integer stackingLayer;     // 0=SHOP(店铺级) 1=PLATFORM(平台级)
+    private String exclusionGroup;     // 互斥组名；NULL=不限制
+    private Integer funderType;        // 1=PLATFORM(平台) 2=MERCHANT(商家) 3=SPLIT(共担) — V9 列 funder_type
+    private Integer budgetRatio;       // 平台百分比 1~99；仅SPLIT时必填
+
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 
@@ -103,6 +111,18 @@ public class CouponTemplatePO {
 
     public Integer getVersion() { return version; }
     public void setVersion(Integer version) { this.version = version; }
+    public Integer getScopeType() { return scopeType; }
+    public void setScopeType(Integer scopeType) { this.scopeType = scopeType; }
+    public String getScopeIds() { return scopeIds; }
+    public void setScopeIds(String scopeIds) { this.scopeIds = scopeIds; }
+    public Integer getStackingLayer() { return stackingLayer; }
+    public void setStackingLayer(Integer stackingLayer) { this.stackingLayer = stackingLayer; }
+    public String getExclusionGroup() { return exclusionGroup; }
+    public void setExclusionGroup(String exclusionGroup) { this.exclusionGroup = exclusionGroup; }
+    public Integer getFunderType() { return funderType; }
+    public void setFunderType(Integer funderType) { this.funderType = funderType; }
+    public Integer getBudgetRatio() { return budgetRatio; }
+    public void setBudgetRatio(Integer budgetRatio) { this.budgetRatio = budgetRatio; }
     public LocalDateTime getCreateTime() { return createTime; }
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }
     public LocalDateTime getUpdateTime() { return updateTime; }
