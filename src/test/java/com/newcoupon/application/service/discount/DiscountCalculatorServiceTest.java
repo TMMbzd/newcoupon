@@ -365,4 +365,25 @@ class DiscountCalculatorServiceTest extends ShardedIntegrationTestSupport {
                 .extracting(c -> c.getClass().getSimpleName())
                 .containsExactly("TimeRangeChecker", "StatusChecker", "ThresholdChecker");
     }
+
+    @Test
+    @DisplayName("X7: 已锁定的券→不可用'券状态不可用：已锁定'（防双重优惠：券已抵押给另一订单）")
+    void x7_lockedCouponRejected() {
+        // 已锁定 = 券已抵押给另一份占用单；若允许给新订单算优惠 → 两个订单主张同一张券 → 资损。
+        // 券回到可用的路径在锁券侧（释放/超时收场→待使用），试算只反映当前状态。
+        UserCoupon locked = UserCoupon.reconstitute(1001L, USER, 1L, "T1",
+                2000L, 10000L, null,
+                LocalDateTime.of(2026, 12, 31, 23, 59, 59), CouponStatus.LOCKED,
+                LocalDateTime.of(2026, 10, 1, 12, 0), "idem-1001", 1, APP);
+        when(userCouponRepository.findByIdForUser(1001L, USER)).thenReturn(Optional.of(locked));
+        CouponTemplate tpl = tpl(1L, CouponType.FULL_REDUCTION, 2000L, null, 10000L, "满100减20");
+        when(templateReader.get(1L)).thenReturn(Optional.of(tpl));
+
+        CalculateResponse r = service.calculate(req(List.of(item(15000L)), List.of(1001L)), NOW);
+
+        assertThat(r.discountAmount()).isEqualTo(0L);
+        assertThat(r.usedCoupons()).isEmpty();
+        assertThat(r.unusableCoupons()).hasSize(1);
+        assertThat(r.unusableCoupons().get(0).reason()).isEqualTo("优惠券当前不可用: 券状态不可用：已锁定");
+    }
 }

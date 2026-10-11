@@ -95,3 +95,15 @@ Run G（两项改动后全量）：
 [WARNING] Tests run: 460, Failures: 0, Errors: 0, Skipped: 6
 [INFO] BUILD SUCCESS
 （零失败零错误；基线 459→460：新增 X6 组装契约用例）
+
+【2026-10-11 续二｜X7 已锁定券拒绝用例（用户问"已锁定的券呢"）】
+
+green5（首跑，意外红灯——X7 少 mock 模板读取，步骤③在状态校验前先查模板，
+       查不到提前返回"模板不存在或已删除"→ 顺带验证了五步顺序：模板解析在状态校验之前）：
+[ERROR] Tests run: 17, Failures: 1, Errors: 0 ← 教学价值：红灯即流程顺序的活证据
+
+green6（补 mock 后）：17/17 绿 → BUILD SUCCESS
+Run H（含 X7 全量）：
+[WARNING] Tests run: 461, Failures: 0, Errors: 0, Skipped: 6
+[INFO] BUILD SUCCESS
+（基线 460→461：X7 钉死"已锁定→不可用：已锁定"——防双重优惠）
