@@ -52,3 +52,25 @@
 459 例：0 错误；失败 0~1 条且在全量轮次间游走（单跑均绿、已登记 L62）；6 例门控跳过不变。
 环比环 0 前：447 例中 5 错误（在途废测试）+ 1 处资损级硬编码 + 1 处越权缺口 + 鉴权旧判据。
 ================================================================
+
+【补丁 2026-10-11｜存在性泄露修复（用户评审发现）】
+问题：环0初版越权校验显式抛 6011"coupon:X 不属于应用 app-B"——应答本身向探测者确认了券存在
+（用户指出："B 可以不关心这是谁的券"——存在性本身就是探测要的信息）。
+裁定：对外不可区分（归属不符按"券不存在或不可见"应答，与查不到券一字不差）+ 对内留痕
+（安全日志 OWNERSHIP_VIOLATION 标签；信号在日志里，不在应答里）。业界先例：GitHub 404 式藏 / AWS 403 式明示，
+开放面接受资源编号探测的接口按 OWASP 倾向藏。
+
+red2（新期望 vs 初版代码）：
+[ERROR] Tests run: 1, Failures: 0, Errors: 1 -- in DiscountCalculatorServiceTest
+com.newcoupon.common.BizException: 无权访问该资源: coupon:1001 不属于应用 app-B
+（红灯即泄露的活证据：应答文本确认了券 1001 存在）
+
+green3（补丁后类级）：
+[INFO] Tests run: 15, Failures: 0, Errors: 0 -- in DiscountCalculatorServiceTest  → BUILD SUCCESS
+
+Run E（补丁后全量）：
+[WARNING] Tests run: 459, Failures: 0, Errors: 0, Skipped: 6
+[INFO] BUILD SUCCESS
+（零失败零错误；L62 游走红本轮未出现，符合"偶发"定性）
+范围说明：本次只改试算路径（本环交付的代码）；领券/锁券等其他开放接口仍是显式 6011，
+存在性语义统一登记为债务（触发=第 1 环审计落地时一并处理）。

@@ -1,14 +1,11 @@
 package com.newcoupon.application.service.discount;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 import com.newcoupon.application.service.CachedTemplateReader;
-import com.newcoupon.common.BizException;
 import com.newcoupon.common.context.RequestContext;
-import com.newcoupon.common.ErrorCode;
 import com.newcoupon.domain.coupon.CouponStatus;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.CouponType;
@@ -292,8 +289,8 @@ class DiscountCalculatorServiceTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("X2: 越权防线——开放面 appId 与券归属不符 → 整单拒绝 RESOURCE_FORBIDDEN（B4）")
-    void x2_ownershipRejected() {
+    @DisplayName("X2: 越权防线——归属不符对外按'不存在或不可见'应答，与真不存在完全一致（不泄露存在性）")
+    void x2_ownershipHiddenNotRevealed() {
         UserCoupon foreign = coupon(1001L, 1L, 2000L, 10000L, null,
                 LocalDateTime.of(2026, 12, 31, 23, 59, 59));   // 归属 app-A
         when(userCouponRepository.findByIdForUser(1001L, USER)).thenReturn(Optional.of(foreign));
@@ -301,11 +298,14 @@ class DiscountCalculatorServiceTest extends ShardedIntegrationTestSupport {
         RequestContext.set(new RequestContext("app-B", "trace-x2",
                 System.currentTimeMillis() + 30_000, false));
         try {
-            assertThatThrownBy(() -> service.calculate(req(List.of(item(15000L)), List.of(1001L)), NOW))
-                    .isInstanceOf(BizException.class)
-                    .hasMessageContaining("不属于应用")
-                    .extracting(ex -> ((BizException) ex).getErrorCode())
-                    .isEqualTo(ErrorCode.RESOURCE_FORBIDDEN);   // 越权码族（6xxx），不是参数错误
+            CalculateResponse r = service.calculate(req(List.of(item(15000L)), List.of(1001L)), NOW);
+
+            assertThat(r.discountAmount()).isEqualTo(0L);
+            assertThat(r.usedCoupons()).isEmpty();
+            assertThat(r.unusableCoupons()).hasSize(1);
+            // 与 X4（券真不存在）的应答完全一致——探测者无法从应答差异推断"券是否存在"。
+            // 服务端信号在安全日志里（OWNERSHIP_VIOLATION 标签），不在应答里。
+            assertThat(r.unusableCoupons().get(0).reason()).isEqualTo("券不存在或不可见");
         } finally {
             RequestContext.clear();
         }

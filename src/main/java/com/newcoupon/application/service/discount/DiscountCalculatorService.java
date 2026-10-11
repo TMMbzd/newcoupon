@@ -12,6 +12,8 @@ import com.newcoupon.domain.model.discount.OrderContext;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.open.api.dto.CalculateRequest;
 import com.newcoupon.open.api.dto.CalculateResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -37,9 +39,10 @@ import java.util.Optional;
  *   <li><b>券类型从模板取，不在快照上另造列</b>（B2）：券模板核心字段创建后不可改、发布后锁定，
  *       模板即事实源；用户券快照只有面额/门槛/封顶三列（领取时固化），够策略计算用。
  *       读取走 {@link CachedTemplateReader}（本地缓存+负缓存，读路径安全）。</li>
- *   <li><b>每张券先过归属校验</b>（B4）：开放面请求带 appId（来自签名认证），券行上的归属列
- *       与之不符即整单拒绝（RESOURCE_FORBIDDEN）——对齐 TradeAppService 的既有防线写法；
- *       越权是错误不是"不可用原因"，不该静默降级进 unusableCoupons。</li>
+ *   <li><b>每张券先过归属校验</b>（B4，2026-10-11 补丁后语义）：开放面请求带 appId（来自签名认证），
+ *       与券归属列不符时<b>对外按"券不存在或不可见"应答</b>——与查不到券完全一致，防存在性探测
+ *       （旧实现抛 6011 等于向探测者确认券存在）；<b>对内留痕</b>：安全日志 OWNERSHIP_VIOLATION
+ *       标签，后续环接审计与告警。信号在日志里，不在应答里。</li>
  *   <li><b>时间可注入</b>（M4）：{@code calculate(request)} 委托给 {@code calculate(request, now)}，
  *       测试传固定时间——"测试里写死日期"是定时炸弹（过几天全量假红）。</li>
  * </ul>
@@ -53,6 +56,8 @@ import java.util.Optional;
  */
 @Service
 public class DiscountCalculatorService {
+
+    private static final Logger log = LoggerFactory.getLogger(DiscountCalculatorService.class);
 
     private final List<EligibilityChecker> checkers;
     private final Map<String, DiscountStrategy> strategies;
@@ -97,8 +102,18 @@ public class DiscountCalculatorService {
             }
             UserCoupon coupon = found.get();
 
-            // ② 归属校验（越权防线）：开放面不匹配即整单拒绝；内部面（无 appId，平台自己）放行
-            AppOwnership.assertAccessible(coupon.getAppId(), "coupon:" + couponId);
+            // ② 归属校验（越权防线）——对外不可区分 + 对内留痕（2026-10-11 补丁，存在性泄露修复）：
+            //    归属不匹配按"券不存在或不可见"应答，与查不到券完全一致——探测者无法从应答差异
+            //    推断券是否存在（旧实现抛 6011"不属于应用X"，等于向探测者确认券存在）。
+            //    内部面（无 appId，平台自己）放行。安全日志带可检索标签 OWNERSHIP_VIOLATION，
+            //    是统计告警的信号源——信号在日志里，不在应答里。
+            String callerAppId = AppOwnership.currentAppId();
+            if (callerAppId != null && !callerAppId.equals(coupon.getAppId())) {
+                log.warn("OWNERSHIP_VIOLATION appId={} 探测非本租户券 couponId={} userId={}（对外按'不存在或不可见'应答）",
+                        callerAppId, couponId, request.userId());
+                unusableCoupons.add(new CalculateResponse.CouponReason(couponId, "券不存在或不可见"));
+                continue;
+            }
 
             // ③ 模板解析：券类型在模板上（快照没有类型列）；模板没了按不可用处理（防御）
             Optional<CouponTemplate> templateOpt = templateReader.get(coupon.getTemplateId());
