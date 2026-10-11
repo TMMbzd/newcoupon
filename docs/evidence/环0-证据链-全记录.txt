@@ -107,3 +107,18 @@ Run H（含 X7 全量）：
 [WARNING] Tests run: 461, Failures: 0, Errors: 0, Skipped: 6
 [INFO] BUILD SUCCESS
 （基线 460→461：X7 钉死"已锁定→不可用：已锁定"——防双重优惠）
+
+【第 1 环·操作审计底座 + CI 最小版（2026-10-11）】
+
+audit1（审计测试首跑）：
+[INFO] Tests run: 3, Failures: 0, Errors: 0 -- in AuditLogIntegrationTest → BUILD SUCCESS
+- T1 六要素齐全（调用 calculate 后审计表有记录）
+- T2 哈希链衔接（连续记录 prev_hash = 前条 record_hash）
+- T3 篡改检出（改库 action 字段后重算 hash ≠ 存储 hash）
+
+Run I（含审计底座的全量）：
+[ERROR] Tests run: 464, Failures: 1, Errors: 0, Skipped: 6
+失败 = RedisStockIntegrationTest.twoThousandConcurrent（已知 L60 负载敏感偶红，非本环回归）
+- AuditLogIntegrationTest：3/3 绿（13.85s）
+- DiscountCalculatorServiceTest：17/17 绿（2.13s，@AuditLog 切面正常工作）
+- 基线更新：461 → 464（+3 审计）
