@@ -122,3 +122,17 @@ Run I（含审计底座的全量）：
 - AuditLogIntegrationTest：3/3 绿（13.85s）
 - DiscountCalculatorServiceTest：17/17 绿（2.13s，@AuditLog 切面正常工作）
 - 基线更新：461 → 464（+3 审计）
+
+【第 1 环·修正（2026-10-11 用户评审纠正：试算不挂审计）】
+
+用户指出：试算频率极高（每次加购/看结算页）且只读不动钱——挂审计①海量无价值记录②可被灌爆审计表。
+修正：@AuditLog 从 calculate() 摘掉；审计测试改为直接调 AuditService.record()。
+原理：两种日志各干各的——访问日志（open_api_audit，每次API调用）管"你来过"；
+操作审计（audit_log，含前后值快照+哈希链）管"你动了钱"。判断标准："出问题要不要追责"。
+
+audit2（修正后审计测试）：3/3 绿（2.235s）→ BUILD SUCCESS
+Run J（修正后全量）：
+[WARNING] Tests run: 464, Failures: 0, Errors: 0, Skipped: 6 → BUILD SUCCESS
+（完全干净——连 L60 偶红本轮都未出现）
+- AuditLogIntegrationTest：3/3 绿（直接调 AuditService，不经过业务方法）
+- DiscountCalculatorServiceTest：17/17 绿（calculate() 无 @AuditLog，AOP 代理不触发）

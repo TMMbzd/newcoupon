@@ -10,7 +10,6 @@ import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.model.discount.OrderContext;
 import com.newcoupon.domain.repository.UserCouponRepository;
-import com.newcoupon.common.AuditLog;
 import com.newcoupon.open.api.dto.CalculateRequest;
 import com.newcoupon.open.api.dto.CalculateResponse;
 import org.slf4j.Logger;
@@ -82,8 +81,12 @@ public class DiscountCalculatorService {
         this.templateReader = templateReader;
     }
 
-    /** 生产入口：用系统当前时间。带 @AuditLog——试算涉及金额计算，属于"动钱"路径，须留审计。 */
-    @AuditLog(action = "COUPON_CALCULATE", resourceType = "COUPON", describe = "优惠试算")
+    /**
+     * 生产入口：用系统当前时间。
+     * 注意：试算是只读操作（不改状态、不动钱、可重复调用），不挂 @AuditLog——
+     * 审计只给"动钱"的写操作用（核销/发布模板等），高频只读操作靠 open_api_audit 访问日志覆盖。
+     * （2026-10-11 用户评审纠正：试算频率极高且不造成资金变动，挂审计既浪费存储又可被灌爆。）
+     */
     public CalculateResponse calculate(CalculateRequest request) {
         return calculate(request, LocalDateTime.now());
     }
