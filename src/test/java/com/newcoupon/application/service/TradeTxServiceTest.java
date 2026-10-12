@@ -53,7 +53,7 @@ class TradeTxServiceTest {
         // L5 后构造器多了锁定超时网关与窗口参数（long 基本类型 Mockito 注入不了，
         // @InjectMocks 在扩展的 beforeEach 里先炸）——去注解、手工组装
         service = new TradeTxService(userCouponRepository, couponUsageRepository,
-                couponEventRepository, releaseTaskGateway, 30L);
+                couponEventRepository, null, releaseTaskGateway, 30L);  // null = CouponShareDetailMapper（单测不用分账）
     }
 
     private static UserCoupon coupon(CouponStatus status) {
@@ -98,7 +98,7 @@ class TradeTxServiceTest {
         when(couponUsageRepository.findByUsageNo("ORD-1:5"))
                 .thenReturn(Optional.of(usage(UsageStatus.CONFIRMED, 1000L)));
 
-        var r = service.confirm(new ConfirmRequest("ORD-1:5", 1000L), NOW);
+        var r = service.confirm(new ConfirmRequest("ORD-1:5", null), NOW, null);
 
         assertThat(r.duplicated()).isTrue();
         assertThat(r.discountAmt()).isEqualTo(1000L);
