@@ -1,14 +1,14 @@
-# CI 最小版（第 1 环 1-2 项）——构建 + 全量测试两道质量门
+# CI（第 1 环建、第 2 环修正时区）——构建 + 全量测试质量门
 #
-# 触发：push 到 main 或针对 main 的 PR
-# 环境：Ubuntu（自带 Docker——Testcontainers 需要）
-# 缓存：Maven 仓库（actions/setup-java 内置 maven 缓存）
-# 超时：30 分钟（全量测试本地约 8 分钟，CI 留余量）
+# 修正记录（2026-10-12）：CI 首跑 7 例失败，根因两类——
+# ① 时区差异（2 例）：GitHub Actions 默认 UTC，测试假设 Asia/Shanghai
+#    → 修：设 TZ 环境变量 + JVM 参数 -Duser.timezone=Asia/Shanghai
+# ② CI 资源差异（5 例）：免费 runner（2核7G）比本地更紧张，巡检/定时任务
+#    在时间窗口内没跑完 → 暂不修（观察修正时区后的余量），如持续失败再排查
 #
-# 分支保护规则（GitHub 仓库设置里手动配置，不在此文件中）：
-#   - main 分支：要求 CI 通过才能合并
-#   - PR 必须至少 1 人审核
-#
+# 分支保护规则（GitHub 仓库设置手动配置）：
+#   main 分支：Require PR + Require status checks
+
 name: CI
 
 on:
@@ -16,6 +16,9 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+
+env:
+  TZ: Asia/Shanghai
 
 jobs:
   test:
@@ -34,7 +37,7 @@ jobs:
           cache: maven
 
       - name: Build and run full test suite
-        run: mvn clean test -B
+        run: mvn clean test -B -Duser.timezone=Asia/Shanghai
 
       - name: Upload test reports (on failure)
         if: failure()
