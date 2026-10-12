@@ -2,6 +2,7 @@ package com.newcoupon.application.service;
 
 import com.newcoupon.application.dto.TradeDtos.ConfirmRequest;
 import com.newcoupon.application.dto.TradeDtos.ConfirmResult;
+import com.newcoupon.application.dto.TradeDtos.FundingSplit;
 import com.newcoupon.application.dto.TradeDtos.LockRequest;
 import com.newcoupon.application.dto.TradeDtos.LockResult;
 import com.newcoupon.application.dto.TradeDtos.MyCoupon;
@@ -11,7 +12,10 @@ import com.newcoupon.application.dto.TradeDtos.ReleaseResult;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.context.RequestContext;
+import com.newcoupon.application.service.discount.DiscountCalculatorService;
+import com.newcoupon.domain.coupon.BudgetOwner;
 import com.newcoupon.domain.coupon.CouponStatus;
+import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.CouponUsage;
 import com.newcoupon.domain.coupon.UsageStatus;
 import com.newcoupon.domain.coupon.UserCoupon;
@@ -38,13 +42,16 @@ public class TradeAppService {
     private final TradeTxService tradeTxService;
     private final UserCouponRepository userCouponRepository;
     private final CouponUsageRepository couponUsageRepository;
+    private final DiscountCalculatorService discountCalculatorService;
 
     public TradeAppService(TradeTxService tradeTxService,
                            UserCouponRepository userCouponRepository,
-                           CouponUsageRepository couponUsageRepository) {
+                           CouponUsageRepository couponUsageRepository,
+                                   DiscountCalculatorService discountCalculatorService) {
         this.tradeTxService = tradeTxService;
         this.userCouponRepository = userCouponRepository;
         this.couponUsageRepository = couponUsageRepository;
+        this.discountCalculatorService = discountCalculatorService;
     }
 
     public LockResult lock(LockRequest req) {
@@ -106,8 +113,25 @@ public class TradeAppService {
 
     public ConfirmResult confirm(ConfirmRequest req) {
         assertUsageAccessible(req.usageNo());   // S1 越权防线（占用单只带 usageNo，需经券取归属）
+
+        // ════ 第 2 环：核销由平台算钱 + 出资拆分 ════
+        FundingSplit split = null;
+        ConfirmRequest txReq = req;   // 不重赋值参数 req（lambda 要求 effectively final）
+        if (req.items() != null && !req.items().isEmpty()) {
+            CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo())
+                    .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
+            UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+                    .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
+
+            var calc = discountCalculatorService.calculateForConfirm(coupon, req.items());
+            split = calculateFundingSplit(calc.template(), calc.discountAmt());
+
+            // 用平台计算出的金额（调用方传入的 discountAmt 被忽略）
+            txReq = new ConfirmRequest(req.usageNo(), calc.discountAmt(), null);
+        }
+
         try {
-            return tradeTxService.confirm(req, LocalDateTime.now());
+            return tradeTxService.confirm(txReq, LocalDateTime.now(), split);
         } catch (TradeCasRejectedException e) {
             // L2（2026-09-12）：券状态 CAS 拒绝且原因是"锁定期间过期"——
             // 先做收场（占用单过期关闭+券转已过期+事件），再按明确错误码拒绝。
@@ -192,5 +216,20 @@ public class TradeAppService {
         log.warn("{} cas rejected: {}", action, e.getMessage());
         return new BizException(ErrorCode.STATE_CONFLICT,
                 action + "失败：状态已被并发变更（" + e.getMessage() + "），请刷新后重试");
+    }
+
+    /**
+     * 出资拆分（第 2 环）：按模板的 budget_owner 计算平台/商家各自承担多少。
+     * SPLIT 模式：platform = floor(discount × ratio / 100)，merchant = discount - platform（保证合计精确）。
+     */
+    private FundingSplit calculateFundingSplit(CouponTemplate template, long discountAmt) {
+        return switch (template.getBudgetOwner()) {
+            case PLATFORM -> new FundingSplit(discountAmt, 0);
+            case MERCHANT -> new FundingSplit(0, discountAmt);
+            case SPLIT -> {
+                long platform = discountAmt * template.getBudgetRatio() / 100;
+                yield new FundingSplit(platform, discountAmt - platform);
+            }
+        };
     }
 }

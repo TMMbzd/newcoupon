@@ -167,6 +167,41 @@ public class DiscountCalculatorService {
                 usageList, allocations, unusableCoupons);
     }
 
+    // ════ 核销算钱（第 2 环新增）════
+
+    /** 核销计算结果：优惠金额 + 模板（调用方用模板的 budget_owner 做出资拆分） */
+    public record ConfirmCalculation(long discountAmt, CouponTemplate template) {}
+
+    /**
+     * 为核销计算单张券的优惠金额。
+     * 与试算引擎的区别：不走两层择优（核销时已锁定具体哪张券），不做资格校验
+     * （券已锁定=资格已通过；过期等守卫由 TradeTxService 的 CAS 谓词兜底）。
+     * 使用与试算完全相同的策略 Bean，保证"试算说多少、核销就算多少"。
+     */
+    public ConfirmCalculation calculateForConfirm(UserCoupon coupon,
+            List<CalculateRequest.OrderItem> items) {
+        long orderAmount = items.stream().mapToLong(i -> i.price() * i.quantity()).sum();
+        List<OrderContext.OrderItem> orderItems = items.stream()
+                .map(i -> new OrderContext.OrderItem(i.skuId(), i.categoryId(), i.price(), i.quantity()))
+                .toList();
+        OrderContext context = OrderContext.builder()
+                .userId(coupon.getUserId())
+                .orderAmount(orderAmount)
+                .items(orderItems)
+                .now(LocalDateTime.now())
+                .build();
+
+        CouponTemplate template = templateReader.get(coupon.getTemplateId())
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "模板不存在或已删除: " + coupon.getTemplateId()));
+
+        DiscountStrategy strategy = strategies.get(template.getCouponType().name());
+        if (strategy == null) {
+            throw new IllegalStateException("未注册的券类型策略：" + template.getCouponType());
+        }
+        return new ConfirmCalculation(strategy.calculate(coupon, context), template);
+    }
+
     // ════ 私有方法 ════
 
     private OrderContext buildOrderContext(CalculateRequest request, LocalDateTime now) {
