@@ -2,6 +2,7 @@ package com.newcoupon.application.service;
 
 import com.newcoupon.application.dto.TradeDtos.ConfirmRequest;
 import com.newcoupon.application.dto.TradeDtos.ConfirmResult;
+import com.newcoupon.application.dto.TradeDtos.FundingSplit;
 import com.newcoupon.application.dto.TradeDtos.LockRequest;
 import com.newcoupon.application.dto.TradeDtos.LockResult;
 import com.newcoupon.application.dto.TradeDtos.ReleaseRequest;
@@ -19,6 +20,8 @@ import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.domain.statemachine.CouponStateMachine;
 import com.newcoupon.domain.statemachine.CouponTransition;
 import com.newcoupon.infrastructure.persistence.CouponReleaseTaskGateway;
+import com.newcoupon.infrastructure.persistence.mapper.CouponShareDetailMapper;
+import com.newcoupon.infrastructure.persistence.po.CouponShareDetailPO;
 import java.time.LocalDateTime;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -47,17 +50,20 @@ public class TradeTxService {
     private final UserCouponRepository userCouponRepository;
     private final CouponUsageRepository couponUsageRepository;
     private final CouponEventRepository couponEventRepository;
+    private final CouponShareDetailMapper couponShareDetailMapper;
     private final CouponReleaseTaskGateway releaseTaskGateway;
     private final long lockTimeoutMinutes;
 
     public TradeTxService(UserCouponRepository userCouponRepository,
                           CouponUsageRepository couponUsageRepository,
                           CouponEventRepository couponEventRepository,
+                          CouponShareDetailMapper couponShareDetailMapper,
                           CouponReleaseTaskGateway releaseTaskGateway,
                           @Value("${coupon.trade.lock-timeout-minutes:30}") long lockTimeoutMinutes) {
         this.userCouponRepository = userCouponRepository;
         this.couponUsageRepository = couponUsageRepository;
         this.couponEventRepository = couponEventRepository;
+        this.couponShareDetailMapper = couponShareDetailMapper;
         this.releaseTaskGateway = releaseTaskGateway;
         this.lockTimeoutMinutes = lockTimeoutMinutes;
     }
@@ -85,7 +91,7 @@ public class TradeTxService {
     }
 
     @Transactional
-    public ConfirmResult confirm(ConfirmRequest req, LocalDateTime now) {
+    public ConfirmResult confirm(ConfirmRequest req, LocalDateTime now, FundingSplit split) {
         CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo())
                 .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
         if (usage.getStatus() == UsageStatus.CONFIRMED) {
@@ -103,6 +109,21 @@ public class TradeTxService {
             throw new TradeCasRejectedException("coupon-confirm", usage.getUserCouponId());
         }
         couponEventRepository.append(CouponEvent.used(coupon, usage, req.discountAmt(), now));
+
+        // ════ 第 2 环：出资拆分落表（与核销同一事务——原子）════
+        if (split != null) {
+            CouponShareDetailPO share = new CouponShareDetailPO();
+            share.setUserCouponId(coupon.getId());
+            share.setUserId(coupon.getUserId());
+            share.setTemplateId(coupon.getTemplateId());
+            share.setUsageNo(req.usageNo());
+            share.setOrderNo(usage.getOrderNo());
+            share.setPlatformBurden(split.platformBurden());
+            share.setMerchantBurden(split.merchantBurden());
+            share.setShareTotal(split.total());
+            couponShareDetailMapper.insert(share);
+        }
+
         return new ConfirmResult(req.usageNo(), CouponStatus.USED.getDesc(), req.discountAmt(), false);
     }
 
