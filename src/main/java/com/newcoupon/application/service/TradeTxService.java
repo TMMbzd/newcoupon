@@ -227,6 +227,23 @@ public class TradeTxService {
         UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
         // 券保持 USED（已核销）：退款冲的是资金记录，不是券的使用权。
+
+        // 冲回资金记录：对每条正分账行写镜像负行——日账单 SUM 自动净额，
+        // 当日退款当日账单归零、跨日退款在退款日记一笔负数（财务可单独看到冲回行）。
+        for (CouponShareDetailPO orig : couponShareDetailMapper.selectPositiveByUsageNo(usageNo)) {
+            CouponShareDetailPO reverse = new CouponShareDetailPO();
+            reverse.setUserCouponId(orig.getUserCouponId());
+            reverse.setUserId(orig.getUserId());
+            reverse.setTemplateId(orig.getTemplateId());
+            reverse.setUsageNo(orig.getUsageNo());
+            reverse.setOrderNo(orig.getOrderNo());
+            reverse.setOrderLineNo((orig.getOrderLineNo() == null ? "MAIN" : orig.getOrderLineNo()) + ":REFUND");
+            reverse.setPlatformBurden(-orig.getPlatformBurden());
+            reverse.setMerchantBurden(-orig.getMerchantBurden());
+            reverse.setShareTotal(-orig.getShareTotal());
+            couponShareDetailMapper.insert(reverse);
+        }
+
         couponEventRepository.append(CouponEvent.refund(coupon, usage, usage.getDiscountAmt(), now));
 
         return new RefundResult(usageNo, CouponStatus.USED.getDesc(), usage.getDiscountAmt(), false);
