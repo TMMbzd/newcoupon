@@ -246,20 +246,22 @@ class DiscountCalculatorServiceTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("T9: 满10减20，订单15元 → 优惠封顶到15元，到手0元（语义定死：不设保底价）")
+    @DisplayName("T9: 立减10元券，订单5元 → 优惠封顶到5元，到手0元（语义定死：不设保底价）")
     void t9_discountCappedByOrderAmount() {
-        CouponTemplate tpl = tpl(4L, CouponType.FULL_REDUCTION, 2000L, null, 1000L, "满10减20");
-        UserCoupon c = coupon(1004L, 4L, 2000L, 1000L, null,
+        // 配置期校验（面值≤门槛）落地后，单张满减券已不可能超过订单额（order≥门槛≥面值）；
+        // "封顶到订单金额"的语义由无门槛券和多层叠加（T16）继续钉死。
+        CouponTemplate tpl = tpl(4L, CouponType.NO_THRESHOLD, 1000L, null, 0L, "立减10元");
+        UserCoupon c = coupon(1004L, 4L, 1000L, 0L, null,
                 LocalDateTime.of(2026, 12, 31, 23, 59, 59));
         when(userCouponRepository.findByIdForUser(1004L, USER)).thenReturn(Optional.of(c));
         when(templateReader.get(4L)).thenReturn(Optional.of(tpl));
 
-        CalculateResponse r = service.calculate(req(List.of(item(1500L)), List.of(1004L)), NOW);
+        CalculateResponse r = service.calculate(req(List.of(item(500L)), List.of(1004L)), NOW);
 
-        assertThat(r.discountAmount()).isEqualTo(1500L);
+        assertThat(r.discountAmount()).isEqualTo(500L);
         assertThat(r.finalPrice()).isEqualTo(0L);
         assertThat(r.usedCoupons()).hasSize(1);
-        assertThat(r.usedCoupons().get(0).discountAmount()).isEqualTo(1500L);
+        assertThat(r.usedCoupons().get(0).discountAmount()).isEqualTo(500L);
     }
 
     @Test
@@ -521,20 +523,20 @@ class DiscountCalculatorServiceTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("T16: 总优惠封顶——两层叠加优惠不超过订单金额")
     void t16_totalDiscountCapped() {
-        CouponTemplate shopTpl = tplLayer(16L, CouponType.FULL_REDUCTION, 5000L, null, 1000L, "满10减50", StackingLayer.SHOP);
-        CouponTemplate platTpl = tplLayer(17L, CouponType.NO_THRESHOLD, 2000L, null, 0L, "立减20", StackingLayer.PLATFORM);
-        UserCoupon shopC = coupon(7001L, 16L, 5000L, 1000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
-        UserCoupon platC = coupon(7002L, 17L, 2000L, 0L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        CouponTemplate shopTpl = tplLayer(16L, CouponType.FULL_REDUCTION, 900L, null, 1000L, "满10减9", StackingLayer.SHOP);
+        CouponTemplate platTpl = tplLayer(17L, CouponType.NO_THRESHOLD, 200L, null, 0L, "立减2元", StackingLayer.PLATFORM);
+        UserCoupon shopC = coupon(7001L, 16L, 900L, 1000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        UserCoupon platC = coupon(7002L, 17L, 200L, 0L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
         when(userCouponRepository.findByIdForUser(7001L, USER)).thenReturn(Optional.of(shopC));
         when(userCouponRepository.findByIdForUser(7002L, USER)).thenReturn(Optional.of(platC));
         when(templateReader.get(16L)).thenReturn(Optional.of(shopTpl));
         when(templateReader.get(17L)).thenReturn(Optional.of(platTpl));
 
-        // 订单 3000 分；SHOP 优惠 min(5000,3000)=3000；PLATFORM 优惠 min(2000,3000)=2000
-        // 总优惠 = min(3000+2000, 3000) = 3000（封顶）
-        CalculateResponse r = service.calculate(req(List.of(item(3000L)), List.of(7001L, 7002L)), NOW);
+        // 订单 1000 分；SHOP 优惠 min(900,1000)=900；PLATFORM 优惠 min(200,1000)=200
+        // 总优惠 = min(900+200, 1000) = 1000（封顶）
+        CalculateResponse r = service.calculate(req(List.of(item(1000L)), List.of(7001L, 7002L)), NOW);
 
-        assertThat(r.discountAmount()).as("总优惠封顶到订单金额").isEqualTo(3000L);
+        assertThat(r.discountAmount()).as("总优惠封顶到订单金额").isEqualTo(1000L);
         assertThat(r.finalPrice()).as("到手价 = 0").isEqualTo(0L);
     }
 

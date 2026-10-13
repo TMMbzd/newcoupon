@@ -58,6 +58,23 @@ class CouponTemplateTest {
     }
 
     @Test
+    @DisplayName("满减面值不得超过门槛 → 满减20/门槛10 拒绝（天然超100%占比的病态配置）")
+    void fullReductionFaceValueExceedsThresholdRejected() {
+        // 配置期防线（2026-10-13）：这类配置在核销期只能靠占比上限兜底拦截——
+        // 源头掐掉，不让它进入库存/发放环节。大力度促销请同步抬门槛（满1000减200 合法）。
+        assertThatThrownBy(() -> CouponTemplate.create(valid()
+                .faceValue(2000L)          // 减 20 元
+                .threshold(1000L)          // ← 门槛只有 10 元
+                .build()))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("不得超过门槛");
+        // 合法边界：面值 = 门槛（满100减100 = 0元购，占比恰好 100%，是否放行交给核销期占比防线）
+        assertThatCode(() -> CouponTemplate.create(valid()
+                .faceValue(10000L).threshold(10000L).build()))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     @DisplayName("满折面额必须基点制 1~9900：传 8.5 折当 85 填（85 基点=99.15折的负数语义）会因范围校验暴露")
     void discountBasisPointRange() {
         assertThatThrownBy(() -> CouponTemplate.create(valid()

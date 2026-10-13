@@ -142,6 +142,9 @@ public final class CouponTemplate {
         switch (c.couponType()) {
             case FULL_REDUCTION -> {
                 require(c.threshold() > 0, "满减券门槛必须大于 0（无门槛请用 NO_THRESHOLD 类型）");
+                require(c.faceValue() <= c.threshold(),
+                        "满减面值不得超过门槛（满10减20 这类配置天然产生超 100% 的优惠占比；"
+                                + "大力度促销请同步抬高门槛，如满1000减200）");
                 require(c.discountCap() == null, "满减券不设折扣上限（面额本身就是上限）");
             }
             case DISCOUNT -> {

@@ -131,14 +131,16 @@ class ConfirmByPlatformIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("D1: 申报防线——满10减20 + 15元订单（占比100%）→ 拒绝；同单换30元订单 → 放行")
+    @DisplayName("D1: 申报防线——合规高力度券(满100减90)+100元订单(占比90%)→ 拒绝；同单150元订单(60%)→ 放行")
     void d1_discountRatioDefense() {
         LocalDateTime start = LocalDateTime.now().minusDays(1);
         LocalDateTime end = LocalDateTime.now().plusDays(30);
-        // 极端券：满 10 减 20。配置期校验上线前能建出来——本测试同时是它的回归哨兵
+        // 合规但高力度：满 100 减 90（面值 ≤ 门槛，配置期校验放行——大促真实存在的券）。
+        // 它配上"刚过门槛的订单"就会产生 >80% 占比——这正是核销期防线存在的理由：
+        // 配置期挡"不可能的配置"，核销期挡"合法配置 × 离谱订单"的组合。
         TemplateAppService.CreatedTemplate created = templateAppService.create(
                 new TemplateCreateRequest(
-                        "防线测试-D1", 3002L, 1, 2000L, null, 1000L,
+                        "防线测试-D1", 3002L, 1, 9000L, null, 10000L,
                         10L, 1, 1, start, end, null, null, null));
         templateAppService.publish(created.id());
         long userId = System.nanoTime();
@@ -147,21 +149,21 @@ class ConfirmByPlatformIntegrationTest extends ShardedIntegrationTestSupport {
         LockResult lock = tradeAppService.lock(
                 new LockRequest("ORD-D1", userId, rcv.couponId()));
 
-        // 15 元订单：优惠 = min(2000, 1500) = 1500，占比 100% > 80% → 拒绝
+        // 100 元订单（刚过门槛）：优惠 9000，占比 90% > 80% → 拒绝
         List<CalculateRequest.OrderItem> tinyOrder = List.of(
-                new CalculateRequest.OrderItem("SKU1", "CAT1", 1500L, 1));
+                new CalculateRequest.OrderItem("SKU1", "CAT1", 10000L, 1));
         assertThatThrownBy(() -> tradeAppService.confirm(
                 new ConfirmRequest(lock.usageNo(), null, tinyOrder)))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("上限");
 
-        // 同一占用单换 30 元订单：优惠 2000，占比 66.7% ≤ 80% → 放行
+        // 同一占用单换 150 元订单：优惠 9000，占比 60% ≤ 80% → 放行
         // （同时证明拒绝路径没有污染占用单——它还在 OCCUPYING，能继续核销）
         List<CalculateRequest.OrderItem> normalOrder = List.of(
-                new CalculateRequest.OrderItem("SKU1", "CAT1", 3000L, 1));
+                new CalculateRequest.OrderItem("SKU1", "CAT1", 15000L, 1));
         ConfirmResult result = tradeAppService.confirm(
                 new ConfirmRequest(lock.usageNo(), null, normalOrder));
-        assertThat(result.discountAmt()).isEqualTo(2000L);
+        assertThat(result.discountAmt()).isEqualTo(9000L);
         assertThat(result.couponStatus()).isEqualTo("已核销");
     }
 }
