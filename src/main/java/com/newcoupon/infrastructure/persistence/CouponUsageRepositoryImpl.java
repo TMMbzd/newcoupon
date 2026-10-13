@@ -84,4 +84,9 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
         return Optional.ofNullable(mapper.selectOccupyingByCouponId(couponId))
                 .map(CouponUsagePOConverter::toDomain);
     }
+
+    @Override
+    public boolean casRefund(String usageNo) {
+        return mapper.casRefund(usageNo) == 1;
+    }
 }

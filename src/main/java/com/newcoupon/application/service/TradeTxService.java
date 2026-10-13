@@ -1,5 +1,7 @@
 package com.newcoupon.application.service;
 
+import com.newcoupon.application.dto.TradeDtos.RefundRequest;
+import com.newcoupon.application.dto.TradeDtos.RefundResult;
 import com.newcoupon.application.dto.TradeDtos.ConfirmRequest;
 import com.newcoupon.application.dto.TradeDtos.ConfirmResult;
 import com.newcoupon.application.dto.TradeDtos.FundingSplit;
@@ -205,4 +207,29 @@ public class TradeTxService {
         UserCoupon fresh = userCouponRepository.findById(usage.getUserCouponId()).orElseThrow();
         return new ReleaseResult(req.usageNo(), fresh.getStatus().getDesc(), false);
     }
+    /** 退款冲销（第 2 环）：已核销→已退款，券保持已核销（退款冲的是钱不是券的所有权） */
+    @Transactional
+    public RefundResult refundConfirm(String usageNo, LocalDateTime now) {
+        CouponUsage usage = couponUsageRepository.findByUsageNo(usageNo)
+                .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, usageNo));
+        if (usage.getStatus() == UsageStatus.REFUNDED) {
+            return new RefundResult(usageNo, CouponStatus.USED.getDesc(), usage.getDiscountAmt(), true);
+        }
+        if (usage.getStatus() != UsageStatus.CONFIRMED) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
+                    "占用单状态=" + usage.getStatus().getDesc() + "，仅已核销可退款冲销");
+        }
+
+        if (!couponUsageRepository.casRefund(usageNo)) {
+            throw new TradeCasRejectedException("usage-refund", usageNo);
+        }
+
+        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+                .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
+        // 券保持 USED（已核销）：退款冲的是资金记录，不是券的使用权。
+        couponEventRepository.append(CouponEvent.refund(coupon, usage, usage.getDiscountAmt(), now));
+
+        return new RefundResult(usageNo, CouponStatus.USED.getDesc(), usage.getDiscountAmt(), false);
+    }
+
 }

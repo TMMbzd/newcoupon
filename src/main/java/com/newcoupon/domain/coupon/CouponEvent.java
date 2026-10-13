@@ -85,6 +85,14 @@ public final class CouponEvent {
                 usage.getOrderNo(), discountAmt, now);
     }
 
+    /** 退款冲销事件（第 2 环） */
+    public static CouponEvent refund(UserCoupon coupon, CouponUsage usage, long discountAmt, LocalDateTime now) {
+        return new CouponEvent(null,
+                BoundedKey.of("RFD:", usage.getUsageNo()), EventType.REFUNDED,
+                coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
+                usage.getOrderNo(), discountAmt, now);
+    }
+
     /** 释放回退事件 */
     public static CouponEvent released(UserCoupon coupon, CouponUsage usage, LocalDateTime now) {
         return new CouponEvent(null,

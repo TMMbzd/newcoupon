@@ -18,7 +18,8 @@ public enum UsageStatus {
     CONFIRMED(1, "已核销"),
     RELEASED(2, "已释放"),
     EXPIRED(3, "过期关闭"),
-    TIMEOUT_CLOSED(4, "超时关闭");
+    TIMEOUT_CLOSED(4, "超时关闭"),
+    REFUNDED(5, "已退款");
 
     private final int code;
     private final String desc;

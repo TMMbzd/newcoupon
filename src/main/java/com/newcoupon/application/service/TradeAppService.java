@@ -1,5 +1,7 @@
 package com.newcoupon.application.service;
 
+import com.newcoupon.application.dto.TradeDtos.RefundRequest;
+import com.newcoupon.application.dto.TradeDtos.RefundResult;
 import com.newcoupon.application.dto.TradeDtos.ConfirmRequest;
 import com.newcoupon.application.dto.TradeDtos.ConfirmResult;
 import com.newcoupon.application.dto.TradeDtos.FundingSplit;
@@ -231,5 +233,14 @@ public class TradeAppService {
                 yield new FundingSplit(platform, discountAmt - platform);
             }
         };
+    }
+
+    public RefundResult refund(RefundRequest req) {
+        assertUsageAccessible(req.usageNo());
+        try {
+            return tradeTxService.refundConfirm(req.usageNo(), LocalDateTime.now());
+        } catch (TradeCasRejectedException e) {
+            throw freshStateConflict("退款", e);
+        }
     }
 }

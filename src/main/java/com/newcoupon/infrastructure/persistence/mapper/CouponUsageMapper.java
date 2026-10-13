@@ -24,6 +24,10 @@ public interface CouponUsageMapper extends BaseMapper<CouponUsagePO> {
                    @Param("discountAmt") long discountAmt,
                    @Param("useTime") LocalDateTime useTime);
 
+    /** 退款冲销（CAS）：已核销→已退款（终端状态，券保持已核销不回可用） */
+    @Update("UPDATE coupon_usage SET status = 5 WHERE usage_no = #{usageNo} AND status = 1")
+    int casRefund(@Param("usageNo") String usageNo);
+
     @Update("UPDATE coupon_usage SET status = 2, release_time = #{releaseTime} "
             + "WHERE usage_no = #{usageNo} AND status = 0")
     int casRelease(@Param("usageNo") String usageNo,
