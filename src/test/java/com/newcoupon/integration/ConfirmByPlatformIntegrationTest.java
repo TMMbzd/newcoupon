@@ -1,6 +1,7 @@
 package com.newcoupon.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.newcoupon.application.dto.ReceiveRequest;
 import com.newcoupon.application.dto.ReceiveResult;
@@ -12,6 +13,7 @@ import com.newcoupon.application.dto.TradeDtos.LockResult;
 import com.newcoupon.application.service.ReceiveAppService;
 import com.newcoupon.application.service.TemplateAppService;
 import com.newcoupon.application.service.TradeAppService;
+import com.newcoupon.common.BizException;
 import com.newcoupon.infrastructure.persistence.mapper.CouponShareDetailMapper;
 import com.newcoupon.open.api.dto.CalculateRequest;
 import java.time.LocalDateTime;
@@ -126,5 +128,42 @@ class ConfirmByPlatformIntegrationTest extends ShardedIntegrationTestSupport {
                 new ConfirmRequest(lc.usageNo(), null, items));
         assertThat(replay.duplicated()).as("重放标记 duplicated").isTrue();
         assertThat(replay.discountAmt()).as("重放返回相同金额").isEqualTo(first.discountAmt());
+    }
+
+    @Test
+    @DisplayName("D1: 申报防线——合规高力度券(满100减90)+100元订单(占比90%)→ 拒绝；同单150元订单(60%)→ 放行")
+    void d1_discountRatioDefense() {
+        LocalDateTime start = LocalDateTime.now().minusDays(1);
+        LocalDateTime end = LocalDateTime.now().plusDays(30);
+        // 合规但高力度：满 100 减 90（面值 ≤ 门槛，配置期校验放行——大促真实存在的券）。
+        // 它配上"刚过门槛的订单"就会产生 >80% 占比——这正是核销期防线存在的理由：
+        // 配置期挡"不可能的配置"，核销期挡"合法配置 × 离谱订单"的组合。
+        TemplateAppService.CreatedTemplate created = templateAppService.create(
+                new TemplateCreateRequest(
+                        "防线测试-D1", 3002L, 1, 9000L, null, 10000L,
+                        10L, 1, 1, start, end, null, null, null));
+        templateAppService.publish(created.id());
+        long userId = System.nanoTime();
+        ReceiveResult rcv = receiveAppService.receive(
+                new ReceiveRequest("d1-" + System.nanoTime(), userId, created.id()));
+        LockResult lock = tradeAppService.lock(
+                new LockRequest("ORD-D1", userId, rcv.couponId()));
+
+        // 100 元订单（刚过门槛）：优惠 9000，占比 90% > 80% → 拒绝
+        List<CalculateRequest.OrderItem> tinyOrder = List.of(
+                new CalculateRequest.OrderItem("SKU1", "CAT1", 10000L, 1));
+        assertThatThrownBy(() -> tradeAppService.confirm(
+                new ConfirmRequest(lock.usageNo(), null, tinyOrder)))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("上限");
+
+        // 同一占用单换 150 元订单：优惠 9000，占比 60% ≤ 80% → 放行
+        // （同时证明拒绝路径没有污染占用单——它还在 OCCUPYING，能继续核销）
+        List<CalculateRequest.OrderItem> normalOrder = List.of(
+                new CalculateRequest.OrderItem("SKU1", "CAT1", 15000L, 1));
+        ConfirmResult result = tradeAppService.confirm(
+                new ConfirmRequest(lock.usageNo(), null, normalOrder));
+        assertThat(result.discountAmt()).isEqualTo(9000L);
+        assertThat(result.couponStatus()).isEqualTo("已核销");
     }
 }

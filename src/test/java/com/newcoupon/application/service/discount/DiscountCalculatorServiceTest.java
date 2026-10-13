@@ -246,20 +246,22 @@ class DiscountCalculatorServiceTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("T9: 满10减20，订单15元 → 优惠封顶到15元，到手0元（语义定死：不设保底价）")
+    @DisplayName("T9: 立减10元券，订单5元 → 优惠封顶到5元，到手0元（语义定死：不设保底价）")
     void t9_discountCappedByOrderAmount() {
-        CouponTemplate tpl = tpl(4L, CouponType.FULL_REDUCTION, 2000L, null, 1000L, "满10减20");
-        UserCoupon c = coupon(1004L, 4L, 2000L, 1000L, null,
+        // 配置期校验（面值≤门槛）落地后，单张满减券已不可能超过订单额（order≥门槛≥面值）；
+        // "封顶到订单金额"的语义由无门槛券和多层叠加（T16）继续钉死。
+        CouponTemplate tpl = tpl(4L, CouponType.NO_THRESHOLD, 1000L, null, 0L, "立减10元");
+        UserCoupon c = coupon(1004L, 4L, 1000L, 0L, null,
                 LocalDateTime.of(2026, 12, 31, 23, 59, 59));
         when(userCouponRepository.findByIdForUser(1004L, USER)).thenReturn(Optional.of(c));
         when(templateReader.get(4L)).thenReturn(Optional.of(tpl));
 
-        CalculateResponse r = service.calculate(req(List.of(item(1500L)), List.of(1004L)), NOW);
+        CalculateResponse r = service.calculate(req(List.of(item(500L)), List.of(1004L)), NOW);
 
-        assertThat(r.discountAmount()).isEqualTo(1500L);
+        assertThat(r.discountAmount()).isEqualTo(500L);
         assertThat(r.finalPrice()).isEqualTo(0L);
         assertThat(r.usedCoupons()).hasSize(1);
-        assertThat(r.usedCoupons().get(0).discountAmount()).isEqualTo(1500L);
+        assertThat(r.usedCoupons().get(0).discountAmount()).isEqualTo(500L);
     }
 
     @Test
@@ -521,20 +523,97 @@ class DiscountCalculatorServiceTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("T16: 总优惠封顶——两层叠加优惠不超过订单金额")
     void t16_totalDiscountCapped() {
-        CouponTemplate shopTpl = tplLayer(16L, CouponType.FULL_REDUCTION, 5000L, null, 1000L, "满10减50", StackingLayer.SHOP);
-        CouponTemplate platTpl = tplLayer(17L, CouponType.NO_THRESHOLD, 2000L, null, 0L, "立减20", StackingLayer.PLATFORM);
-        UserCoupon shopC = coupon(7001L, 16L, 5000L, 1000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
-        UserCoupon platC = coupon(7002L, 17L, 2000L, 0L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        CouponTemplate shopTpl = tplLayer(16L, CouponType.FULL_REDUCTION, 900L, null, 1000L, "满10减9", StackingLayer.SHOP);
+        CouponTemplate platTpl = tplLayer(17L, CouponType.NO_THRESHOLD, 200L, null, 0L, "立减2元", StackingLayer.PLATFORM);
+        UserCoupon shopC = coupon(7001L, 16L, 900L, 1000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        UserCoupon platC = coupon(7002L, 17L, 200L, 0L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
         when(userCouponRepository.findByIdForUser(7001L, USER)).thenReturn(Optional.of(shopC));
         when(userCouponRepository.findByIdForUser(7002L, USER)).thenReturn(Optional.of(platC));
         when(templateReader.get(16L)).thenReturn(Optional.of(shopTpl));
         when(templateReader.get(17L)).thenReturn(Optional.of(platTpl));
 
-        // 订单 3000 分；SHOP 优惠 min(5000,3000)=3000；PLATFORM 优惠 min(2000,3000)=2000
-        // 总优惠 = min(3000+2000, 3000) = 3000（封顶）
-        CalculateResponse r = service.calculate(req(List.of(item(3000L)), List.of(7001L, 7002L)), NOW);
+        // 订单 1000 分；SHOP 优惠 min(900,1000)=900；PLATFORM 优惠 min(200,1000)=200
+        // 总优惠 = min(900+200, 1000) = 1000（封顶）
+        CalculateResponse r = service.calculate(req(List.of(item(1000L)), List.of(7001L, 7002L)), NOW);
 
-        assertThat(r.discountAmount()).as("总优惠封顶到订单金额").isEqualTo(3000L);
+        assertThat(r.discountAmount()).as("总优惠封顶到订单金额").isEqualTo(1000L);
         assertThat(r.finalPrice()).as("到手价 = 0").isEqualTo(0L);
+    }
+
+    private static CouponTemplate tplGroup(long id, long faceValue, long threshold, String name, String group) {
+        return CouponTemplate.create(CouponTemplate.Creation.builder()
+                .templateCode("TG" + id).activityId(1L).name(name).couponType(CouponType.FULL_REDUCTION)
+                .faceValue(faceValue).discountCap(null).threshold(threshold)
+                .totalCount(100L).perUserLimit(1).dailyLimit(0L).perUserDailyLimit(0)
+                .validType(ValidType.FIXED)
+                .validStart(LocalDateTime.of(2026, 1, 1, 0, 0))
+                .validEnd(LocalDateTime.of(2026, 12, 31, 23, 59, 59))
+                .appId(APP)
+                .stackingLayer(StackingLayer.SHOP)
+                .exclusionGroup(group)
+                .build());
+    }
+
+    @Test
+    @DisplayName("T17: 互斥组——同层同组两张券只选优惠大的一张")
+    void t17_sameGroup_picksBest() {
+        CouponTemplate tpl1 = tplGroup(20L, 3000L, 10000L, "组A减30", "GROUP_X");
+        CouponTemplate tpl2 = tplGroup(21L, 2000L, 10000L, "组A减20", "GROUP_X");
+        UserCoupon c1 = coupon(8001L, 20L, 3000L, 10000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        UserCoupon c2 = coupon(8002L, 21L, 2000L, 10000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        when(userCouponRepository.findByIdForUser(8001L, USER)).thenReturn(Optional.of(c1));
+        when(userCouponRepository.findByIdForUser(8002L, USER)).thenReturn(Optional.of(c2));
+        when(templateReader.get(20L)).thenReturn(Optional.of(tpl1));
+        when(templateReader.get(21L)).thenReturn(Optional.of(tpl2));
+        CalculateResponse r = service.calculate(req(List.of(item(15000L)), List.of(8001L, 8002L)), NOW);
+        assertThat(r.discountAmount()).as("同组取大：3000").isEqualTo(3000L);
+        assertThat(r.usedCoupons()).as("只选一张").hasSize(1);
+        assertThat(r.usedCoupons().get(0).couponId()).isEqualTo(8001L);
+    }
+
+    @Test
+    @DisplayName("T18: 互斥组——同层不同组两张券可叠加")
+    void t18_differentGroups_stack() {
+        CouponTemplate tpl1 = tplGroup(20L, 3000L, 10000L, "新品减30", "NEW_USER");
+        CouponTemplate tpl2 = tplGroup(21L, 2000L, 10000L, "满减20", "FULL_REDUCTION");
+        UserCoupon c1 = coupon(8101L, 20L, 3000L, 10000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        UserCoupon c2 = coupon(8102L, 21L, 2000L, 10000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        when(userCouponRepository.findByIdForUser(8101L, USER)).thenReturn(Optional.of(c1));
+        when(userCouponRepository.findByIdForUser(8102L, USER)).thenReturn(Optional.of(c2));
+        when(templateReader.get(20L)).thenReturn(Optional.of(tpl1));
+        when(templateReader.get(21L)).thenReturn(Optional.of(tpl2));
+        CalculateResponse r = service.calculate(req(List.of(item(15000L)), List.of(8101L, 8102L)), NOW);
+        assertThat(r.discountAmount()).as("不同组可叠加：3000+2000=5000").isEqualTo(5000L);
+        assertThat(r.usedCoupons()).as("两张都用了").hasSize(2);
+    }
+
+    @Test
+    @DisplayName("T19: 范围感知分摊——品类券的优惠只分给该品类商品")
+    void t19_scopeAwareAllocation() {
+        CouponTemplate catTpl = CouponTemplate.create(CouponTemplate.Creation.builder()
+                .templateCode("T19").activityId(1L).name("食品品类券").couponType(CouponType.FULL_REDUCTION)
+                .faceValue(2000L).discountCap(null).threshold(5000L)
+                .totalCount(100L).perUserLimit(1).dailyLimit(0L).perUserDailyLimit(0)
+                .validType(ValidType.FIXED)
+                .validStart(LocalDateTime.of(2026, 1, 1, 0, 0))
+                .validEnd(LocalDateTime.of(2026, 12, 26, 23, 59, 59))
+                .appId(APP)
+                .applicableScope(ApplicableScope.CATEGORY)
+                .scopeIds("[\"FOOD\"]")
+                .build());
+        UserCoupon c = coupon(8201L, 22L, 2000L, 5000L, null, LocalDateTime.of(2026, 12, 26, 23, 59, 59));
+        when(userCouponRepository.findByIdForUser(8201L, USER)).thenReturn(Optional.of(c));
+        when(templateReader.get(22L)).thenReturn(Optional.of(catTpl));
+        CalculateRequest foodReq = new CalculateRequest(USER,
+                List.of(new CalculateRequest.OrderItem("SKU_F1", "FOOD", 3000L, 1),
+                        new CalculateRequest.OrderItem("SKU_D1", "DIGITAL", 7000L, 1)),
+                List.of(8201L));
+        CalculateResponse r = service.calculate(foodReq, NOW);
+        assertThat(r.discountAmount()).isEqualTo(2000L);
+        assertThat(r.allocations()).hasSize(2);
+        assertThat(r.allocations().get(0).skuId()).isEqualTo("SKU_F1");
+        assertThat(r.allocations().get(0).allocatedDiscount()).as("FOOD商品分到优惠").isEqualTo(2000L);
+        assertThat(r.allocations().get(1).skuId()).isEqualTo("SKU_D1");
+        assertThat(r.allocations().get(1).allocatedDiscount()).as("DIGITAL商品分到0").isEqualTo(0L);
     }
 }

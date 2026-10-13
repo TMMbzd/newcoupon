@@ -68,4 +68,17 @@ public final class TradeDtos {
 
     public record MyCouponList(List<MyCoupon> coupons) {
     }
+
+    /** 退款请求（第 2 环：退款冲销） */
+    public record RefundRequest(
+            @NotBlank(message = "usageNo 不能为空") @Size(max = 64) String usageNo) {
+    }
+
+    /** 退款结果 */
+    public record RefundResult(
+            String usageNo,
+            String couponStatus,
+            long discountAmt,
+            boolean duplicated) {
+    }
 }
