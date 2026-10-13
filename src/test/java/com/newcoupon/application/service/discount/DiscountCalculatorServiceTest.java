@@ -537,4 +537,81 @@ class DiscountCalculatorServiceTest extends ShardedIntegrationTestSupport {
         assertThat(r.discountAmount()).as("总优惠封顶到订单金额").isEqualTo(3000L);
         assertThat(r.finalPrice()).as("到手价 = 0").isEqualTo(0L);
     }
+
+    private static CouponTemplate tplGroup(long id, long faceValue, long threshold, String name, String group) {
+        return CouponTemplate.create(CouponTemplate.Creation.builder()
+                .templateCode("TG" + id).activityId(1L).name(name).couponType(CouponType.FULL_REDUCTION)
+                .faceValue(faceValue).discountCap(null).threshold(threshold)
+                .totalCount(100L).perUserLimit(1).dailyLimit(0L).perUserDailyLimit(0)
+                .validType(ValidType.FIXED)
+                .validStart(LocalDateTime.of(2026, 1, 1, 0, 0))
+                .validEnd(LocalDateTime.of(2026, 12, 31, 23, 59, 59))
+                .appId(APP)
+                .stackingLayer(StackingLayer.SHOP)
+                .exclusionGroup(group)
+                .build());
+    }
+
+    @Test
+    @DisplayName("T17: 互斥组——同层同组两张券只选优惠大的一张")
+    void t17_sameGroup_picksBest() {
+        CouponTemplate tpl1 = tplGroup(20L, 3000L, 10000L, "组A减30", "GROUP_X");
+        CouponTemplate tpl2 = tplGroup(21L, 2000L, 10000L, "组A减20", "GROUP_X");
+        UserCoupon c1 = coupon(8001L, 20L, 3000L, 10000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        UserCoupon c2 = coupon(8002L, 21L, 2000L, 10000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        when(userCouponRepository.findByIdForUser(8001L, USER)).thenReturn(Optional.of(c1));
+        when(userCouponRepository.findByIdForUser(8002L, USER)).thenReturn(Optional.of(c2));
+        when(templateReader.get(20L)).thenReturn(Optional.of(tpl1));
+        when(templateReader.get(21L)).thenReturn(Optional.of(tpl2));
+        CalculateResponse r = service.calculate(req(List.of(item(15000L)), List.of(8001L, 8002L)), NOW);
+        assertThat(r.discountAmount()).as("同组取大：3000").isEqualTo(3000L);
+        assertThat(r.usedCoupons()).as("只选一张").hasSize(1);
+        assertThat(r.usedCoupons().get(0).couponId()).isEqualTo(8001L);
+    }
+
+    @Test
+    @DisplayName("T18: 互斥组——同层不同组两张券可叠加")
+    void t18_differentGroups_stack() {
+        CouponTemplate tpl1 = tplGroup(20L, 3000L, 10000L, "新品减30", "NEW_USER");
+        CouponTemplate tpl2 = tplGroup(21L, 2000L, 10000L, "满减20", "FULL_REDUCTION");
+        UserCoupon c1 = coupon(8101L, 20L, 3000L, 10000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        UserCoupon c2 = coupon(8102L, 21L, 2000L, 10000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        when(userCouponRepository.findByIdForUser(8101L, USER)).thenReturn(Optional.of(c1));
+        when(userCouponRepository.findByIdForUser(8102L, USER)).thenReturn(Optional.of(c2));
+        when(templateReader.get(20L)).thenReturn(Optional.of(tpl1));
+        when(templateReader.get(21L)).thenReturn(Optional.of(tpl2));
+        CalculateResponse r = service.calculate(req(List.of(item(15000L)), List.of(8101L, 8102L)), NOW);
+        assertThat(r.discountAmount()).as("不同组可叠加：3000+2000=5000").isEqualTo(5000L);
+        assertThat(r.usedCoupons()).as("两张都用了").hasSize(2);
+    }
+
+    @Test
+    @DisplayName("T19: 范围感知分摊——品类券的优惠只分给该品类商品")
+    void t19_scopeAwareAllocation() {
+        CouponTemplate catTpl = CouponTemplate.create(CouponTemplate.Creation.builder()
+                .templateCode("T19").activityId(1L).name("食品品类券").couponType(CouponType.FULL_REDUCTION)
+                .faceValue(2000L).discountCap(null).threshold(5000L)
+                .totalCount(100L).perUserLimit(1).dailyLimit(0L).perUserDailyLimit(0)
+                .validType(ValidType.FIXED)
+                .validStart(LocalDateTime.of(2026, 1, 1, 0, 0))
+                .validEnd(LocalDateTime.of(2026, 12, 26, 23, 59, 59))
+                .appId(APP)
+                .applicableScope(ApplicableScope.CATEGORY)
+                .scopeIds("[\"FOOD\"]")
+                .build());
+        UserCoupon c = coupon(8201L, 22L, 2000L, 5000L, null, LocalDateTime.of(2026, 12, 26, 23, 59, 59));
+        when(userCouponRepository.findByIdForUser(8201L, USER)).thenReturn(Optional.of(c));
+        when(templateReader.get(22L)).thenReturn(Optional.of(catTpl));
+        CalculateRequest foodReq = new CalculateRequest(USER,
+                List.of(new CalculateRequest.OrderItem("SKU_F1", "FOOD", 3000L, 1),
+                        new CalculateRequest.OrderItem("SKU_D1", "DIGITAL", 7000L, 1)),
+                List.of(8201L));
+        CalculateResponse r = service.calculate(foodReq, NOW);
+        assertThat(r.discountAmount()).isEqualTo(2000L);
+        assertThat(r.allocations()).hasSize(2);
+        assertThat(r.allocations().get(0).skuId()).isEqualTo("SKU_F1");
+        assertThat(r.allocations().get(0).allocatedDiscount()).as("FOOD商品分到优惠").isEqualTo(2000L);
+        assertThat(r.allocations().get(1).skuId()).isEqualTo("SKU_D1");
+        assertThat(r.allocations().get(1).allocatedDiscount()).as("DIGITAL商品分到0").isEqualTo(0L);
+    }
 }
