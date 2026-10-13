@@ -20,7 +20,6 @@ import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -39,8 +38,18 @@ class TradeAppServiceTest {
     @Mock
     private CouponUsageRepository couponUsageRepository;
 
-    @InjectMocks
+    // 手动构造：构造器新增了两个 @Value 基本类型参数（占比上限/速率阈值），
+    // @InjectMocks 无法给基本类型注入值——按生产默认值 80/600 手工传入。
+    // DiscountCalculatorService 本组用例不走核销路径，传 null。
+    // 构造放 @BeforeEach（不能放字段初始化器）：@Mock 字段由 Mockito 在每个测试前注入，
+    // 字段初始化器跑得更早，那时 mock 还是 null。
     private TradeAppService service;
+
+    @org.junit.jupiter.api.BeforeEach
+    void setUp() {
+        service = new TradeAppService(
+                tradeTxService, userCouponRepository, couponUsageRepository, null, 80, 600);
+    }
 
     private static CouponUsage usage() {
         return CouponUsage.reconstitute(9L, "ORD-1:5", 42L, 5L, "ORD-1",
