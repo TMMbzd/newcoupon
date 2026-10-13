@@ -24,8 +24,10 @@ import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.repository.CouponUsageRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import java.time.LocalDateTime;
+import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
@@ -46,14 +48,29 @@ public class TradeAppService {
     private final CouponUsageRepository couponUsageRepository;
     private final DiscountCalculatorService discountCalculatorService;
 
+    /** 申报防线②：单笔优惠占订单金额的上限（百分数，默认 80）。极端促销（0元购）可调高 */
+    private final int maxDiscountRatio;
+
+    /** 申报防线③：单接入方核销速率告警阈值（次/分钟，默认 600）——只告警不拦截（fail-open） */
+    private final int confirmRateLimit;
+
+    /** 速率窗口：appId → [窗口起点毫秒, 计数]。单机内存版——多实例部署时告警聚合在日志侧 */
+    private final ConcurrentHashMap<String, long[]> confirmRateWindow = new ConcurrentHashMap<>();
+
+    private static final long RATE_WINDOW_MS = 60_000;
+
     public TradeAppService(TradeTxService tradeTxService,
                            UserCouponRepository userCouponRepository,
                            CouponUsageRepository couponUsageRepository,
-                                   DiscountCalculatorService discountCalculatorService) {
+                           DiscountCalculatorService discountCalculatorService,
+                           @Value("${coupon.trade.max-discount-ratio:80}") int maxDiscountRatio,
+                           @Value("${coupon.trade.confirm-rate-per-minute:600}") int confirmRateLimit) {
         this.tradeTxService = tradeTxService;
         this.userCouponRepository = userCouponRepository;
         this.couponUsageRepository = couponUsageRepository;
         this.discountCalculatorService = discountCalculatorService;
+        this.maxDiscountRatio = maxDiscountRatio;
+        this.confirmRateLimit = confirmRateLimit;
     }
 
     public LockResult lock(LockRequest req) {
@@ -126,6 +143,26 @@ public class TradeAppService {
                     .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
 
             var calc = discountCalculatorService.calculateForConfirm(coupon, req.items());
+
+            // ── 申报防线（门槛复算已由 calculateForConfirm 用平台侧订单金额完成）──
+            // ①优惠占比上限：平台算出的优惠不得超过订单金额的 maxDiscountRatio%。
+            // 防的是"虚报低价订单薅高额优惠"（如满10减50配 15 元订单）——这类单笔合理、
+            // 比例离谱的申报，直接拒绝；极端促销（0元购）由运营调高环境变量放行。
+            long orderAmount = req.items().stream()
+                    .mapToLong(i -> i.price() * i.quantity()).sum();
+            long maxAllowed = orderAmount * maxDiscountRatio / 100;
+            if (calc.discountAmt() > maxAllowed) {
+                log.warn("DEFENSE DISCOUNT_RATIO usageNo={} discount={} order={} ratio>={}%",
+                        req.usageNo(), calc.discountAmt(), orderAmount, maxDiscountRatio);
+                throw new BizException(ErrorCode.PARAM_ERROR,
+                        String.format("优惠金额(%d)超过订单金额(%d)的%d%%上限，拒绝核销",
+                                calc.discountAmt(), orderAmount, maxDiscountRatio));
+            }
+
+            // ②申报速率告警：单接入方每分钟核销次数超阈值时告警（只记不拦——
+            // 防线挡的是攻击者，不能反过来 brick 正常大促流量；拦截交给接入方治理）
+            alarmConfirmRate();
+
             split = calculateFundingSplit(calc.template(), calc.discountAmt());
 
             // 用平台计算出的金额（调用方传入的 discountAmt 被忽略）
@@ -224,6 +261,26 @@ public class TradeAppService {
      * 出资拆分（第 2 环）：按模板的 budget_owner 计算平台/商家各自承担多少。
      * SPLIT 模式：platform = floor(discount × ratio / 100)，merchant = discount - platform（保证合计精确）。
      */
+    /** 申报速率告警：固定 60s 窗口，按 appId 计数。只在"刚越过阈值"那一刻告警一次（防日志刷屏） */
+    private void alarmConfirmRate() {
+        String appId = RequestContext.current().appId();
+        if (appId == null) {
+            return;   // 内部调用路径无接入方身份（RequestContext.EMPTY），无速率可计
+        }
+        long now = System.currentTimeMillis();
+        long[] window = confirmRateWindow.compute(appId, (k, old) -> {
+            if (old == null || now - old[0] >= RATE_WINDOW_MS) {
+                return new long[]{now, 1};
+            }
+            old[1]++;
+            return old;
+        });
+        if (window[1] == confirmRateLimit + 1) {
+            log.error("DEFENSE CONFIRM_RATE appId={} count={}/min exceeds limit={} ——疑似异常申报速率，"
+                    + "接入方治理/风控介入（本防线只告警不拦截）", appId, window[1], confirmRateLimit);
+        }
+    }
+
     private FundingSplit calculateFundingSplit(CouponTemplate template, long discountAmt) {
         return switch (template.getBudgetOwner()) {
             case PLATFORM -> new FundingSplit(discountAmt, 0);
