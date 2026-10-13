@@ -48,10 +48,10 @@ public class TradeAppService {
     private final CouponUsageRepository couponUsageRepository;
     private final DiscountCalculatorService discountCalculatorService;
 
-    /** 申报防线②：单笔优惠占订单金额的上限（百分数，默认 80）。极端促销（0元购）可调高 */
+    /** 申报防线①：单笔优惠占订单金额的上限（百分数，默认 80）。极端促销（0元购）可调高 */
     private final int maxDiscountRatio;
 
-    /** 申报防线③：单接入方核销速率告警阈值（次/分钟，默认 600）——只告警不拦截（fail-open） */
+    /** 申报防线②：单接入方核销速率告警阈值（次/分钟，默认 600）——只告警不拦截（fail-open） */
     private final int confirmRateLimit;
 
     /** 速率窗口：appId → [窗口起点毫秒, 计数]。单机内存版——多实例部署时告警聚合在日志侧 */
