@@ -1,9 +1,11 @@
 package com.newcoupon.application.service.discount;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
 
 import com.newcoupon.application.service.CachedTemplateReader;
+import com.newcoupon.common.BizException;
 import com.newcoupon.application.service.discount.checker.EligibilityChecker;
 import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.domain.coupon.ApplicableScope;
@@ -615,5 +617,46 @@ class DiscountCalculatorServiceTest extends ShardedIntegrationTestSupport {
         assertThat(r.allocations().get(0).allocatedDiscount()).as("FOOD商品分到优惠").isEqualTo(2000L);
         assertThat(r.allocations().get(1).skuId()).isEqualTo("SKU_D1");
         assertThat(r.allocations().get(1).allocatedDiscount()).as("DIGITAL商品分到0").isEqualTo(0L);
+    }
+
+    // ════ 核销复算·口径守卫（D2~D3，2026-10-15 补：核销路径此前不跑门槛/范围复核）════
+
+    @Test
+    @DisplayName("D2: 核销复算——满100减20券配80元订单（未达门槛）→ 拒绝核销（核销与试算同口径）")
+    void d2_confirmRejectsBelowThreshold() {
+        // 场景：调用方锁券后申报了一张"不达门槛"的订单明细。核销 = 平台算钱，
+        // 算钱之前必须先确认这张券真的能用在这单上——不然调用方可以用小金额订单
+        // 核销掉一张本不该使用的券（试算拒了、核销放行 = 两道门口径分裂）。
+        CouponTemplate tpl = tpl(1L, CouponType.FULL_REDUCTION, 2000L, null, 10000L, "满100减20");
+        UserCoupon c = coupon(1001L, 1L, 2000L, 10000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        when(templateReader.get(1L)).thenReturn(Optional.of(tpl));
+
+        assertThatThrownBy(() -> service.calculateForConfirm(c,
+                List.of(new CalculateRequest.OrderItem("SKU1", "CAT1", 8000L, 1))))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("未达使用门槛");
+    }
+
+    @Test
+    @DisplayName("D3: 核销复算——品类券（限食品），订单只有数码商品 → 拒绝核销")
+    void d3_confirmRejectsOutOfScope() {
+        CouponTemplate catTpl = CouponTemplate.create(CouponTemplate.Creation.builder()
+                .templateCode("T30").activityId(1L).name("食品品类券").couponType(CouponType.FULL_REDUCTION)
+                .faceValue(2000L).discountCap(null).threshold(5000L)
+                .totalCount(100L).perUserLimit(1).dailyLimit(0L).perUserDailyLimit(0)
+                .validType(ValidType.FIXED)
+                .validStart(LocalDateTime.of(2026, 1, 1, 0, 0))
+                .validEnd(LocalDateTime.of(2026, 12, 31, 23, 59, 59))
+                .appId(APP)
+                .applicableScope(ApplicableScope.CATEGORY)
+                .scopeIds("[\"FOOD\"]")
+                .build());
+        UserCoupon c = coupon(9101L, 30L, 2000L, 5000L, null, LocalDateTime.of(2026, 12, 31, 23, 59, 59));
+        when(templateReader.get(30L)).thenReturn(Optional.of(catTpl));
+
+        assertThatThrownBy(() -> service.calculateForConfirm(c,
+                List.of(new CalculateRequest.OrderItem("SKU_D1", "DIGITAL", 6000L, 1))))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("适用范围");
     }
 }

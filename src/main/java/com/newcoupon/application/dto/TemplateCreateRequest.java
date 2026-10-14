@@ -62,6 +62,39 @@ public record TemplateCreateRequest(
         Long dailyLimit,           // null 视为 0
 
         @Min(value = 0, message = "每人日限不能为负（0=不限）")
-        Integer perUserDailyLimit  // null 视为 0
+        Integer perUserDailyLimit, // null 视为 0
+
+        // ---- 五维模型后四维（第 2 环补运营入口，2026-10-15；全部可空 = 取默认，存量调用零感知）----
+        @Min(value = 0, message = "适用范围：0全场 1品类 2单品")
+        @Max(value = 2, message = "适用范围：0全场 1品类 2单品")
+        Integer applicableScope,   // null → ALL 全场
+
+        @Size(max = 512, message = "范围值（JSON 数组）最长 512 字符")
+        String scopeIds,           // 品类/单品必填（领域层校验），如 [\"CAT_FOOD\"]
+
+        @Min(value = 0, message = "叠加层级：0店铺级 1平台级")
+        @Max(value = 1, message = "叠加层级：0店铺级 1平台级")
+        Integer stackingLayer,     // null → SHOP 店铺级
+
+        @Size(max = 32, message = "互斥组名最长 32 字符")
+        String exclusionGroup,     // null/空 = 无组（同层无组默认互斥）
+
+        @Min(value = 1, message = "出资方：1平台 2商家 3共担")
+        @Max(value = 3, message = "出资方：1平台 2商家 3共担")
+        Integer budgetOwner,       // null → PLATFORM 平台全出
+
+        @Min(value = 1, message = "共担出资平台百分比 1~99")
+        @Max(value = 99, message = "共担出资平台百分比 1~99")
+        Integer budgetRatio        // 仅 budgetOwner=3 时必填（领域层校验）
 ) {
+
+    /** 过渡兼容构造器：第 2 环前的老调用方（14 参）——五维全部取默认值 */
+    public TemplateCreateRequest(String name, Long activityId, Integer couponType, Long faceValue,
+                                 Long discountCap, Long threshold, Long totalCount, Integer perUserLimit,
+                                 Integer validType, LocalDateTime validStart, LocalDateTime validEnd,
+                                 Integer validDays, Long dailyLimit, Integer perUserDailyLimit) {
+        this(name, activityId, couponType, faceValue, discountCap, threshold, totalCount, perUserLimit,
+                validType, validStart, validEnd, validDays, dailyLimit, perUserDailyLimit,
+                null, null, null, null, null, null);
+    }
 }

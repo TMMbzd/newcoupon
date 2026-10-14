@@ -7,6 +7,9 @@ import com.newcoupon.common.ErrorCode;
 import com.newcoupon.domain.coupon.CouponType;
 import com.newcoupon.domain.coupon.ValidType;
 import com.newcoupon.domain.coupon.CouponTemplate;
+import com.newcoupon.domain.coupon.BudgetOwner;
+import com.newcoupon.domain.coupon.StackingLayer;
+import com.newcoupon.domain.coupon.ApplicableScope;
 import com.newcoupon.domain.coupon.PublishStatus;
 import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.infrastructure.persistence.StockDriftLogGateway;
@@ -76,6 +79,16 @@ public class TemplateAppService {
                 .validEnd(req.validEnd())
                 .validDays(req.validDays())
                 .appId(AppOwnership.ownerForNewResource())   // S1：开放面=调用方，内部面=内置应用
+                // ---- 五维后四维（第 2 环运营入口，2026-10-15）：null=存量默认（全场/店铺级/平台出资）----
+                .applicableScope(req.applicableScope() == null
+                        ? ApplicableScope.ALL : ApplicableScope.of(req.applicableScope()))
+                .scopeIds(req.scopeIds())
+                .stackingLayer(req.stackingLayer() == null
+                        ? StackingLayer.SHOP : StackingLayer.of(req.stackingLayer()))
+                .exclusionGroup(req.exclusionGroup())
+                .budgetOwner(req.budgetOwner() == null
+                        ? BudgetOwner.PLATFORM : BudgetOwner.of(req.budgetOwner()))
+                .budgetRatio(req.budgetRatio())
                 .build());
         CouponTemplate saved = templateRepository.save(template);
         log.info("template created: id={}, code={}, name={}, totalCount={}",

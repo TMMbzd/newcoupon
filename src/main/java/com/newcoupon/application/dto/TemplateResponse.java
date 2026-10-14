@@ -26,7 +26,14 @@ public record TemplateResponse(
         Integer validDays,
         String approveStatus,
         String publishStatus,
-        LocalDateTime createTime) {
+        LocalDateTime createTime,
+        // ---- 五维模型后四维（第 2 环补运营入口，2026-10-15）：写进去要能读回来 ----
+        String applicableScope,    // 全场/品类/单品
+        String scopeIds,           // 范围值（JSON 数组文本）
+        String stackingLayer,      // 店铺级/平台级
+        String exclusionGroup,     // 互斥组名（null=无组）
+        String budgetOwner,        // 平台/商家/共担
+        Integer budgetRatio) {     // 共担时平台百分比
 
     public static TemplateResponse from(CouponTemplate t) {
         return new TemplateResponse(
@@ -36,6 +43,9 @@ public record TemplateResponse(
                 t.getDailyLimit(), t.getPerUserDailyLimit(),
                 t.getValidType().getDesc(), t.getValidStart(), t.getValidEnd(), t.getValidDays(),
                 t.getApproveStatus().getDesc(), t.getPublishStatus().getDesc(),
-                null);   // createTime 由 DB 生成，查询场景需要时从 PO 侧带出
+                null,   // createTime 由 DB 生成，查询场景需要时从 PO 侧带出
+                t.getApplicableScope().getDesc(), t.getScopeIds(),
+                t.getStackingLayer().getDesc(), t.getExclusionGroup(),
+                t.getBudgetOwner().getDesc(), t.getBudgetRatio());
     }
 }

@@ -56,6 +56,25 @@ class AuditLogIntegrationTest extends ShardedIntegrationTestSupport {
         return auditLogMapper.selectList(null);
     }
 
+    /**
+     * 等待并只取指定 action 的记录（2026-10-15 修测试隔离）。
+     * 背景：核销/退款挂上真实审计后，同容器其它集成测试会并发写审计行——
+     * "取全表最后一条"会取到业务审计（SYSTEM 行），断言错对象。
+     * 按 action 过滤后，断言对象恒为本测试自己写的记录。
+     */
+    private List<AuditLogPO> waitForAuditRecordsByAction(String action) throws InterruptedException {
+        for (int i = 0; i < 50; i++) {
+            List<AuditLogPO> records = auditLogMapper.selectList(
+                    new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<AuditLogPO>()
+                            .eq(AuditLogPO::getAction, action));
+            if (records != null && !records.isEmpty()) {
+                return records;
+            }
+            Thread.sleep(100);
+        }
+        return List.of();
+    }
+
     /** 产生一条审计记录（直接调 AuditService，不经过业务方法） */
     private void produceAuditRecord(String marker) {
         auditService.record(new AuditService.AuditContext(
@@ -77,10 +96,10 @@ class AuditLogIntegrationTest extends ShardedIntegrationTestSupport {
     void t1_auditRecordCreatedWithSixElements() throws Exception {
         produceAuditRecord("T1");
 
-        List<AuditLogPO> records = waitForAuditRecords(1);
-        assertThat(records.size()).as("审计表至少有一条记录").isGreaterThanOrEqualTo(1);
+        List<AuditLogPO> records = waitForAuditRecordsByAction("TEST_T1");
+        assertThat(records).as("本测试写过一条 TEST_T1 记录").hasSize(1);
 
-        AuditLogPO latest = records.get(records.size() - 1);
+        AuditLogPO latest = records.get(0);
         assertThat(latest.getAppId()).as("要素①谁：appId").isEqualTo("test-app");
         assertThat(latest.getUserId()).as("要素①谁：userId").isEqualTo(100L);
         assertThat(latest.getTraceId()).as("要素⑥链路 ID").startsWith("trace-T1");
@@ -118,8 +137,8 @@ class AuditLogIntegrationTest extends ShardedIntegrationTestSupport {
     @DisplayName("T3: 篡改一条审计记录的内容 → 重算哈希与存储值不匹配（篡改可检出）")
     void t3_tamperingDetected() throws Exception {
         produceAuditRecord("T3");
-        List<AuditLogPO> records = waitForAuditRecords(1);
-        assertThat(records.size()).isGreaterThanOrEqualTo(1);
+        List<AuditLogPO> records = waitForAuditRecordsByAction("TEST_T3");
+        assertThat(records).as("本测试写过一条 TEST_T3 记录").isNotEmpty();
 
         AuditLogPO victim = records.get(records.size() - 1);
 

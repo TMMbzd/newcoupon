@@ -11,6 +11,7 @@ import com.newcoupon.application.dto.TradeDtos.MyCoupon;
 import com.newcoupon.application.dto.TradeDtos.MyCouponList;
 import com.newcoupon.application.dto.TradeDtos.ReleaseRequest;
 import com.newcoupon.application.dto.TradeDtos.ReleaseResult;
+import com.newcoupon.common.AuditLog;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.context.RequestContext;
@@ -130,6 +131,13 @@ public class TradeAppService {
         }
     }
 
+    /**
+     * 支付成功核销（动钱操作）。第一个真实审计点（第 1 环验收测试写明"审计只给动钱的写操作用，
+     * 第一个真实审计点将是核销"）——@AuditLog 切面采集六要素异步写审计表，失败不影响业务。
+     * 已知局限：切面取 userId 的约定是"第一个 Long 入参"，本方法入参是 record——userId 记空，
+     * 归属者可由 usageNo 在占用单反查（审计 before/after 快照里都带 usageNo）。
+     */
+    @AuditLog(action = "COUPON_CONFIRM", resourceType = "USAGE", describe = "核销占用单（动钱）")
     public ConfirmResult confirm(ConfirmRequest req) {
         assertUsageAccessible(req.usageNo());   // S1 越权防线（占用单只带 usageNo，需经券取归属）
 
@@ -144,10 +152,10 @@ public class TradeAppService {
 
             var calc = discountCalculatorService.calculateForConfirm(coupon, req.items());
 
-            // ── 申报防线（门槛复算已由 calculateForConfirm 用平台侧订单金额完成）──
+            // ── 申报防线（门槛/范围复核已由 calculateForConfirm 先行完成，2026-10-15 补齐）──
             // ①优惠占比上限：平台算出的优惠不得超过订单金额的 maxDiscountRatio%。
-            // 防的是"虚报低价订单薅高额优惠"（如满10减50配 15 元订单）——这类单笔合理、
-            // 比例离谱的申报，直接拒绝；极端促销（0元购）由运营调高环境变量放行。
+            // 防的是"合法高力度券 × 刚过门槛的小订单"（如满100减90配 100 元订单，占比 90%）——
+            // 这类单笔合理、比例离谱的申报，直接拒绝；极端促销（0元购）由运营调高环境变量放行。
             long orderAmount = req.items().stream()
                     .mapToLong(i -> i.price() * i.quantity()).sum();
             long maxAllowed = orderAmount * maxDiscountRatio / 100;
@@ -292,6 +300,7 @@ public class TradeAppService {
         };
     }
 
+    @AuditLog(action = "COUPON_REFUND", resourceType = "USAGE", describe = "退款冲销（动钱）")
     public RefundResult refund(RefundRequest req) {
         assertUsageAccessible(req.usageNo());
         try {

@@ -4,6 +4,7 @@ import com.newcoupon.application.service.AppOwnership;
 import com.newcoupon.application.service.CachedTemplateReader;
 import com.newcoupon.application.service.discount.checker.EligibilityChecker;
 import com.newcoupon.application.service.discount.strategy.DiscountStrategy;
+import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.Result;
 import com.newcoupon.domain.coupon.ApplicableScope;
@@ -165,6 +166,26 @@ public class DiscountCalculatorService {
 
         CouponTemplate template = templateReader.get(coupon.getTemplateId())
                 .orElseThrow(() -> new IllegalArgumentException("模板不存在或已删除: " + coupon.getTemplateId()));
+
+        // ════ 核销复核（2026-10-15 补，与试算同口径）════
+        // ①门槛：券快照门槛 vs 平台侧订单金额——与 ThresholdChecker 一致取券快照
+        //   （防"模板改规则，历史券跟着变性"）；时间/状态的守卫在核销 CAS 的 SQL 谓词里
+        //   （user_coupon.casConfirm 的 valid_end > NOW()），这里补 Java 层缺的两道。
+        // ②范围：订单里至少要有一件商品落在券的适用范围内（与试算的 checkCoupon 同规则）。
+        // 没有这两道复核时：调用方锁券后用一个不达门槛/范围外的订单明细就能把券核销掉——
+        // "平台算钱"的前提，是平台先确认这张券真的能用在这单上（试算拒了、核销放行=口径分裂）。
+        long threshold = coupon.getThreshold();
+        if (orderAmount < threshold) {
+            throw new BizException(ErrorCode.COUPON_NOT_USABLE,
+                    String.format("订单金额未达使用门槛（需满%.2f元，当前%.2f元），拒绝核销",
+                            threshold / 100.0, orderAmount / 100.0));
+        }
+        List<OrderContext.OrderItem> scopeItems = filterScopeItems(template, context);
+        if (template.getApplicableScope() != ApplicableScope.ALL && scopeItems.isEmpty()) {
+            throw new BizException(ErrorCode.COUPON_NOT_USABLE,
+                    "商品不在券的适用范围内（" + template.getApplicableScope().getDesc() + "），拒绝核销");
+        }
+
         DiscountStrategy strategy = strategies.get(template.getCouponType().name());
         if (strategy == null) {
             throw new IllegalStateException("未注册的券类型策略：" + template.getCouponType());

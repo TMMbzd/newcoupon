@@ -66,7 +66,9 @@ coupon:
     auto-repair:
       mode: ${REPAIR_MODE:shadow}
     transient-burst-threshold: 500
-  # 风控前置最小版（docs/11 §6）：IP 频控固定窗口——挡脚本高频领券；fail-open
+  # 风控前置最小版（docs/11 §6）：IP 频控——挡脚本高频领券；fail-open
+  # 计数实现 2026-10-08 起已从手写固定窗口迁移到统一限流器（Redis 令牌桶），
+  # window-seconds 现为令牌桶的"窗口"换算基准（见 IpRateGate）
   risk:
     ip-rate:
       enabled: true
