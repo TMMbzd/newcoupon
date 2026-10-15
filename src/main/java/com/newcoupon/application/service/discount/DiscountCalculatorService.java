@@ -125,16 +125,31 @@ public class DiscountCalculatorService {
         }
 
         // ════ Phase 3：总优惠封顶 ════
-        long totalDiscount = Math.min(
-                usedCoupons.stream().mapToLong(CandidateCoupon::discount).sum(),
-                orderAmount);
+        long sumDiscounts = usedCoupons.stream().mapToLong(CandidateCoupon::discount).sum();
+        long totalDiscount = Math.min(sumDiscounts, orderAmount);
+
+        // 封顶生效时（各券折扣之和超过订单金额）：按"券的处理顺序"裁剪每张券的实际计入金额——
+        // 先处理的层拿满、后处理的层拿剩余额度（与"叠加按层依次应用"的语义一致）。
+        // 没有这段，分摊与响应里的单券金额会按裁剪前的券面来算，出现"分摊合计 > 实际总优惠"
+        // 的账目矛盾（2026-10-16 例题全集编写时先红后绿修出，DiscountCasebookTest 例9 钉住）。
+        List<CandidateCoupon> effectiveCoupons = usedCoupons;
+        if (totalDiscount < sumDiscounts) {
+            effectiveCoupons = new ArrayList<>();
+            long budget = totalDiscount;
+            for (CandidateCoupon cc : usedCoupons) {
+                long take = Math.min(cc.discount(), budget);
+                budget -= take;
+                effectiveCoupons.add(take == cc.discount() ? cc
+                        : new CandidateCoupon(cc.coupon(), cc.template(), take, cc.scopeItems()));
+            }
+        }
 
         // ════ Phase 4：范围感知分摊（每张券只分给它范围内的商品）════
         List<CalculateResponse.LineAllocation> allocations =
-                usedCoupons.isEmpty() ? List.of() : allocateWithScopes(context.getItems(), usedCoupons);
+                effectiveCoupons.isEmpty() ? List.of() : allocateWithScopes(context.getItems(), effectiveCoupons);
 
         // ════ 构建响应 ════
-        List<CalculateResponse.CouponUsage> usageList = usedCoupons.stream()
+        List<CalculateResponse.CouponUsage> usageList = effectiveCoupons.stream()
                 .map(cc -> new CalculateResponse.CouponUsage(
                         cc.coupon().getId(),
                         cc.template().getName(),
