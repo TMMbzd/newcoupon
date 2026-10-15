@@ -274,7 +274,9 @@ public class TradeAppService {
                 .orElse(null);
     }
 
-    /** CAS 失败的通用分类：新快照读占用单+券，给出带真实状态的错误信息 */
+    /** CAS 失败的通用出口：把 CAS 信号拼成 4002"状态已被并发变更，请刷新后重试"。
+     *  注意它本身不读取新快照——需要"读新快照给更准分类"的场景在各入口的 catch 里单独做
+     *  （lock 的券状态分类、confirm 的"锁定期间过期"分支）；这里只是分类链的最后一格兜底。 */
     private BizException freshStateConflict(String action, TradeCasRejectedException e) {
         log.warn("{} cas rejected: {}", action, e.getMessage());
         return new BizException(ErrorCode.STATE_CONFLICT,
