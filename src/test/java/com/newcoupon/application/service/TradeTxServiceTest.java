@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -28,6 +29,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -126,5 +128,38 @@ class TradeTxServiceTest {
         assertThatThrownBy(() -> service.release(new ReleaseRequest("ORD-1:5", "取消"), NOW))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("已核销不可释放");
+    }
+
+    // ════ 加锁顺序不变量（2026-10-15，死锁对修复）════
+
+    @Test
+    @DisplayName("超时收场加锁顺序：占用单 CAS 必须先于券 CAS——四条链路统一顺序，消除 AB-BA 死锁")
+    void timeoutCloseLocksUsageBeforeCoupon() {
+        when(couponUsageRepository.findByUsageNo("ORD-1:5"))
+                .thenReturn(Optional.of(usage(UsageStatus.OCCUPYING, null)));
+        when(userCouponRepository.findById(5L)).thenReturn(Optional.of(coupon(CouponStatus.LOCKED)));
+        when(couponUsageRepository.casTimeoutByUsageNo("ORD-1:5")).thenReturn(true);
+        when(userCouponRepository.casTimeoutClose(5L, 42L)).thenReturn(true);
+
+        assertThat(service.timeoutClose("ORD-1:5", NOW)).isTrue();
+
+        // 顺序钉死：先占用单、后券——与核销/释放/过期收场一致。顺序反了就是 AB-BA 死锁对
+        InOrder inOrder = inOrder(couponUsageRepository, userCouponRepository);
+        inOrder.verify(couponUsageRepository).casTimeoutByUsageNo("ORD-1:5");
+        inOrder.verify(userCouponRepository).casTimeoutClose(5L, 42L);
+    }
+
+    @Test
+    @DisplayName("超时收场第二刀砍空（券已被并发改动）→ 抛异常整体回滚，绝不提交\"单关了券没动\"的半截状态")
+    void timeoutCloseCouponCasMissMustRollback() {
+        when(couponUsageRepository.findByUsageNo("ORD-1:5"))
+                .thenReturn(Optional.of(usage(UsageStatus.OCCUPYING, null)));
+        when(userCouponRepository.findById(5L)).thenReturn(Optional.of(coupon(CouponStatus.LOCKED)));
+        when(couponUsageRepository.casTimeoutByUsageNo("ORD-1:5")).thenReturn(true);
+        when(userCouponRepository.casTimeoutClose(5L, 42L)).thenReturn(false);
+
+        assertThatThrownBy(() -> service.timeoutClose("ORD-1:5", NOW))
+                .isInstanceOf(TradeCasRejectedException.class);
+        verify(couponEventRepository, never()).append(any());
     }
 }

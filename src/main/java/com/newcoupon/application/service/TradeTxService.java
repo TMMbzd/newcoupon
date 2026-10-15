@@ -173,10 +173,20 @@ public class TradeTxService {
             return false;   // 券已不在锁定态（异常残留）——不动，交由审计/人工
         }
         CouponStateMachine.transit(coupon.getStatus(), CouponTransition.LOCK_TIMEOUT);   // 快检：LOCKED→USABLE
-        if (!userCouponRepository.casTimeoutClose(coupon.getId(), usage.getUserId())) {
-            return false;   // CAS 输家：核销/释放/过期收场恰好在同瞬间完成
+        // 加锁顺序纪律（2026-10-15 修复死锁对）：先占用单、后券——与核销/释放/过期收场三条链路统一。
+        // 旧版先券后占用单，与那三条正好相反：对方握着占用单行锁等券、本方法握着券行锁等占用单，
+        // 同时进行时形成 AB-BA 死锁（数据库会终止其中一方；核销侧被终止时调用方收 500）。
+        // 第一刀占用单当裁决：砍空 = 有并发者抢先收场（核销/释放/过期收场恰在同瞬间完成）——
+        // 什么都没改，安全返回 false（订单其实说过话，无需收场）。
+        if (!couponUsageRepository.casTimeoutByUsageNo(usageNo)) {
+            return false;
         }
-        couponUsageRepository.casTimeoutByUsageNo(usageNo);
+        // 第二刀券砍空 = 异常残留（持有占用单锁之后，其余链路都被挡在占用单外，理论上无人能再动券）——
+        // 必须抛出让事务整体回滚：绝不能 return false，那会把"占用单已超时关闭、券还锁定"的
+        // 半截状态提交掉（旧版此处忽略返回值还继续写事件，同款隐患一并消除）。
+        if (!userCouponRepository.casTimeoutClose(coupon.getId(), usage.getUserId())) {
+            throw new TradeCasRejectedException("coupon-timeout", coupon.getId());
+        }
         couponEventRepository.append(CouponEvent.lockTimeout(coupon, usage, now));
         return true;
     }
