@@ -7,11 +7,14 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.newcoupon.application.dto.TradeDtos.ConfirmRequest;
 import com.newcoupon.application.dto.TradeDtos.LockRequest;
 import com.newcoupon.application.dto.TradeDtos.LockResult;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
+import com.newcoupon.domain.coupon.CouponStatus;
 import com.newcoupon.domain.coupon.CouponUsage;
+import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.coupon.UsageStatus;
 import com.newcoupon.domain.repository.CouponUsageRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
@@ -95,5 +98,49 @@ class TradeAppServiceTest {
                 .isInstanceOf(BizException.class)
                 .extracting(e -> ((BizException) e).getErrorCode())
                 .isEqualTo(ErrorCode.STATE_CONFLICT);
+    }
+
+    // ════ 核销异常分类边界（2026-10-15 二轮，先红后绿）════
+
+    @Test
+    @DisplayName("老式核销缺金额（无 items 也无 discountAmt）→ 明确的参数错误，而不是拆箱空指针/500")
+    void confirmWithoutItemsOrAmountRejected() {
+        CouponUsage u = usage();
+        when(couponUsageRepository.findByUsageNo("ORD-1:5")).thenReturn(Optional.of(u));
+        when(userCouponRepository.findById(5L)).thenReturn(Optional.of(usableCoupon()));
+
+        // 2 参构造器只传 usageNo、金额传 null——契约要求"items 与 discountAmt 两者必须提供其一"
+        assertThatThrownBy(() -> service.confirm(new ConfirmRequest("ORD-1:5", null)))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("必须提供");
+    }
+
+    @Test
+    @DisplayName("收场竞态：券 CAS 拒绝且过期收场被人抢先 → 仍按\"券已过期\"对外，不泄漏内部 CAS 信号")
+    void confirmExpireOnLockRaceStillClassified() {
+        CouponUsage u = usage();
+        UserCoupon lockedExpired = UserCoupon.reconstitute(5L, 42L, 9L, "T9",
+                2000L, 10000L, null, LocalDateTime.now().minusDays(1), CouponStatus.LOCKED,
+                LocalDateTime.of(2026, 10, 1, 12, 0), "idem-5", 1, "app-A");
+        when(couponUsageRepository.findByUsageNo("ORD-1:5")).thenReturn(Optional.of(u));
+        when(userCouponRepository.findById(5L)).thenReturn(Optional.of(lockedExpired));
+        // 券状态 CAS 被拒（锁定期间过期）→ 编排层走收场路径
+        when(tradeTxService.confirm(any(ConfirmRequest.class), any(), any()))
+                .thenThrow(new TradeCasRejectedException("coupon-confirm", 5L));
+        // 收场又被别人抢先（竞态）——expireOnLock 内部 CAS 同样失败
+        org.mockito.Mockito.doThrow(new TradeCasRejectedException("usage-expire", "ORD-1:5"))
+                .when(tradeTxService).expireOnLock(org.mockito.ArgumentMatchers.eq("ORD-1:5"),
+                        org.mockito.ArgumentMatchers.eq(5L), any());
+
+        assertThatThrownBy(() -> service.confirm(new ConfirmRequest("ORD-1:5", 1000L)))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("过期");
+    }
+
+    /** 造一张待使用的券（仅用于通过核销前置的归属查询） */
+    private static UserCoupon usableCoupon() {
+        return UserCoupon.reconstitute(5L, 42L, 9L, "T9",
+                2000L, 10000L, null, LocalDateTime.now().plusDays(30), CouponStatus.USABLE,
+                LocalDateTime.of(2026, 10, 1, 12, 0), "idem-5", 1, "app-A");
     }
 }

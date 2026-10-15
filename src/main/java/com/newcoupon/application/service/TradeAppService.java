@@ -141,6 +141,15 @@ public class TradeAppService {
     public ConfirmResult confirm(ConfirmRequest req) {
         assertUsageAccessible(req.usageNo());   // S1 越权防线（占用单只带 usageNo，需经券取归属）
 
+        // 契约兜实（TradeDtos 注释："两者必须提供其一，服务层校验"——2026-10-15 二轮补上）：
+        // 老式核销（无 items）必须带正数金额。缺了它，下游 casConfirm(long) 会把 null 拆箱、
+        // 以空指针（500）冒出；在这里变成明确的参数错误。
+        if ((req.items() == null || req.items().isEmpty())
+                && (req.discountAmt() == null || req.discountAmt() <= 0)) {
+            throw new BizException(ErrorCode.PARAM_ERROR,
+                    "核销必须提供 items（平台算钱）或正数 discountAmt（老式金额）其一");
+        }
+
         // ════ 第 2 环：核销由平台算钱 + 出资拆分 ════
         FundingSplit split = null;
         ConfirmRequest txReq = req;   // 不重赋值参数 req（lambda 要求 effectively final）
@@ -189,7 +198,14 @@ public class TradeAppService {
                     UserCoupon fresh = userCouponRepository.findById(usage.getUserCouponId()).orElse(null);
                     if (fresh != null && fresh.getStatus() == CouponStatus.LOCKED
                             && fresh.getValidEnd() != null && !fresh.getValidEnd().isAfter(LocalDateTime.now())) {
-                        tradeTxService.expireOnLock(req.usageNo(), fresh.getId(), LocalDateTime.now());
+                        try {
+                            tradeTxService.expireOnLock(req.usageNo(), fresh.getId(), LocalDateTime.now());
+                        } catch (TradeCasRejectedException | BizException race) {
+                            // 收场竞态（2026-10-15 二轮补）：另一请求已抢先收场（或占用单已非占用中）——
+                            // 对外语义不变（券已过期、单已收场）；不把内部 CAS 信号漏出去
+                            // （未分类的 TradeCasRejectedException 会掉进全局兜底变成 500）
+                            log.warn("expireOnLock superseded by another actor: {}", race.getMessage());
+                        }
                         throw new BizException(ErrorCode.COUPON_EXPIRED,
                                 "锁定期间券已过期（订单号=" + usage.getOrderNo() + "），核销拒绝，占用单已过期关闭");
                     }
