@@ -69,6 +69,13 @@ public final class CouponUsage {
         if (status == UsageStatus.EXPIRED) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT, "占用单已过期关闭，不可核销");
         }
+        // 2026-10-15 补（用户追问"状态一变就让重试、调用方会不会无限重试"时发现）：
+        // 退款后到达的重复核销此前没有分支——它会一路走到 usage CAS 砍空、被编排层分类成
+        // 4002"请刷新后重试"。但 REFUNDED 是死状态（核销永远不可能再成功），
+        // 可重试文案会诱使调用方对死状态无限重试。补明确答复：4004，不可重试。
+        if (status == UsageStatus.REFUNDED) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT, "占用单已退款，不可核销");
+        }
         // L5（2026-09-15）：超时关闭后迟到的核销——独立错误码而非笼统冲突：
         // 订单侧拿到 4006 走无券价/整单退款（券可能已被别的订单用掉，放行=一券两花）
         if (status == UsageStatus.TIMEOUT_CLOSED) {
