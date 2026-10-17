@@ -14,6 +14,7 @@ import com.newcoupon.application.dto.TradeDtos.ReleaseRequest;
 import com.newcoupon.application.dto.TradeDtos.ReleaseResult;
 import com.newcoupon.common.AuditLog;
 import com.newcoupon.common.BizException;
+import com.newcoupon.common.BoundedKey;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.application.service.discount.DiscountCalculatorService;
@@ -97,7 +98,8 @@ public class TradeAppService {
                 .ifPresent(c -> AppOwnership.assertAccessible(c.getAppId(), "coupon:" + c.getId()));
         // 幂等快查（与领券同构）：锁券的幂等证据在占用单（usageNo 唯一），不在券状态上——
         // 必须在进事务前先查，否则事务层对券状态的内存快检会先抛冲突（E2E 抓到的真实Bug）
-        String usageNo = req.orderNo() + ":" + req.couponId();
+        // 与事务层使用同一个有界键：长 orderNo 会被折叠，快查/幂等重建必须用同一规则
+        String usageNo = BoundedKey.usageNo(req.orderNo(), req.couponId());
         var existingUsage = couponUsageRepository.findByUsageNo(usageNo);
         if (existingUsage.isPresent()) {
             // F2（2026-09-15 随 L5 修复）：只有"占用中"才能答"已锁定"——合同已终结
@@ -318,7 +320,8 @@ public class TradeAppService {
     /** 同一订单重复锁同一券的幂等出口：按 usageNo 查占用单（事务外新快照），
      *  仅"占用中"答"已锁定"——终态合同（F2）不能谎报，交由调用方走冲突分类 */
     private LockResult idempotentLock(LockRequest req) {
-        String usageNo = req.orderNo() + ":" + req.couponId();
+        // 与事务层使用同一个有界键：长 orderNo 会被折叠，快查/幂等重建必须用同一规则
+        String usageNo = BoundedKey.usageNo(req.orderNo(), req.couponId());
         return couponUsageRepository.findByUsageNo(usageNo)
                 .filter(u -> u.getStatus() == UsageStatus.OCCUPYING)   // F2：终态不回"已锁定"
                 .map(u -> new LockResult(usageNo, req.couponId(), CouponStatus.LOCKED.getDesc(), true))
@@ -432,7 +435,7 @@ public class TradeAppService {
         // 新调用方必须传自己的退款单号，才能按行多次部分退款且可幂等重放。
         String refundNo = req.refundNo();
         if (refundNo == null || refundNo.isBlank()) {
-            refundNo = com.newcoupon.common.BoundedKey.of("AUTO:", req.usageNo());
+            refundNo = BoundedKey.of("AUTO:", req.usageNo());
         }
         RefundRequest normalized = new RefundRequest(req.usageNo(), refundNo, req.items());
         try {

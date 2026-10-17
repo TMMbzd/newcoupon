@@ -131,8 +131,9 @@ public class TradeTxService {
     /**
      * 核销事务：占用单/券状态 CAS + 事件 + 行级分账落表，全在一个事务里。
      *
-     * @param lineShares 行级分账（2026-10-18 行级版）。空列表 = 老式核销/无 items 的兼容路径，
-     *                   仍写一条订单粒度的分账行（order_line_no 为 NULL）。
+     * @param lineShares 行级分账（2026-10-18 行级版）。空列表 = 有 split 但无行级分摊的兼容路径，
+     *                   写一条订单粒度的分账行（order_line_no 为 NULL）；
+     *                   老式核销 split=null，不写任何分账行（日账单不可见，见 STATUS L68）。
      */
     @Transactional
     public ConfirmResult confirm(ConfirmRequest req, LocalDateTime now, FundingSplit split,
@@ -167,7 +168,7 @@ public class TradeTxService {
         return new ConfirmResult(req.usageNo(), CouponStatus.USED.getDesc(), req.discountAmt(), false);
     }
 
-    /** 订单粒度分账（老式核销的兼容路径：没有行号/行金额/行数量） */
+    /** 订单粒度分账（有 split 但没有行级分摊时的兼容路径：没有行号/行金额/行数量） */
     private void insertOrderLevelShare(ConfirmRequest req, UserCoupon coupon, CouponUsage usage,
                                        FundingSplit split) {
         CouponShareDetailPO share = new CouponShareDetailPO();

@@ -39,6 +39,8 @@ public final class TradeDtos {
     public record ConfirmRequest(
             @NotBlank(message = "usageNo 不能为空") @Size(max = 64, message = "usageNo 最长 64 字符（= 存储列宽）") String usageNo,
             @Min(value = 1, message = "抵扣金额必须为正（单位分）") Long discountAmt,
+            @Valid
+            @Size(max = 100, message = "核销商品最多 100 行")
             List<CalculateRequest.OrderItem> items) {
 
         /** 过渡兼容构造器：老调用方只传 usageNo + discountAmt */

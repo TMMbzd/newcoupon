@@ -94,6 +94,21 @@ class TradeIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(lock.couponStatus()).isEqualTo("已锁定");
     }
 
+    @Test
+    @Timeout(120)
+    @DisplayName("L39+：64 字符 orderNo 重复锁同一券 → 幂等成功（旧版快查键未折叠会误报 4002/5000）")
+    void maxLengthOrderNo_retryIsIdempotent() {
+        long couponId = prepareCoupon();
+        long userId = userCouponRepository.findById(couponId).orElseThrow().getUserId();
+        String orderNo = "R".repeat(64);
+
+        LockResult first = tradeAppService.lock(new LockRequest(orderNo, userId, couponId));
+        LockResult second = tradeAppService.lock(new LockRequest(orderNo, userId, couponId));
+
+        assertThat(second.duplicated()).as("同一订单重复锁同一券应幂等").isTrue();
+        assertThat(second.usageNo()).isEqualTo(first.usageNo());
+    }
+
     private record Res(Object result, String code) {
     }
 
