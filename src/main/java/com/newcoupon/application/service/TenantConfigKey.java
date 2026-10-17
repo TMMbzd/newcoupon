@@ -14,13 +14,13 @@ package com.newcoupon.application.service;
 public enum TenantConfigKey implements ConfigKeySpec {
 
     /** 每秒上限；不配则回落到登记表 open_app.qps_limit（保持 S1 的既有入口） */
-    RATE_LIMIT_QPS("rate_limit.qps", null, Type.INT, "每秒请求上限（0=不限；不配则用登记表的值）"),
+    RATE_LIMIT_QPS("rate_limit.qps", null, Type.INT, "每秒请求上限（0=不限；不配则用登记表的值）", 0, 1_000_000),
 
     /** 每日上限；不配则回落到登记表 open_app.daily_quota */
-    RATE_LIMIT_DAILY_QUOTA("rate_limit.daily_quota", null, Type.INT, "每日请求上限（0=不限；不配则用登记表的值）"),
+    RATE_LIMIT_DAILY_QUOTA("rate_limit.daily_quota", null, Type.INT, "每日请求上限（0=不限；不配则用登记表的值）", 0, 1_000_000_000),
 
     /** 冷启动预热时长（秒）：0 = 不预热 */
-    RATE_LIMIT_WARMUP_SECONDS("rate_limit.warmup_seconds", "0", Type.INT, "冷启动预热时长（秒，0=不预热）"),
+    RATE_LIMIT_WARMUP_SECONDS("rate_limit.warmup_seconds", "0", Type.INT, "冷启动预热时长（秒，0=不预热）", 0, 3600),
 
     /**
      * 未带 X-Timeout-Ms 时的默认时间预算（毫秒）——**下限取重试地板**。
@@ -32,13 +32,13 @@ public enum TenantConfigKey implements ConfigKeySpec {
     TIMEOUT_DEFAULT_MS("timeout.default_ms", "3000", Type.INT, "默认时间预算（毫秒，1200~30000）", 1200, 30_000),
 
     /** 熔断的异常比例阈值（百分比） */
-    CIRCUIT_BREAKER_FAILURE_RATE("circuit_breaker.failure_rate", "50", Type.INT, "熔断：异常比例阈值（%）"),
+    CIRCUIT_BREAKER_FAILURE_RATE("circuit_breaker.failure_rate", "50", Type.INT, "熔断：异常比例阈值（%）", 1, 100),
 
     /** 熔断的慢调用界线（毫秒） */
-    CIRCUIT_BREAKER_SLOW_CALL_MS("circuit_breaker.slow_call_ms", "1000", Type.INT, "熔断：慢调用界线（毫秒）"),
+    CIRCUIT_BREAKER_SLOW_CALL_MS("circuit_breaker.slow_call_ms", "1000", Type.INT, "熔断：慢调用界线（毫秒）", 1, 60_000),
 
     /** 熔断打开后保持多久才允许试探（秒） */
-    CIRCUIT_BREAKER_OPEN_SECONDS("circuit_breaker.open_seconds", "30", Type.INT, "熔断：打开后保持时长（秒）");
+    CIRCUIT_BREAKER_OPEN_SECONDS("circuit_breaker.open_seconds", "30", Type.INT, "熔断：打开后保持时长（秒）", 1, 3600);
 
     /** 配置值的类型——写入时据此校验（**写入严格、读取宽容**） */
     public enum Type { STRING, INT, BOOL }
