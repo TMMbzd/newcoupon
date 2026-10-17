@@ -10,6 +10,8 @@ import com.newcoupon.application.dto.TradeDtos.ReleaseRequest;
 import com.newcoupon.application.dto.TradeDtos.ReleaseResult;
 import com.newcoupon.application.dto.TradeDtos.ConfirmResult;
 import com.newcoupon.application.service.TradeAppService;
+import com.newcoupon.common.BizException;
+import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.Result;
 import com.newcoupon.common.context.OpenResource;
 import com.newcoupon.common.context.SwitchGuard;
@@ -79,7 +81,13 @@ public class TradeController {
     @OpenResource("coupons/query")
     public Result<MyCouponList> myCoupons(@RequestParam long userId,
                                           @RequestParam(required = false) Integer status) {
-        CouponStatus filter = status == null ? null : CouponStatus.of(status);
+        CouponStatus filter;
+        try {
+            filter = status == null ? null : CouponStatus.of(status);
+        } catch (IllegalArgumentException e) {
+            // 非法状态码是参数错误（1000），不是系统错误（5000）
+            throw new BizException(ErrorCode.PARAM_ERROR, "未知的券状态码: " + status);
+        }
         return Result.success(tradeAppService.myCoupons(userId, filter));
     }
 }

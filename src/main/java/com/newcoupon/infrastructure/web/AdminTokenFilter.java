@@ -102,6 +102,6 @@ public class AdminTokenFilter extends OncePerRequestFilter {
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.setCharacterEncoding("UTF-8");
-        response.getWriter().write("{\"code\":7002,\"message\":\"" + message + "\"}");
+        response.getWriter().write("{\"code\":7002,\"message\":\"" + message + "\",\"data\":null}");
     }
 }

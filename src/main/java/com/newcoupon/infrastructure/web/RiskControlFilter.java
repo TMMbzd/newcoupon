@@ -65,7 +65,7 @@ public class RiskControlFilter extends OncePerRequestFilter {
                 // L43（2026-09-29 教学演示实测）：不声明字符集时 Servlet 默认 ISO-8859-1，
                 // 手写的中文响应体变乱码（实测 {"code":7001,"message":"????????????"}）
                 response.setCharacterEncoding("UTF-8");
-                response.getWriter().write("{\"code\":7001,\"message\":\"触发风控频控，请稍后再试\"}");
+                response.getWriter().write("{\"code\":7001,\"message\":\"触发风控频控，请稍后再试\",\"data\":null}");
                 return;
             }
         }
