@@ -96,6 +96,11 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     }
 
     @Override
+    public boolean casReturnOnRefund(long userCouponId, long userId) {
+        return mapper.casReturnOnRefund(userCouponId, userId) == 1;
+    }
+
+    @Override
     public boolean casRelease(long userCouponId, long userId) {
         return mapper.casRelease(userCouponId, userId) == 1;
     }

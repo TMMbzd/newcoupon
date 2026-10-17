@@ -85,10 +85,19 @@ public final class CouponEvent {
                 usage.getOrderNo(), discountAmt, now);
     }
 
-    /** 退款冲销事件（第 2 环） */
+    /** 退款冲销事件（第 2 环，兼容整单退：事件号按 usageNo，天然一次性） */
     public static CouponEvent refund(UserCoupon coupon, CouponUsage usage, long discountAmt, LocalDateTime now) {
+        return refund(coupon, usage, usage.getUsageNo(), discountAmt, now);
+    }
+
+    /**
+     * 行级退款事件（2026-10-18）：一张占用单可以退多次，事件号必须按 refundNo 唯一，
+     * 不能再用 usageNo（第二次部分退款会撞 uk_event_no）。
+     */
+    public static CouponEvent refund(UserCoupon coupon, CouponUsage usage, String refundNo,
+                                     long discountAmt, LocalDateTime now) {
         return new CouponEvent(null,
-                BoundedKey.of("RFD:", usage.getUsageNo()), EventType.REFUNDED,
+                BoundedKey.of("RFD:", refundNo), EventType.REFUNDED,
                 coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
                 usage.getOrderNo(), discountAmt, now);
     }

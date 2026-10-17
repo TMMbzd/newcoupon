@@ -50,7 +50,8 @@ public class AdminTokenFilter extends OncePerRequestFilter {
             "/api/coupons/receive",
             "/api/coupons/lock",
             "/api/coupons/confirm",
-            "/api/coupons/release");
+            "/api/coupons/release",
+            "/api/coupons/refund");
 
     private static final String TOKEN_HEADER = "X-Admin-Token";
 

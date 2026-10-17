@@ -76,6 +76,9 @@ public final class CouponUsage {
         if (status == UsageStatus.REFUNDED) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT, "占用单已退款，不可核销");
         }
+        if (status == UsageStatus.PARTIALLY_REFUNDED) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT, "占用单已部分退款，不可再次核销");
+        }
         // L5（2026-09-15）：超时关闭后迟到的核销——独立错误码而非笼统冲突：
         // 订单侧拿到 4006 走无券价/整单退款（券可能已被别的订单用掉，放行=一券两花）
         if (status == UsageStatus.TIMEOUT_CLOSED) {
@@ -84,13 +87,18 @@ public final class CouponUsage {
     }
 
     /**
-     * 释放前置校验：已核销的占用单绝不允许释放（资损红线：一张券花两次）。
+     * 释放前置校验：已核销/已退款/部分退款的占用单绝不允许释放。
+     * 已支付订单要退钱走退款流程；把售后中的合同当“取消”返回成功，会让调用方误以为订单已取消。
      * 其余终态（已释放/过期关闭/超时关闭）由调用方按幂等成功处理（取消意图已达成）。
      */
     public void checkReleasable() {
         if (status == UsageStatus.CONFIRMED) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
                     "已核销不可释放（已支付订单的退券走退款流程，不改占用单）");
+        }
+        if (status == UsageStatus.REFUNDED || status == UsageStatus.PARTIALLY_REFUNDED) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
+                    "占用单状态=" + status.getDesc() + "，已支付订单不可释放（售后走退款流程）");
         }
     }
 

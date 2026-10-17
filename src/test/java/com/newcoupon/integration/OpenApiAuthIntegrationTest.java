@@ -96,6 +96,23 @@ class OpenApiAuthIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(r.getBody()).contains("\"code\":0");
     }
 
+    @Test
+    @DisplayName("正向：退款路由已接线——签名正确 + 不存在的占用单 → 到达业务并返回 4003")
+    void refundRouteIsWired() {
+        String body = "{\"usageNo\":\"NO-SUCH-USAGE\",\"refundNo\":\"RF-HTTP-1\","
+                + "\"items\":[{\"lineNo\":\"L1\",\"quantity\":1}]}";
+        HttpHeaders headers = signedHeaders(HttpMethod.POST.name(), "/open/v1/coupons/refund", null,
+                body, APP_ID, secret, System.currentTimeMillis(), newNonce());
+        headers.set("X-Client-Token", "refund-route-" + UUID.randomUUID().toString().replace("-", ""));
+        ResponseEntity<String> r = rest.exchange("/open/v1/coupons/refund", HttpMethod.POST,
+                new HttpEntity<>(body, headers), String.class);
+
+        assertThat(r.getStatusCode().value()).as(String.valueOf(r.getBody())).isEqualTo(200);
+        assertThat(r.getBody()).as("路由已到达业务层：占用单不存在由业务码 4003 回答")
+                .contains("\"code\":4003")
+                .contains("NO-SUCH-USAGE");
+    }
+
     // ------------------------------------------------------------------
     // 六条反例：认证链的每一个拒绝点
     // ------------------------------------------------------------------

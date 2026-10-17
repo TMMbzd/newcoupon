@@ -39,6 +39,10 @@ import org.springframework.boot.test.mock.mockito.MockBean;
  *   <li>例7  单品券范围不匹配 → 不可用</li>
  *   <li>例8  综合：品类券 + 全场券跨层叠加 × 范围感知分摊（1600/1066/334）</li>
  *   <li>例9  总优惠封顶 × 多行分摊：分摊合计必须仍等于封顶后的总优惠（本类先红后绿修出的缺口）</li>
+ *   <li>例10 范围券门槛按范围内金额（混单里 FOOD 不足门槛 → 不可用）</li>
+ *   <li>例11 范围满折的折扣基数按范围内金额（食品9折只算 FOOD 金额）</li>
+ *   <li>例12 单行上限与溢出再分配（三行各1分、优惠2分 → 1/0/1）</li>
+ *   <li>例13 同一 SKU 多行用行号区分（不再合并到第一行）</li>
  * </ul>
  */
 class DiscountCasebookTest extends ShardedIntegrationTestSupport {
@@ -288,11 +292,15 @@ class DiscountCasebookTest extends ShardedIntegrationTestSupport {
         assertThat(r.discountAmount()).as("品类券2000 + 全场券1000").isEqualTo(3000L);
         assertThat(r.finalPrice()).isEqualTo(12000L);
         assertThat(r.usedCoupons()).hasSize(2);
-        // 品类券只分给 FOOD 两行（1200 + 800）；全场券按全单比例分（400 + 266 + 余数334）
+        // 品类券只分给 FOOD 两行（1200 + 800），扣完后三行剩余 4800/3200/5000；
+        // 全场券按“进入本层前的剩余金额”分：F1=369、F2=246、D1=385（末行兜底）。
         assertThat(r.allocations()).extracting(CalculateResponse.LineAllocation::skuId)
                 .containsExactly("SKU_F1", "SKU_F2", "SKU_D1");
         assertThat(r.allocations()).extracting(CalculateResponse.LineAllocation::allocatedDiscount)
-                .as("F1=1200+400, F2=800+266, D1=334").containsExactly(1600L, 1066L, 334L);
+                .as("F1=1200+369, F2=800+246, D1=385").containsExactly(1569L, 1046L, 385L);
+        assertThat(r.allocations().get(0).couponShares())
+                .as("行上逐券明细：退款按行 × 券冲回").extracting(CalculateResponse.CouponLineShare::couponId)
+                .containsExactly(9901L, 9902L);
         long sum = r.allocations().stream().mapToLong(CalculateResponse.LineAllocation::allocatedDiscount).sum();
         assertThat(sum).as("分摊合计 = 总优惠").isEqualTo(3000L);
     }
@@ -320,5 +328,91 @@ class DiscountCasebookTest extends ShardedIntegrationTestSupport {
         assertThat(r.allocations()).extracting(CalculateResponse.LineAllocation::allocatedDiscount)
                 .as("店铺券拿满9000、平台券按剩余额度拿1000：行A=6000、行B=4000")
                 .containsExactly(6000L, 4000L);
+    }
+
+    @Test
+    @DisplayName("例10: 范围券门槛按范围内金额——FOOD 30元 + DIGITAL 70元，食品券满50 → 不可用")
+    void case10_scopeThresholdRejectsMixedOrder() {
+        when(templateReader.get(100L)).thenReturn(Optional.of(
+                tplCategory(100L, 2000L, 5000L, "食品满50减20", "[\"FOOD\"]")));
+        when(userCouponRepository.findByIdForUser(9101L, USER)).thenReturn(Optional.of(
+                coupon(9101L, 100L, 2000L, 5000L, null)));
+
+        CalculateRequest req = new CalculateRequest(USER,
+                List.of(line("SKU_F1", "FOOD", 3000L), line("SKU_D1", "DIGITAL", 7000L)),
+                List.of(9101L));
+        CalculateResponse r = service.calculate(req, NOW);
+
+        assertThat(r.discountAmount()).as("整单100元不算数，FOOD 只有30元").isEqualTo(0L);
+        assertThat(r.unusableCoupons()).hasSize(1);
+        assertThat(r.unusableCoupons().get(0).reason()).contains("未达使用门槛");
+    }
+
+    @Test
+    @DisplayName("例11: 范围满折的折扣基数按范围内金额——食品9折 × FOOD 60元 → 优惠6元")
+    void case11_scopeDiscountBaseUsesScopeAmount() {
+        CouponTemplate foodRate = CouponTemplate.create(CouponTemplate.Creation.builder()
+                .templateCode("T101").activityId(1L).name("食品9折")
+                .couponType(CouponType.DISCOUNT).faceValue(9000L).discountCap(5000L).threshold(5000L)
+                .totalCount(100L).perUserLimit(1).dailyLimit(0L).perUserDailyLimit(0)
+                .validType(ValidType.FIXED)
+                .validStart(LocalDateTime.of(2026, 1, 1, 0, 0))
+                .validEnd(LocalDateTime.of(2026, 12, 31, 23, 59, 59))
+                .appId(APP)
+                .applicableScope(ApplicableScope.CATEGORY)
+                .scopeIds("[\"FOOD\"]")
+                .build());
+        when(templateReader.get(101L)).thenReturn(Optional.of(foodRate));
+        when(userCouponRepository.findByIdForUser(9102L, USER)).thenReturn(Optional.of(
+                coupon(9102L, 101L, 9000L, 5000L, 5000L)));
+
+        CalculateRequest req = new CalculateRequest(USER,
+                List.of(line("SKU_F1", "FOOD", 6000L), line("SKU_D1", "DIGITAL", 7000L)),
+                List.of(9102L));
+        CalculateResponse r = service.calculate(req, NOW);
+
+        assertThat(r.discountAmount()).as("FOOD 60元 × 10% = 6元，不是整单130元 × 10%").isEqualTo(600L);
+        assertThat(r.allocations().get(0).allocatedDiscount()).isEqualTo(600L);
+        assertThat(r.allocations().get(1).allocatedDiscount()).isEqualTo(0L);
+    }
+
+    @Test
+    @DisplayName("例12: 单行上限与溢出再分配——三行各1分、优惠2分 → 1/0/1（每行不超1，合计=2）")
+    void case12_perLineCapAndOverflowRedistribution() {
+        when(templateReader.get(102L)).thenReturn(Optional.of(
+                tpl(102L, CouponType.NO_THRESHOLD, 2L, null, 0L, "立减2分")));
+        when(userCouponRepository.findByIdForUser(9103L, USER)).thenReturn(Optional.of(
+                coupon(9103L, 102L, 2L, 0L, null)));
+
+        CalculateRequest req = new CalculateRequest(USER,
+                List.of(line("SKU_A", "CAT1", 1L), line("SKU_B", "CAT1", 1L), line("SKU_C", "CAT1", 1L)),
+                List.of(9103L));
+        CalculateResponse r = service.calculate(req, NOW);
+
+        assertThat(r.discountAmount()).isEqualTo(2L);
+        assertThat(r.allocations()).extracting(CalculateResponse.LineAllocation::allocatedDiscount)
+                .as("末行装不下2分：装满1分，溢出1分补给第一行").containsExactly(1L, 0L, 1L);
+        assertThat(r.allocations()).allSatisfy(a ->
+                assertThat(a.allocatedDiscount()).isLessThanOrEqualTo(a.lineAmount()));
+    }
+
+    @Test
+    @DisplayName("例13: 同一 SKU 多行用行号区分——6000/4000 两行分摊 1200/800，不再合并到第一行")
+    void case13_sameSkuMultipleLinesUseLineNo() {
+        when(templateReader.get(103L)).thenReturn(Optional.of(
+                tpl(103L, CouponType.FULL_REDUCTION, 2000L, null, 10000L, "满100减20")));
+        when(userCouponRepository.findByIdForUser(9104L, USER)).thenReturn(Optional.of(
+                coupon(9104L, 103L, 2000L, 10000L, null)));
+
+        CalculateRequest req = new CalculateRequest(USER,
+                List.of(new CalculateRequest.OrderItem("SKU_SAME", "CAT1", 6000L, 1, "LINE-1"),
+                        new CalculateRequest.OrderItem("SKU_SAME", "CAT1", 4000L, 1, "LINE-2")),
+                List.of(9104L));
+        CalculateResponse r = service.calculate(req, NOW);
+
+        assertThat(r.allocations()).extracting(CalculateResponse.LineAllocation::lineNo)
+                .containsExactly("LINE-1", "LINE-2");
+        assertThat(r.allocations()).extracting(CalculateResponse.LineAllocation::allocatedDiscount)
+                .containsExactly(1200L, 800L);
     }
 }

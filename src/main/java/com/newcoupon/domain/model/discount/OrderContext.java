@@ -95,16 +95,28 @@ public final class OrderContext {
      * </ul>
      */
     public static final class OrderItem {
+        /** 商品行号（订单侧行标识；试算/核销/退款三处必须同一个值） */
+        private final String lineNo;
         private final String skuId;
         private final String categoryId;
         private final Long price;
         private final Integer quantity;
 
+        /** 兼容旧调用方：不传行号（行级能力需要行号时由引擎按顺序生成 L1/L2/...） */
         public OrderItem(String skuId, String categoryId, Long price, Integer quantity) {
+            this(null, skuId, categoryId, price, quantity);
+        }
+
+        public OrderItem(String lineNo, String skuId, String categoryId, Long price, Integer quantity) {
+            this.lineNo = lineNo;
             this.skuId = skuId;
             this.categoryId = categoryId;
             this.price = price;
             this.quantity = quantity;
+        }
+
+        public String getLineNo() {
+            return lineNo;
         }
 
         public String getSkuId() {

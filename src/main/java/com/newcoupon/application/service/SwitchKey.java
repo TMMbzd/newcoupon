@@ -34,6 +34,9 @@ public enum SwitchKey implements ConfigKeySpec {
     /** 释放开关——订单取消/超时释放入口 */
     TRADE_RELEASE("trade.release.enabled", "释放入口开关（关闭后释放返回 5001）", true),
 
+    /** 退款开关——支付成功后的退款冲销入口（含按行部分退款） */
+    TRADE_REFUND("trade.refund.enabled", "退款入口开关（关闭后退款返回 5001）", true),
+
     /** 建券发布开关——关掉后不能再发布新券（已发布的券照常发放） */
     TEMPLATE_PUBLISH("template.publish.enabled", "券模板发布开关（关闭后不可发布新券）", true),
 

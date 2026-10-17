@@ -56,6 +56,9 @@ public interface UserCouponRepository {
     /** 核销（CAS）：已锁定→已核销（终态）。返回是否成功 */
     boolean casConfirm(long userCouponId, long userId);
 
+    /** 整单退款退券（CAS）：已核销→(未过期?待使用:已过期)——部分退款不走这里 */
+    boolean casReturnOnRefund(long userCouponId, long userId);
+
     /**
      * 释放（CAS）：已锁定→(未过期?待使用:已过期)——释放时券若已过期直接进过期态，
      * 不能退回"待使用"（否则出现"能用的过期券"）。返回是否成功

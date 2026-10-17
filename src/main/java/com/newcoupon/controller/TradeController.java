@@ -4,6 +4,8 @@ import com.newcoupon.application.dto.TradeDtos.ConfirmRequest;
 import com.newcoupon.application.dto.TradeDtos.LockRequest;
 import com.newcoupon.application.dto.TradeDtos.LockResult;
 import com.newcoupon.application.dto.TradeDtos.MyCouponList;
+import com.newcoupon.application.dto.TradeDtos.RefundRequest;
+import com.newcoupon.application.dto.TradeDtos.RefundResult;
 import com.newcoupon.application.dto.TradeDtos.ReleaseRequest;
 import com.newcoupon.application.dto.TradeDtos.ReleaseResult;
 import com.newcoupon.application.dto.TradeDtos.ConfirmResult;
@@ -59,6 +61,17 @@ public class TradeController {
     @SwitchGuard(SwitchKey.TRADE_RELEASE)
     public Result<ReleaseResult> release(@Valid @RequestBody ReleaseRequest req) {
         return Result.success(tradeAppService.release(req));
+    }
+
+    /**
+     * 退款冲销（支持按商品行 + 数量的部分退款）。
+     * 不传 items = 退剩余全部；同一 refundNo 重放返回首次结果。
+     */
+    @PostMapping("/refund")
+    @OpenResource("coupons/refund")
+    @SwitchGuard(SwitchKey.TRADE_REFUND)
+    public Result<RefundResult> refund(@Valid @RequestBody RefundRequest req) {
+        return Result.success(tradeAppService.refund(req));
     }
 
     /** 我的券包（status 可选：0待使用 1已锁定 2已核销 3已过期 4已作废） */

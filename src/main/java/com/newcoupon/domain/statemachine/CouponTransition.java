@@ -15,8 +15,11 @@ public enum CouponTransition {
     RECEIVE(null, CouponStatus.USABLE, "领券成功"),
     /** 下单锁券（占用开始） */
     LOCK(CouponStatus.USABLE, CouponStatus.LOCKED, "下单锁券"),
-    /** 支付成功核销（券的死亡，终态） */
+    /** 支付成功核销（正常业务下不再有出边；唯一例外见 REFUND_RETURN） */
     CONFIRM(CouponStatus.LOCKED, CouponStatus.USED, "支付成功核销"),
+    /** 整单退款退券（2026-10-18 政策）：已核销→待使用；券已过期时由 SQL 的 IF 分流到已过期。
+     *  部分退款不走这条边（券保持已核销）。 */
+    REFUND_RETURN(CouponStatus.USED, CouponStatus.USABLE, "整单退款退券"),
     /** 订单取消/支付超时释放（由占用单状态驱动，未过期则回可用） */
     RELEASE(CouponStatus.LOCKED, CouponStatus.USABLE, "订单取消释放"),
     /** 锁定超时收场（L5）：订单在窗口内既未核销也未释放（消息丢失/调用方死亡）——系统兜底。

@@ -61,6 +61,10 @@ coupon:
     lock-timeout-minutes: ${LOCK_TIMEOUT_MINUTES:30}
     max-discount-ratio: ${MAX_DISCOUNT_RATIO:80}
     confirm-rate-per-minute: ${CONFIRM_RATE_PER_MINUTE:600}
+    # 部分退款次数上限（对齐微信支付单品退款：同一笔最多 50 次）
+    max-refund-times: ${MAX_REFUND_TIMES:50}
+    # 一券最多退券次数（整单退款且券在有效期内才退；防“下单-退款-再用”刷券）
+    max-return-times: ${MAX_RETURN_TIMES:3}
   # ADR-0009 守恒对账：修复模式 force|shadow（影子=推导落表不执行，v3 修订8 先行 1-2 周）
   reconcile:
     auto-repair:

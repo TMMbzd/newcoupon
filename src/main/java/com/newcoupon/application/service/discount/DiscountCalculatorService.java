@@ -21,26 +21,37 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
-import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
- * 优惠计算引擎（Phase 1 完整版：互斥组 + 递进门槛 + 范围感知分摊）。
+ * 优惠计算引擎（2026-10-18 行业标准版：范围金额口径 + 行号 + 逐行逐券分摊）。
  *
- * 三项完整版能力（此前是轻量版）：
- * ① 互斥组：同层内同组互斥（选最优一张），不同组可叠加——不再是"每层只选一张"
- * ② 递进门槛：PLATFORM 层门槛按 SHOP 层折后价判断——不再是"都按原价判断"
- * ③ 范围感知分摊：每张券的优惠只分给它范围内商品——不再是"全部按总额分摊"
+ * <p>相对旧版的四处变化：
+ * <ol>
+ *   <li><b>门槛/折扣基数按“券适用范围内、进入本层前的有效金额”</b>——品类券不再按整单金额算；
+ *       全场券的范围就是整单。递进门槛（SHOP 先减、PLATFORM 后减）自然落到“本层前的行剩余金额”上。</li>
+ *   <li><b>每一层优惠按“进入本层前的行剩余金额”比例分摊</b>——不是所有层都按原始行金额分摊；
+ *       与行业“逐层扣减、逐层分摊”一致。</li>
+ *   <li><b>单行不超过该行剩余金额</b>——前 n-1 行向下取整、末行兜底；末行溢出（最多 n-1 分）
+ *       再补给还有余量的行，保证“行分摊合计 = 实际优惠”。</li>
+ *   <li><b>行号与逐券明细</b>——同一 SKU 多行不再按 skuId 合并；响应里每行带 lineNo 和
+ *       每张券各分了多少（退款按行 × 券冲回）。</li>
+ * </ol>
  */
 @Service
 public class DiscountCalculatorService {
 
     private static final Logger log = LoggerFactory.getLogger(DiscountCalculatorService.class);
 
-    /** 层级处理顺序：SHOP 先算（门槛按原价），PLATFORM 后算（门槛按折后价） */
+    /** 层级处理顺序：SHOP 先算（门槛按原价），PLATFORM 后算（门槛按折后剩余额） */
     private static final List<StackingLayer> LAYER_ORDER = List.of(StackingLayer.SHOP, StackingLayer.PLATFORM);
 
     private final List<EligibilityChecker> checkers;
@@ -64,342 +75,465 @@ public class DiscountCalculatorService {
     }
 
     CalculateResponse calculate(CalculateRequest request, LocalDateTime now) {
-        OrderContext context = buildOrderContext(request, now);
-        long orderAmount = context.getOrderAmount();
+        List<Line> lines = toLines(request.items());
+        OrderContext context = toContext(request.userId(), lines, now);
 
+        Map<Long, String> unusable = new LinkedHashMap<>();
         List<CandidateCoupon> candidates = new ArrayList<>();
-        List<CalculateResponse.CouponReason> unusable = new ArrayList<>();
-
-        // ════ Phase 1：逐张独立检查（时间/状态/归属/范围）——不含门槛 ════
         for (Long couponId : request.couponIds()) {
-            CandidateCoupon cc = checkCoupon(couponId, request.userId(), context, unusable);
+            CandidateCoupon cc = checkCoupon(couponId, request.userId(), context, lines, unusable);
             if (cc != null) {
                 candidates.add(cc);
             }
         }
 
-        // ════ Phase 2：按层顺序处理（SHOP→PLATFORM），含递进门槛 + 互斥组 ════
-        long remaining = orderAmount;
-        List<CandidateCoupon> usedCoupons = new ArrayList<>();
+        StackResult stack = runStack(candidates, lines, now, unusable);
+        long orderAmount = lines.stream().mapToLong(Line::amount).sum();
+        long totalDiscount = stack.totalDiscount();
 
-        for (StackingLayer layer : LAYER_ORDER) {
-            List<CandidateCoupon> layerCandidates = candidates.stream()
-                    .filter(cc -> cc.template().getStackingLayer() == layer)
-                    .toList();
-            if (layerCandidates.isEmpty()) {
-                continue;
-            }
-
-            List<CandidateCoupon> passing = new ArrayList<>();
-
-            for (CandidateCoupon cc : layerCandidates) {
-                long threshold = cc.coupon().getThreshold();
-                // 门槛基准：本层第一张时按原价，本层后续或下一层时按递进后的剩余额
-                // 简化实现：整个层的门槛都按 currentAmount 检查（层内所有券共知同一基准）
-                if (remaining < threshold) {
-                    unusable.add(new CalculateResponse.CouponReason(
-                            cc.coupon().getId(),
-                            String.format("订单金额未达使用门槛（需满%.2f元，当前%.2f元）",
-                                    threshold / 100.0, remaining / 100.0)));
-                    continue;
-                }
-
-                DiscountStrategy strategy = strategies.get(cc.template().getCouponType().name());
-                if (strategy == null) {
-                    throw new IllegalStateException("未注册的券类型策略：" + cc.template().getCouponType());
-                }
-                long discount = strategy.calculate(cc.coupon(), context);
-                if (discount > 0) {
-                    passing.add(new CandidateCoupon(cc.coupon(), cc.template(), discount, cc.scopeItems()));
-                } else {
-                    unusable.add(new CalculateResponse.CouponReason(cc.coupon().getId(), "订单金额为 0，无优惠可用"));
-                }
-            }
-
-            // 互斥组择优：同组选最优一张，不同组可叠加
-            List<CandidateCoupon> winners = selectByExclusionGroups(passing, layer);
-            usedCoupons.addAll(winners);
-
-            long layerDiscount = winners.stream().mapToLong(CandidateCoupon::discount).sum();
-            remaining -= layerDiscount;
-        }
-
-        // ════ Phase 3：总优惠封顶 ════
-        long sumDiscounts = usedCoupons.stream().mapToLong(CandidateCoupon::discount).sum();
-        long totalDiscount = Math.min(sumDiscounts, orderAmount);
-
-        // 封顶生效时（各券折扣之和超过订单金额）：按"券的处理顺序"裁剪每张券的实际计入金额——
-        // 先处理的层拿满、后处理的层拿剩余额度（与"叠加按层依次应用"的语义一致）。
-        // 没有这段，分摊与响应里的单券金额会按裁剪前的券面来算，出现"分摊合计 > 实际总优惠"
-        // 的账目矛盾（2026-10-16 例题全集编写时先红后绿修出，DiscountCasebookTest 例9 钉住）。
-        List<CandidateCoupon> effectiveCoupons = usedCoupons;
-        if (totalDiscount < sumDiscounts) {
-            effectiveCoupons = new ArrayList<>();
-            long budget = totalDiscount;
-            for (CandidateCoupon cc : usedCoupons) {
-                long take = Math.min(cc.discount(), budget);
-                budget -= take;
-                effectiveCoupons.add(take == cc.discount() ? cc
-                        : new CandidateCoupon(cc.coupon(), cc.template(), take, cc.scopeItems()));
-            }
-        }
-
-        // ════ Phase 4：范围感知分摊（每张券只分给它范围内的商品）════
-        List<CalculateResponse.LineAllocation> allocations =
-                effectiveCoupons.isEmpty() ? List.of() : allocateWithScopes(context.getItems(), effectiveCoupons);
-
-        // ════ 构建响应 ════
-        List<CalculateResponse.CouponUsage> usageList = effectiveCoupons.stream()
-                .map(cc -> new CalculateResponse.CouponUsage(
-                        cc.coupon().getId(),
-                        cc.template().getName(),
-                        cc.template().getStackingLayer().name(),
-                        cc.discount()))
+        List<CalculateResponse.CouponUsage> usageList = stack.applied().stream()
+                .map(a -> new CalculateResponse.CouponUsage(
+                        a.candidate().coupon().getId(),
+                        a.candidate().template().getName(),
+                        a.candidate().template().getStackingLayer().name(),
+                        a.effectiveDiscount()))
                 .toList();
 
-        long finalPrice = orderAmount - totalDiscount;
-        return new CalculateResponse(orderAmount, totalDiscount, finalPrice,
-                usageList, allocations, unusable);
+        List<CalculateResponse.LineAllocation> allocations = buildAllocations(lines, stack);
+
+        List<CalculateResponse.CouponReason> unusableList = unusable.entrySet().stream()
+                .map(e -> new CalculateResponse.CouponReason(e.getKey(), e.getValue()))
+                .toList();
+
+        return new CalculateResponse(orderAmount, totalDiscount, orderAmount - totalDiscount,
+                usageList, allocations, unusableList);
     }
 
     // ════ 核销算钱 ════
 
-    public record ConfirmCalculation(long discountAmt, CouponTemplate template) {}
+    /** 核销结果：本券实际优惠 + 模板 + 本券在每行上的分摊（核销事务按行落库） */
+    public record ConfirmCalculation(long discountAmt, CouponTemplate template,
+                                     List<ConfirmLineShare> lineShares) {
+        /** 兼容旧调用方/旧测试：只关心总额与模板 */
+        public ConfirmCalculation(long discountAmt, CouponTemplate template) {
+            this(discountAmt, template, List.of());
+        }
+    }
 
+    /** 一张券在一行商品上的分摊（退款按行 × 券冲回的最小单位） */
+    public record ConfirmLineShare(String lineNo, String skuId, long lineAmount,
+                                   int quantity, long discountAmt) {
+    }
+
+    /**
+     * 单券核销复算（兼容入口）：只拿这一张券算。没有订单级上下文时使用。
+     */
     public ConfirmCalculation calculateForConfirm(UserCoupon coupon,
             List<CalculateRequest.OrderItem> items) {
-        long orderAmount = items.stream().mapToLong(i -> i.price() * i.quantity()).sum();
-        List<OrderContext.OrderItem> orderItems = items.stream()
-                .map(i -> new OrderContext.OrderItem(i.skuId(), i.categoryId(), i.price(), i.quantity()))
-                .toList();
-        OrderContext context = OrderContext.builder()
-                .userId(coupon.getUserId())
-                .orderAmount(orderAmount)
-                .items(orderItems)
-                .now(LocalDateTime.now())
-                .build();
+        return calculateForOrderConfirm(coupon.getId(), List.of(coupon), items);
+    }
 
-        CouponTemplate template = templateReader.get(coupon.getTemplateId())
-                .orElseThrow(() -> new IllegalArgumentException("模板不存在或已删除: " + coupon.getTemplateId()));
+    /**
+     * 订单级核销复算（L64 修复，2026-10-18）：把同一订单里全部已锁/已核销的券放回同一栈，
+     * 按与试算完全相同的“层序 + 互斥组 + 递进门槛 + 范围金额 + 逐行分摊”算法复算，
+     * 再取当前券的份额。
+     *
+     * <p>为什么必须带订单级上下文：试算时平台券的门槛按“店铺券折后的剩余额”判，
+     * 单券核销时若按整单原价判，会把试算已拒的券放过去（核销口径比试算松）。
+     * 把同订单全部占用单找回来一起复算，两条入口才是同一把尺子。
+     *
+     * <p>不跑时间/状态检查器：调用方已确认当前占用单处于占用中；兄弟券处于已锁定/已核销，
+     * 它们在试算时已经过了时间/状态检查，这里只用它们的规则快照参与叠加。
+     */
+    public ConfirmCalculation calculateForOrderConfirm(long currentCouponId,
+            List<UserCoupon> orderCoupons, List<CalculateRequest.OrderItem> items) {
+        List<Line> lines = toLines(items);
+        Map<Long, String> reasons = new LinkedHashMap<>();
+        Set<Long> excluded = new LinkedHashSet<>();
 
-        // ════ 核销复核（2026-10-15 补，与试算同口径）════
-        // ①门槛：券快照门槛 vs 平台侧订单金额——与 ThresholdChecker 一致取券快照
-        //   （防"模板改规则，历史券跟着变性"）；时间/状态的守卫在核销 CAS 的 SQL 谓词里
-        //   （user_coupon.casConfirm 的 valid_end > NOW()），这里补 Java 层缺的两道。
-        // ②范围：订单里至少要有一件商品落在券的适用范围内（与试算的 checkCoupon 同规则）。
-        // 没有这两道复核时：调用方锁券后用一个不达门槛/范围外的订单明细就能把券核销掉——
-        // "平台算钱"的前提，是平台先确认这张券真的能用在这单上（试算拒了、核销放行=口径分裂）。
-        long threshold = coupon.getThreshold();
-        if (orderAmount < threshold) {
-            throw new BizException(ErrorCode.COUPON_NOT_USABLE,
-                    String.format("订单金额未达使用门槛（需满%.2f元，当前%.2f元），拒绝核销",
-                            threshold / 100.0, orderAmount / 100.0));
-        }
-        List<OrderContext.OrderItem> scopeItems = filterScopeItems(template, context);
-        if (template.getApplicableScope() != ApplicableScope.ALL && scopeItems.isEmpty()) {
-            throw new BizException(ErrorCode.COUPON_NOT_USABLE,
-                    "商品不在券的适用范围内（" + template.getApplicableScope().getDesc() + "），拒绝核销");
+        List<CandidateCoupon> candidates = new ArrayList<>();
+        for (UserCoupon coupon : orderCoupons) {
+            var templateOpt = templateReader.get(coupon.getTemplateId());
+            if (templateOpt.isEmpty()) {
+                if (coupon.getId() != null && coupon.getId() == currentCouponId) {
+                    throw new IllegalArgumentException("模板不存在或已删除: " + coupon.getTemplateId());
+                }
+                continue;
+            }
+            CouponTemplate template = templateOpt.get();
+            int[] scope = scopeIndices(template, lines);
+            if (template.getApplicableScope() != ApplicableScope.ALL && scope.length == 0) {
+                reasons.put(coupon.getId(), "商品不在券的适用范围内（"
+                        + template.getApplicableScope().getDesc() + "），拒绝核销");
+                continue;
+            }
+            candidates.add(new CandidateCoupon(coupon, template, scope));
         }
 
-        DiscountStrategy strategy = strategies.get(template.getCouponType().name());
-        if (strategy == null) {
-            throw new IllegalStateException("未注册的券类型策略：" + template.getCouponType());
+        StackResult stack = runStack(candidates, lines, LocalDateTime.now(), reasons);
+        AppliedCoupon current = stack.applied().stream()
+                .filter(a -> a.candidate().coupon().getId() == currentCouponId)
+                .findFirst().orElse(null);
+        if (current == null) {
+            String reason = reasons.get(currentCouponId);
+            if (reason == null && excluded.contains(currentCouponId)) {
+                reason = "同订单其他券在本层互斥中更优，当前券不可核销";
+            }
+            if (reason == null) {
+                reason = "同订单其他券叠加后可用额度不足，当前券不可核销";
+            }
+            throw new BizException(ErrorCode.COUPON_NOT_USABLE, reason);
         }
-        return new ConfirmCalculation(strategy.calculate(coupon, context), template);
+
+        List<ConfirmLineShare> shares = new ArrayList<>();
+        for (int i = 0; i < lines.size(); i++) {
+            long discount = current.shares()[i];
+            if (discount > 0) {
+                Line line = lines.get(i);
+                shares.add(new ConfirmLineShare(line.lineNo(), line.skuId(), line.amount(),
+                        line.quantity(), discount));
+            }
+        }
+        return new ConfirmCalculation(current.effectiveDiscount(), current.candidate().template(), shares);
     }
 
     // ════ 私有方法 ════
 
-    private OrderContext buildOrderContext(CalculateRequest request, LocalDateTime now) {
-        long orderAmount = request.items().stream()
-                .mapToLong(item -> item.price() * item.quantity())
-                .sum();
-        List<OrderContext.OrderItem> orderItems = request.items().stream()
-                .map(item -> new OrderContext.OrderItem(
-                        item.skuId(), item.categoryId(), item.price(), item.quantity()))
-                .toList();
-        return OrderContext.builder()
-                .userId(request.userId())
-                .orderAmount(orderAmount)
-                .items(orderItems)
-                .now(now)
-                .build();
-    }
-
-    /** 单张券的独立检查（查券→归属→模板→时间/状态→范围），不含门槛 */
-    private CandidateCoupon checkCoupon(Long couponId, Long userId,
-                                        OrderContext context,
-                                        List<CalculateResponse.CouponReason> unusable) {
-        // 查券
+    /** 单张券的独立检查（查券→归属→模板→时间/状态→范围），不含门槛（门槛在层处理时按范围金额判） */
+    private CandidateCoupon checkCoupon(Long couponId, Long userId, OrderContext context,
+                                        List<Line> lines, Map<Long, String> unusable) {
         var found = userCouponRepository.findByIdForUser(couponId, userId);
         if (found.isEmpty()) {
-            unusable.add(new CalculateResponse.CouponReason(couponId, "券不存在或不可见"));
+            unusable.put(couponId, "券不存在或不可见");
             return null;
         }
         UserCoupon coupon = found.get();
 
-        // 归属校验
         String callerAppId = AppOwnership.currentAppId();
         if (callerAppId != null && !callerAppId.equals(coupon.getAppId())) {
             log.warn("OWNERSHIP_VIOLATION appId={} 探测非本租户券 couponId={}", callerAppId, couponId);
-            unusable.add(new CalculateResponse.CouponReason(couponId, "券不存在或不可见"));
+            unusable.put(couponId, "券不存在或不可见");
             return null;
         }
 
-        // 查模板
         var templateOpt = templateReader.get(coupon.getTemplateId());
         if (templateOpt.isEmpty()) {
-            unusable.add(new CalculateResponse.CouponReason(couponId, "模板不存在或已删除"));
+            unusable.put(couponId, "模板不存在或已删除");
             return null;
         }
         CouponTemplate template = templateOpt.get();
 
-        // 时间/状态校验（不含门槛——门槛在层处理时检查）
         for (EligibilityChecker checker : checkers) {
             Result<Void> result = checker.check(coupon, context);
             if (result.getCode() != ErrorCode.SUCCESS.getCode()) {
-                // 门槛校验器的结果在递进模式下不在此处理（跳过）
-                // 但当前 checker 链里 ThresholdChecker 也在里面，需要区分
-                // 简化方案：这里只做时间+状态，门槛独立检查
+                // 门槛校验器留到层处理时判（它需要“本券范围内的剩余金额”，不是整单金额）
                 if (result.getMessage().contains("门槛")) {
-                    continue; // 门槛留到层处理时判
+                    continue;
                 }
-                unusable.add(new CalculateResponse.CouponReason(couponId, result.getMessage()));
+                unusable.put(couponId, result.getMessage());
                 return null;
             }
         }
 
-        // 范围校验 + 收集范围内的商品行
-        List<OrderContext.OrderItem> scopeItems = filterScopeItems(template, context);
-        if (template.getApplicableScope() != ApplicableScope.ALL && scopeItems.isEmpty()) {
-            unusable.add(new CalculateResponse.CouponReason(couponId,
-                    "商品不在券的适用范围内（" + template.getApplicableScope().getDesc() + "）"));
+        int[] scope = scopeIndices(template, lines);
+        if (template.getApplicableScope() != ApplicableScope.ALL && scope.length == 0) {
+            unusable.put(couponId, "商品不在券的适用范围内（"
+                    + template.getApplicableScope().getDesc() + "）");
             return null;
         }
-
-        return new CandidateCoupon(coupon, template, 0, scopeItems);
+        return new CandidateCoupon(coupon, template, scope);
     }
 
-    /** 互斥组择优：同层内，同组选最优一张，不同组（含无组）可叠加 */
-    private List<CandidateCoupon> selectByExclusionGroups(
-            List<CandidateCoupon> passing, StackingLayer layer) {
-        Map<String, List<CandidateCoupon>> byGroup = new HashMap<>();
-        for (CandidateCoupon cc : passing) {
-            String group = cc.template().getExclusionGroup();
+    /**
+     * 按层跑完整叠加栈：门槛按“本券范围内、进入本层前的行剩余金额”判；
+     * 同层按互斥组择优；中选券按行分摊并扣减行剩余金额；下一层看到的是扣减后的金额。
+     */
+    private StackResult runStack(List<CandidateCoupon> candidates, List<Line> lines,
+                                 LocalDateTime now, Map<Long, String> reasons) {
+        long[] remaining = new long[lines.size()];
+        for (int i = 0; i < lines.size(); i++) {
+            remaining[i] = lines.get(i).amount();
+        }
+        List<AppliedCoupon> applied = new ArrayList<>();
+        Set<Long> excluded = new LinkedHashSet<>();
+
+        for (StackingLayer layer : LAYER_ORDER) {
+            List<PricedCandidate> priced = new ArrayList<>();
+            for (CandidateCoupon cc : candidates) {
+                if (cc.template().getStackingLayer() != layer) {
+                    continue;
+                }
+                long scopeBase = sumRemaining(cc.scopeIndices(), remaining);
+                if (scopeBase <= 0) {
+                    reasons.put(cc.coupon().getId(), "订单金额为 0，无优惠可用");
+                    continue;
+                }
+                long threshold = cc.coupon().getThreshold();
+                if (scopeBase < threshold) {
+                    reasons.put(cc.coupon().getId(), String.format(
+                            "订单金额未达使用门槛（需满%.2f元，当前%.2f元）",
+                            threshold / 100.0, scopeBase / 100.0));
+                    continue;
+                }
+                DiscountStrategy strategy = strategies.get(cc.template().getCouponType().name());
+                if (strategy == null) {
+                    throw new IllegalStateException("未注册的券类型策略：" + cc.template().getCouponType());
+                }
+                long nominal = strategy.calculate(cc.coupon(),
+                        scopedContext(scopeBase, lines, now));
+                if (nominal <= 0) {
+                    reasons.put(cc.coupon().getId(), "订单金额为 0，无优惠可用");
+                    continue;
+                }
+                priced.add(new PricedCandidate(cc, nominal));
+            }
+
+            List<PricedCandidate> winners = selectWinners(priced, excluded);
+            // 同层多个互斥组都中选时，按券 ID 升序依次应用——顺序固定，逐行分摊结果才可复现
+            winners.sort(Comparator.comparingLong(w -> w.candidate().coupon().getId()));
+            for (PricedCandidate winner : winners) {
+                long[] shares = allocate(winner.nominalDiscount(), winner.candidate().scopeIndices(), remaining);
+                long effective = Arrays.stream(shares).sum();
+                if (effective <= 0) {
+                    reasons.put(winner.candidate().coupon().getId(), "可用额度不足，未产生优惠");
+                    continue;
+                }
+                for (int i = 0; i < remaining.length; i++) {
+                    remaining[i] -= shares[i];
+                }
+                applied.add(new AppliedCoupon(winner.candidate(), effective, shares));
+            }
+        }
+        return new StackResult(applied, reasons, excluded);
+    }
+
+    /** 同层互斥组择优：同组选优惠最大的；同额取 ID 小的；不同组（含无组）可叠加 */
+    private List<PricedCandidate> selectWinners(List<PricedCandidate> priced, Set<Long> excluded) {
+        Map<String, List<PricedCandidate>> byGroup = new LinkedHashMap<>();
+        for (PricedCandidate p : priced) {
+            String group = p.candidate().template().getExclusionGroup();
             String key = (group == null || group.isBlank())
-                    ? "__default__"  // 无组 = 默认互斥（同层无组互斥，业界标准）
+                    ? "__default__"   // 无组 = 默认互斥（同层无组互斥，业界标准）
                     : group;
-            byGroup.computeIfAbsent(key, k -> new ArrayList<>()).add(cc);
+            byGroup.computeIfAbsent(key, k -> new ArrayList<>()).add(p);
         }
 
-        List<CandidateCoupon> winners = new ArrayList<>();
-        for (List<CandidateCoupon> group : byGroup.values()) {
+        List<PricedCandidate> winners = new ArrayList<>();
+        for (List<PricedCandidate> group : byGroup.values()) {
             if (group.size() == 1) {
                 winners.add(group.get(0));
-            } else {
-                // 同组选优惠最大的；同额取 ID 小的
-                winners.add(group.stream()
-                        .sorted(Comparator.comparingLong(CandidateCoupon::discount).reversed()
-                                .thenComparing(cc -> cc.coupon().getId()))
-                        .findFirst().orElseThrow());
+                continue;
+            }
+            group.sort(Comparator.comparingLong(PricedCandidate::nominalDiscount).reversed()
+                    .thenComparingLong(p -> p.candidate().coupon().getId()));
+            winners.add(group.get(0));
+            for (int i = 1; i < group.size(); i++) {
+                excluded.add(group.get(i).candidate().coupon().getId());
             }
         }
         return winners;
     }
 
-    /** 范围感知分摊：每张券的优惠只分给它范围内的商品 */
-    private List<CalculateResponse.LineAllocation> allocateWithScopes(
-            List<OrderContext.OrderItem> allItems, List<CandidateCoupon> usedCoupons) {
-        if (allItems.isEmpty() || usedCoupons.isEmpty()) {
-            return List.of();
+    /**
+     * 把一张券的优惠分到它的范围行：前 n-1 行向下取整、末行兜底；
+     * 单行不超过该行剩余金额，末行溢出（最多 n-1 分）补给还有余量的行。
+     *
+     * <p>例：三行各 1 分、优惠 2 分——前两行 floor(1×2/3)=0、0，末行余数 2 超过其容量 1，
+     * 溢出 1 分补到第一行 → 1/0/1，合计 2，且每行不超过 1。
+     */
+    private long[] allocate(long discount, int[] scopeIndices, long[] remaining) {
+        long[] shares = new long[remaining.length];
+        if (discount <= 0 || scopeIndices.length == 0) {
+            return shares;
+        }
+        List<Integer> active = new ArrayList<>();
+        long scopeTotal = 0;
+        for (int idx : scopeIndices) {
+            if (remaining[idx] > 0) {
+                active.add(idx);
+                scopeTotal += remaining[idx];
+            }
+        }
+        if (active.isEmpty()) {
+            return shares;
         }
 
-        long[] totals = new long[allItems.size()];
+        long capped = Math.min(discount, scopeTotal);
+        long allocated = 0;
+        for (int k = 0; k < active.size() - 1; k++) {
+            int idx = active.get(k);
+            long share = capped * remaining[idx] / scopeTotal;
+            shares[idx] = share;
+            allocated += share;
+        }
 
-        for (CandidateCoupon cc : usedCoupons) {
-            // 拿这张券的范围商品列表（CandidateCoupon 已在 Phase 1 算好）
-            List<OrderContext.OrderItem> scopeItems = cc.scopeItems();
-            if (scopeItems == null || scopeItems.isEmpty()) {
-                // 范围为 ALL 时 scopeItems = 全部商品
-                scopeItems = allItems;
-            }
+        int lastIdx = active.get(active.size() - 1);
+        long lastShare = capped - allocated;
+        if (lastShare <= remaining[lastIdx]) {
+            shares[lastIdx] = lastShare;
+            return shares;
+        }
 
-            long scopeTotal = scopeItems.stream()
-                    .mapToLong(item -> item.getPrice() * item.getQuantity()).sum();
-            if (scopeTotal <= 0) {
-                continue;
-            }
+        // 末行装不下：先装满末行，溢出的几分钱补给前面还有余量的行（溢出最多 n-1 分）
+        shares[lastIdx] = remaining[lastIdx];
+        long overflow = lastShare - remaining[lastIdx];
+        for (int k = 0; k < active.size() - 1 && overflow > 0; k++) {
+            int idx = active.get(k);
+            long capacity = remaining[idx] - shares[idx];
+            long add = Math.min(capacity, overflow);
+            shares[idx] += add;
+            overflow -= add;
+        }
+        if (overflow > 0) {
+            // 理论上不会到这里（scopeTotal >= capped 保证总容量足够）；到了说明金额计算有误，
+            // 宁可少分也不虚增——把多出的部分从末行扣回，保持“分摊合计=实际优惠”守恒。
+            shares[lastIdx] -= overflow;
+        }
+        return shares;
+    }
 
-            long discount = cc.discount();
-            long allocatedSoFar = 0;
-
-            // 前 n-1 行按比例取整
-            for (int i = 0; i < scopeItems.size() - 1; i++) {
-                var item = scopeItems.get(i);
-                long lineAmount = item.getPrice() * item.getQuantity();
-                long share = lineAmount * discount / scopeTotal;
-                allocatedSoFar += share;
-                // 找到该商品在 allItems 中的索引并累加
-                int idx = indexOfItem(allItems, item);
-                if (idx >= 0) {
-                    totals[idx] += share;
+    private List<CalculateResponse.LineAllocation> buildAllocations(List<Line> lines, StackResult stack) {
+        List<CalculateResponse.LineAllocation> result = new ArrayList<>();
+        for (int i = 0; i < lines.size(); i++) {
+            long total = 0;
+            List<CalculateResponse.CouponLineShare> couponShares = new ArrayList<>();
+            for (AppliedCoupon applied : stack.applied()) {
+                long share = applied.shares()[i];
+                if (share > 0) {
+                    total += share;
+                    couponShares.add(new CalculateResponse.CouponLineShare(
+                            applied.candidate().coupon().getId(), share));
                 }
             }
-
-            // 末行取余数
-            var lastItem = scopeItems.get(scopeItems.size()-1);
-            long lastShare = discount - allocatedSoFar;
-            int lastIdx = indexOfItem(allItems, lastItem);
-            if (lastIdx >= 0) {
-                totals[lastIdx] += lastShare;
-            }
-        }
-
-        List<CalculateResponse.LineAllocation> result = new ArrayList<>();
-        for (int i = 0; i < allItems.size(); i++) {
-            long lineAmount = allItems.get(i).getPrice() * allItems.get(i).getQuantity();
-            result.add(new CalculateResponse.LineAllocation(
-                    allItems.get(i).getSkuId(), lineAmount, totals[i]));
+            Line line = lines.get(i);
+            result.add(new CalculateResponse.LineAllocation(line.lineNo(), line.skuId(),
+                    line.amount(), total, couponShares));
         }
         return result;
     }
 
-    /** 过滤出模板范围内的商品行 */
-    private List<OrderContext.OrderItem> filterScopeItems(
-            CouponTemplate template, OrderContext context) {
-        ApplicableScope scope = template.getApplicableScope();
-        if (scope == ApplicableScope.ALL) {
-            return context.getItems();
+    /** 把请求里的商品行标准化：补行号（L1/L2/...）、查重、算行金额 */
+    private List<Line> toLines(List<CalculateRequest.OrderItem> items) {
+        if (items == null || items.isEmpty()) {
+            throw new BizException(ErrorCode.PARAM_ERROR, "订单商品不能为空");
         }
-        String scopeIds = template.getScopeIds();
-        if (scopeIds == null || scopeIds.isBlank()) {
-            return context.getItems();
+        List<Line> lines = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (int i = 0; i < items.size(); i++) {
+            CalculateRequest.OrderItem item = items.get(i);
+            String lineNo = item.lineNo();
+            if (lineNo == null || lineNo.isBlank()) {
+                lineNo = "L" + (i + 1);
+            }
+            if (lineNo.length() > 64) {
+                throw new BizException(ErrorCode.PARAM_ERROR, "商品行号最长 64 字符: " + lineNo);
+            }
+            if (!seen.add(lineNo)) {
+                throw new BizException(ErrorCode.PARAM_ERROR, "商品行号重复: " + lineNo);
+            }
+            lines.add(new Line(lineNo, item.skuId(), item.categoryId(), item.price(),
+                    item.quantity(), item.price() * item.quantity()));
         }
-        String cleaned = scopeIds.replaceAll("[\\[\\]\"]", "").trim();
-        if (cleaned.isEmpty()) {
-            return context.getItems();
-        }
-        Set<String> allowed = Set.of(cleaned.split(",\\s*"));
+        return lines;
+    }
 
-        return context.getItems().stream()
-                .filter(item -> {
-                    String value = scope == ApplicableScope.CATEGORY
-                            ? item.getCategoryId() : item.getSkuId();
-                    return allowed.contains(value);
-                })
+    private OrderContext toContext(Long userId, List<Line> lines, LocalDateTime now) {
+        long orderAmount = lines.stream().mapToLong(Line::amount).sum();
+        return OrderContext.builder()
+                .userId(userId)
+                .orderAmount(orderAmount)
+                .items(toOrderItems(lines))
+                .now(now)
+                .build();
+    }
+
+    /** 策略只读 orderAmount；items 原样带入，保持上下文完整 */
+    private OrderContext scopedContext(long amount, List<Line> lines, LocalDateTime now) {
+        return OrderContext.builder()
+                .orderAmount(amount)
+                .items(toOrderItems(lines))
+                .now(now)
+                .build();
+    }
+
+    private List<OrderContext.OrderItem> toOrderItems(List<Line> lines) {
+        return lines.stream()
+                .map(l -> new OrderContext.OrderItem(l.lineNo(), l.skuId(), l.categoryId(),
+                        l.price(), l.quantity()))
                 .toList();
     }
 
-    private int indexOfItem(List<OrderContext.OrderItem> items, OrderContext.OrderItem target) {
-        for (int i = 0; i < items.size(); i++) {
-            if (items.get(i).getSkuId().equals(target.getSkuId())) {
-                return i;
+    /** 过滤出模板范围内的商品行索引 */
+    private int[] scopeIndices(CouponTemplate template, List<Line> lines) {
+        ApplicableScope scope = template.getApplicableScope();
+        if (scope == ApplicableScope.ALL) {
+            int[] all = new int[lines.size()];
+            for (int i = 0; i < all.length; i++) {
+                all[i] = i;
+            }
+            return all;
+        }
+        Set<String> allowed = parseScopeIds(template.getScopeIds());
+        if (allowed.isEmpty()) {
+            // 非 ALL 但没配范围值 = 配置错误。旧版会放行全部商品，等于把品类券变成全场券；
+            // 现在按“不可用”处理，宁可拒绝也不越权给优惠。
+            return new int[0];
+        }
+        List<Integer> indices = new ArrayList<>();
+        for (int i = 0; i < lines.size(); i++) {
+            Line line = lines.get(i);
+            String value = scope == ApplicableScope.CATEGORY ? line.categoryId() : line.skuId();
+            if (allowed.contains(value)) {
+                indices.add(i);
             }
         }
-        return -1;
+        return indices.stream().mapToInt(Integer::intValue).toArray();
     }
 
-    /** 中间结果：券 + 模板 + 优惠金额 + 范围内商品 */
-    record CandidateCoupon(UserCoupon coupon, CouponTemplate template, long discount,
-                           List<OrderContext.OrderItem> scopeItems) {}
+    private Set<String> parseScopeIds(String scopeIds) {
+        if (scopeIds == null || scopeIds.isBlank()) {
+            return Set.of();
+        }
+        String cleaned = scopeIds.replaceAll("[\\[\\]\"]", "").trim();
+        if (cleaned.isEmpty()) {
+            return Set.of();
+        }
+        return Arrays.stream(cleaned.split(",\\s*"))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private long sumRemaining(int[] indices, long[] remaining) {
+        long sum = 0;
+        for (int idx : indices) {
+            sum += remaining[idx];
+        }
+        return sum;
+    }
+
+    /** 内部行模型：行号 + 商品 + 行金额 */
+    private record Line(String lineNo, String skuId, String categoryId,
+                        long price, int quantity, long amount) {
+    }
+
+    /** 候选券：券 + 模板 + 范围行索引 */
+    private record CandidateCoupon(UserCoupon coupon, CouponTemplate template, int[] scopeIndices) {
+    }
+
+    /** 已算出名义优惠的候选券（尚未分配） */
+    private record PricedCandidate(CandidateCoupon candidate, long nominalDiscount) {
+    }
+
+    /** 已中选并完成行分摊的券 */
+    private record AppliedCoupon(CandidateCoupon candidate, long effectiveDiscount, long[] shares) {
+    }
+
+    /** 整栈结果：中选券（按应用顺序）+ 不可用原因 + 被互斥淘汰的券 */
+    private record StackResult(List<AppliedCoupon> applied, Map<Long, String> reasons,
+                               Set<Long> excluded) {
+        long totalDiscount() {
+            return applied.stream().mapToLong(AppliedCoupon::effectiveDiscount).sum();
+        }
+    }
 }

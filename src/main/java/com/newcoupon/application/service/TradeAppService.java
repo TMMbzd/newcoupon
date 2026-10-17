@@ -5,6 +5,7 @@ import com.newcoupon.application.dto.TradeDtos.RefundResult;
 import com.newcoupon.application.dto.TradeDtos.ConfirmRequest;
 import com.newcoupon.application.dto.TradeDtos.ConfirmResult;
 import com.newcoupon.application.dto.TradeDtos.FundingSplit;
+import com.newcoupon.application.dto.TradeDtos.LineShare;
 import com.newcoupon.application.dto.TradeDtos.LockRequest;
 import com.newcoupon.application.dto.TradeDtos.LockResult;
 import com.newcoupon.application.dto.TradeDtos.MyCoupon;
@@ -16,7 +17,7 @@ import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.application.service.discount.DiscountCalculatorService;
-import com.newcoupon.domain.coupon.BudgetOwner;
+import com.newcoupon.application.service.discount.DiscountCalculatorService.ConfirmLineShare;
 import com.newcoupon.domain.coupon.CouponStatus;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.CouponUsage;
@@ -25,6 +26,10 @@ import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.repository.CouponUsageRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,18 +65,28 @@ public class TradeAppService {
 
     private static final long RATE_WINDOW_MS = 60_000;
 
+    /** 部分退款次数上限（对齐微信支付单品退款：同一笔最多 50 次） */
+    private final int maxRefundTimes;
+
+    /** 一券最多退券次数（防“下单-退款-再用”刷券） */
+    private final int maxReturnTimes;
+
     public TradeAppService(TradeTxService tradeTxService,
                            UserCouponRepository userCouponRepository,
                            CouponUsageRepository couponUsageRepository,
                            DiscountCalculatorService discountCalculatorService,
                            @Value("${coupon.trade.max-discount-ratio:80}") int maxDiscountRatio,
-                           @Value("${coupon.trade.confirm-rate-per-minute:600}") int confirmRateLimit) {
+                           @Value("${coupon.trade.confirm-rate-per-minute:600}") int confirmRateLimit,
+                           @Value("${coupon.trade.max-refund-times:50}") int maxRefundTimes,
+                           @Value("${coupon.trade.max-return-times:3}") int maxReturnTimes) {
         this.tradeTxService = tradeTxService;
         this.userCouponRepository = userCouponRepository;
         this.couponUsageRepository = couponUsageRepository;
         this.discountCalculatorService = discountCalculatorService;
         this.maxDiscountRatio = maxDiscountRatio;
         this.confirmRateLimit = confirmRateLimit;
+        this.maxRefundTimes = maxRefundTimes;
+        this.maxReturnTimes = maxReturnTimes;
     }
 
     public LockResult lock(LockRequest req) {
@@ -150,18 +165,53 @@ public class TradeAppService {
                     "核销必须提供 items（平台算钱）或正数 discountAmt（老式金额）其一");
         }
 
-        // ════ 第 2 环：核销由平台算钱 + 出资拆分 ════
+        // ════ 第 2 环：核销由平台算钱 + 出资拆分 + 行级分账 ════
         FundingSplit split = null;
+        List<LineShare> lineShares = List.of();
         ConfirmRequest txReq = req;   // 不重赋值参数 req（lambda 要求 effectively final）
         if (req.items() != null && !req.items().isEmpty()) {
             CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo())
                     .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
+
+            // 幂等优先：已核销的重复回调直接返回首次金额，不再进入整栈复算
+            // （否则兄弟券退款后重放一次核销，会被“订单已进入售后”误伤）。
+            if (usage.getStatus() == UsageStatus.CONFIRMED) {
+                return new ConfirmResult(req.usageNo(), CouponStatus.USED.getDesc(),
+                        usage.getDiscountAmt(), true);
+            }
+            // 死状态（已退款/已释放/过期/超时）在算钱之前就给出明确答复，避免
+            // “售后守卫”把 4004/4006 盖成笼统的 4002。
+            usage.checkConfirmable();
+
             UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
                     .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
 
-            var calc = discountCalculatorService.calculateForConfirm(coupon, req.items());
+            // ── L64：把同一订单的全部占用单找回来一起复算（核销不能只看这一张券）──
+            List<CouponUsage> orderUsages = couponUsageRepository.findByOrderNo(
+                    usage.getUserId(), usage.getOrderNo());
+            boolean afterSales = orderUsages.stream().anyMatch(u ->
+                    u.getStatus() == UsageStatus.REFUNDED
+                            || u.getStatus() == UsageStatus.PARTIALLY_REFUNDED);
+            if (afterSales) {
+                throw new BizException(ErrorCode.STATE_CONFLICT,
+                        "订单已进入售后（部分/全部退款），不能再核销其他券");
+            }
+            // 只让“当前生效”的合同参与优惠栈：占用中 + 已核销；已释放/过期/超时的合同不属于本单
+            Map<Long, UserCoupon> orderCoupons = new LinkedHashMap<>();
+            for (CouponUsage sibling : orderUsages) {
+                if (sibling.getStatus() != UsageStatus.OCCUPYING
+                        && sibling.getStatus() != UsageStatus.CONFIRMED) {
+                    continue;
+                }
+                userCouponRepository.findByIdForUser(sibling.getUserCouponId(), sibling.getUserId())
+                        .ifPresent(c -> orderCoupons.putIfAbsent(c.getId(), c));
+            }
+            orderCoupons.putIfAbsent(coupon.getId(), coupon);
 
-            // ── 申报防线（门槛/范围复核已由 calculateForConfirm 先行完成，2026-10-15 补齐）──
+            var calc = discountCalculatorService.calculateForOrderConfirm(coupon.getId(),
+                    new ArrayList<>(orderCoupons.values()), req.items());
+
+            // ── 申报防线（门槛/范围复核已由整栈复算先行完成）──
             // ①优惠占比上限：平台算出的优惠不得超过订单金额的 maxDiscountRatio%。
             // 防的是"合法高力度券 × 刚过门槛的小订单"（如满100减90配 100 元订单，占比 90%）——
             // 这类单笔合理、比例离谱的申报，直接拒绝；极端促销（0元购）由运营调高环境变量放行。
@@ -181,13 +231,14 @@ public class TradeAppService {
             alarmConfirmRate();
 
             split = calculateFundingSplit(calc.template(), calc.discountAmt());
+            lineShares = buildLineShares(calc.lineShares(), split);
 
             // 用平台计算出的金额（调用方传入的 discountAmt 被忽略）
             txReq = new ConfirmRequest(req.usageNo(), calc.discountAmt(), null);
         }
 
         try {
-            return tradeTxService.confirm(txReq, LocalDateTime.now(), split);
+            return tradeTxService.confirm(txReq, LocalDateTime.now(), split, lineShares);
         } catch (TradeCasRejectedException e) {
             // L2（2026-09-12）：券状态 CAS 拒绝且原因是"锁定期间过期"——
             // 先做收场（占用单过期关闭+券转已过期+事件），再按明确错误码拒绝。
@@ -318,11 +369,75 @@ public class TradeAppService {
         };
     }
 
+    /**
+     * 把总出资（平台/商家）拆到每一行，保证三条守恒：
+     * ①每行平台+商家=该行优惠；②全体平台之和=总平台出资；③全体商家之和=总商家出资。
+     *
+     * <p>先按各行优惠额比例分平台出资（前 n-1 行取整、末行兜底，末行超行容量再回补），
+     * 商家 = 行优惠 - 平台——这样既不会出现“某行商家为负”，也不会出现合计差一分。
+     */
+    private List<LineShare> buildLineShares(List<ConfirmLineShare> lines, FundingSplit split) {
+        if (lines == null || lines.isEmpty()) {
+            return List.of();
+        }
+        long[] discounts = lines.stream().mapToLong(ConfirmLineShare::discountAmt).toArray();
+        long[] platformShares = allocateFunding(split.platformBurden(), discounts);
+        List<LineShare> result = new ArrayList<>(lines.size());
+        for (int i = 0; i < lines.size(); i++) {
+            ConfirmLineShare line = lines.get(i);
+            long platform = platformShares[i];
+            long merchant = line.discountAmt() - platform;
+            result.add(new LineShare(line.lineNo(), line.skuId(), line.lineAmount(),
+                    line.quantity(), line.discountAmt(), platform, merchant));
+        }
+        return result;
+    }
+
+    /** 按容量比例分一笔钱：前 n-1 行向下取整、末行兜底；末行超容量则回补前面的行 */
+    private long[] allocateFunding(long amount, long[] capacities) {
+        long[] shares = new long[capacities.length];
+        long total = 0;
+        for (long capacity : capacities) {
+            total += capacity;
+        }
+        if (amount <= 0 || total <= 0) {
+            return shares;
+        }
+        long capped = Math.min(amount, total);
+        long allocated = 0;
+        for (int i = 0; i < capacities.length - 1; i++) {
+            shares[i] = capped * capacities[i] / total;
+            allocated += shares[i];
+        }
+        int last = capacities.length - 1;
+        long lastShare = capped - allocated;
+        if (lastShare <= capacities[last]) {
+            shares[last] = lastShare;
+            return shares;
+        }
+        shares[last] = capacities[last];
+        long overflow = lastShare - capacities[last];
+        for (int i = 0; i < last && overflow > 0; i++) {
+            long add = Math.min(capacities[i] - shares[i], overflow);
+            shares[i] += add;
+            overflow -= add;
+        }
+        return shares;
+    }
+
     @AuditLog(action = "COUPON_REFUND", resourceType = "USAGE", describe = "退款冲销（动钱）")
     public RefundResult refund(RefundRequest req) {
         assertUsageAccessible(req.usageNo());
+        // 旧调用方不传退款单号：生成确定性的 AUTO:<usageNo>（只能整单退一次），
+        // 新调用方必须传自己的退款单号，才能按行多次部分退款且可幂等重放。
+        String refundNo = req.refundNo();
+        if (refundNo == null || refundNo.isBlank()) {
+            refundNo = com.newcoupon.common.BoundedKey.of("AUTO:", req.usageNo());
+        }
+        RefundRequest normalized = new RefundRequest(req.usageNo(), refundNo, req.items());
         try {
-            return tradeTxService.refundConfirm(req.usageNo(), LocalDateTime.now());
+            return tradeTxService.refundConfirm(normalized, LocalDateTime.now(),
+                    maxRefundTimes, maxReturnTimes);
         } catch (TradeCasRejectedException e) {
             throw freshStateConflict("退款", e);
         }

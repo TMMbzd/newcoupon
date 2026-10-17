@@ -78,6 +78,14 @@ public interface UserCouponMapper extends BaseMapper<UserCouponPO> {
             + "AND status = 1 AND valid_end > NOW()")
     int casConfirm(@Param("id") long id, @Param("userId") long userId);
 
+    /**
+     * 整单退款退券（2026-10-18 政策：整单退且券在有效期内 → 回到待使用；已过期 → 已过期）。
+     * 只从“已核销(2)”迁出；部分退款不走这里（券继续已核销）。
+     */
+    @Update("UPDATE user_coupon SET status = IF(valid_end > NOW(), 0, 3) "
+            + "WHERE id = #{id} AND user_id = #{userId} AND status = 2")
+    int casReturnOnRefund(@Param("id") long id, @Param("userId") long userId);
+
     // ---------- L2 过期流转（2026-09-12） ----------
 
     /** 到期未使用（CAS）：待使用→已过期，守卫"确已到期"——重复触发影响 0 行（幂等） */

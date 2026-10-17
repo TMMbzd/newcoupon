@@ -6,9 +6,10 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.LocalDateTime;
 
 /**
- * 成本分摊明细 PO（V9 P2a）——核销事务原子写入。
- * 一行 = 一个占用单×一个商品行×一个承担主体的分摊结果。
+ * 成本分摊明细 PO（V9 P2a，V21 起按行落库）——核销事务原子写入。
+ * 一行 = 一个占用单 × 一个商品行（该行优惠 + 该行平台/商家出资）。
  * 守恒：同一 usage_no 的 SUM(share_total) = 占用单的 discount_amt。
+ * 老式核销没有商品行：一行 order_line_no=NULL 的兼容记录。
  * user_id 是分片路由键（P5 实施时 V10 建 64 物理分表；先在单表跑通再拆）。
  */
 @TableName("coupon_share_detail")
@@ -23,6 +24,8 @@ public class CouponShareDetailPO {
     private String orderNo;
     private String orderLineNo;
     private Long orderLineAmount;
+    /** 该行商品数量（按数量部分退款时，用它在行内拆优惠） */
+    private Integer orderLineQuantity;
     private Long platformBurden;   // 平台承担金额（分）
     private Long merchantBurden;   // 商家承担金额（分）
     private Long shareTotal;       // = platform + merchant
@@ -44,6 +47,8 @@ public class CouponShareDetailPO {
     public void setOrderLineNo(String orderLineNo) { this.orderLineNo = orderLineNo; }
     public Long getOrderLineAmount() { return orderLineAmount; }
     public void setOrderLineAmount(Long orderLineAmount) { this.orderLineAmount = orderLineAmount; }
+    public Integer getOrderLineQuantity() { return orderLineQuantity; }
+    public void setOrderLineQuantity(Integer orderLineQuantity) { this.orderLineQuantity = orderLineQuantity; }
     public Long getPlatformBurden() { return platformBurden; }
     public void setPlatformBurden(Long platformBurden) { this.platformBurden = platformBurden; }
     public Long getMerchantBurden() { return merchantBurden; }

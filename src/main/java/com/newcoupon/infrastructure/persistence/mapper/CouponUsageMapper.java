@@ -18,15 +18,25 @@ public interface CouponUsageMapper extends BaseMapper<CouponUsagePO> {
     @Select("SELECT * FROM coupon_usage WHERE usage_no = #{usageNo}")
     CouponUsagePO selectByUsageNo(@Param("usageNo") String usageNo);
 
+    /** 退款事务的行锁：带 user_id 单分片命中，锁住占用单后再算累计退款 */
+    @Select("SELECT * FROM coupon_usage WHERE usage_no = #{usageNo} AND user_id = #{userId} FOR UPDATE")
+    CouponUsagePO selectByUsageNoForUpdate(@Param("usageNo") String usageNo,
+                                          @Param("userId") long userId);
+
+    /** L64：同一订单的全部占用单——带 user_id 单分片命中（V21 idx_user_order） */
+    @Select("SELECT * FROM coupon_usage WHERE user_id = #{userId} AND order_no = #{orderNo} ORDER BY id")
+    java.util.List<CouponUsagePO> selectByOrderNo(@Param("userId") long userId,
+                                                  @Param("orderNo") String orderNo);
+
     @Update("UPDATE coupon_usage SET status = 1, discount_amt = #{discountAmt}, use_time = #{useTime} "
             + "WHERE usage_no = #{usageNo} AND status = 0")
     int casConfirm(@Param("usageNo") String usageNo,
                    @Param("discountAmt") long discountAmt,
                    @Param("useTime") LocalDateTime useTime);
 
-    /** 退款冲销（CAS）：已核销→已退款（终端状态，券保持已核销不回可用） */
-    @Update("UPDATE coupon_usage SET status = 5 WHERE usage_no = #{usageNo} AND status = 1")
-    int casRefund(@Param("usageNo") String usageNo);
+    /** 行级退款状态迁移（CAS）：已核销/部分退款 → 部分退款(6) 或 已退款(5) */
+    @Update("UPDATE coupon_usage SET status = #{target} WHERE usage_no = #{usageNo} AND status IN (1, 6)")
+    int casRefundState(@Param("usageNo") String usageNo, @Param("target") int target);
 
     @Update("UPDATE coupon_usage SET status = 2, release_time = #{releaseTime} "
             + "WHERE usage_no = #{usageNo} AND status = 0")

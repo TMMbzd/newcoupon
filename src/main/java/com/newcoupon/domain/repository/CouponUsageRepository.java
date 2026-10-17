@@ -14,6 +14,16 @@ public interface CouponUsageRepository {
     /** 按占用单号查询（uk_usage_no 覆盖）：幂等判断与回退裁判的第一步 */
     Optional<CouponUsage> findByUsageNo(String usageNo);
 
+    /** 退款事务：带 user_id 单分片命中并锁住占用单（SELECT ... FOR UPDATE） */
+    Optional<CouponUsage> findByUsageNoForUpdate(String usageNo, long userId);
+
+    /**
+     * 按订单号查同一订单的全部占用单（L64 核销整栈复算 + 售后守卫用）。
+     * 带 userId（分片路由键）——只命中一个物理分表。
+     * 调用方自行按状态区分“当前生效”（占用中/已核销）与“已进入售后”（退款）。
+     */
+    java.util.List<CouponUsage> findByOrderNo(long userId, String orderNo);
+
     /** 新建占用单（初始=占用中）；撞 uk_usage_no 抛 DuplicateKeyException */
     CouponUsage save(CouponUsage usage);
 
@@ -22,7 +32,9 @@ public interface CouponUsageRepository {
 
     /** 占用单释放（CAS）：占用中→已释放。返回是否成功 */
     boolean casRelease(String usageNo, LocalDateTime releaseTime);
-    boolean casRefund(String usageNo);
+
+    /** 行级退款状态迁移（CAS）：已核销/部分退款 → 部分退款 或 已退款 */
+    boolean casRefundState(String usageNo, com.newcoupon.domain.coupon.UsageStatus target);
 
     /** L2 过期关闭（CAS）：占用中→过期关闭（第三种终结：非核销非释放）。按占用单号 */
     boolean casExpireByUsageNo(String usageNo);

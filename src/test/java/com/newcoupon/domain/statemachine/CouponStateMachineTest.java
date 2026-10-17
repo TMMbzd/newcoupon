@@ -39,9 +39,9 @@ class CouponStateMachineTest {
     // ---------- 非法迁移：资损级红线，一条都不能放过 ----------
 
     @Test
-    @DisplayName("终态无出边：USED/EXPIRED/INVALID 不能迁移到任何状态")
+    @DisplayName("无出边终态：EXPIRED/INVALID 不能迁移到任何状态")
     void terminalStatesHaveNoOutgoingEdges() {
-        for (CouponStatus terminal : new CouponStatus[]{CouponStatus.USED, CouponStatus.EXPIRED, CouponStatus.INVALID}) {
+        for (CouponStatus terminal : new CouponStatus[]{CouponStatus.EXPIRED, CouponStatus.INVALID}) {
             assertThat(terminal.isTerminal()).isTrue();
             for (CouponStatus any : CouponStatus.values()) {
                 assertThat(CouponStateMachine.canTransit(terminal, any))
@@ -66,6 +66,22 @@ class CouponStateMachineTest {
         assertThat(CouponStateMachine.canTransit(CouponStatus.USABLE, CouponStatus.INVALID)).isTrue();  // 作废是合法的
         assertThatThrownBy(() -> CouponStateMachine.transit(null, CouponTransition.LOCK))
                 .isInstanceOf(BizException.class);
+    }
+
+    @Test
+    @DisplayName("USED 的唯一出边是整单退款退券（政策例外），不能回锁定/再次核销")
+    void usedOnlyReturnsByRefund() {
+        assertThat(CouponStatus.USED.isTerminal()).as("USED 不再是绝对终态").isFalse();
+        assertThat(CouponStateMachine.canTransit(CouponStatus.USED, CouponStatus.USABLE))
+                .as("整单退款退券：USED → USABLE").isTrue();
+        assertThat(CouponStateMachine.transit(CouponStatus.USED, CouponTransition.REFUND_RETURN))
+                .isEqualTo(CouponStatus.USABLE);
+        for (CouponStatus to : CouponStatus.values()) {
+            if (to != CouponStatus.USABLE) {
+                assertThat(CouponStateMachine.canTransit(CouponStatus.USED, to))
+                        .as("USED 不能迁到 %s", to).isFalse();
+            }
+        }
     }
 
     @Test

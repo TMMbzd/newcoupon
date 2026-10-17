@@ -51,7 +51,7 @@ class TradeAppServiceTest {
     @org.junit.jupiter.api.BeforeEach
     void setUp() {
         service = new TradeAppService(
-                tradeTxService, userCouponRepository, couponUsageRepository, null, 80, 600);
+                tradeTxService, userCouponRepository, couponUsageRepository, null, 80, 600, 50, 3);
     }
 
     private static CouponUsage usage() {
@@ -125,7 +125,7 @@ class TradeAppServiceTest {
         when(couponUsageRepository.findByUsageNo("ORD-1:5")).thenReturn(Optional.of(u));
         when(userCouponRepository.findById(5L)).thenReturn(Optional.of(lockedExpired));
         // 券状态 CAS 被拒（锁定期间过期）→ 编排层走收场路径
-        when(tradeTxService.confirm(any(ConfirmRequest.class), any(), any()))
+        when(tradeTxService.confirm(any(ConfirmRequest.class), any(), any(), any()))
                 .thenThrow(new TradeCasRejectedException("coupon-confirm", 5L));
         // 收场又被别人抢先（竞态）——expireOnLock 内部 CAS 同样失败
         org.mockito.Mockito.doThrow(new TradeCasRejectedException("usage-expire", "ORD-1:5"))

@@ -29,6 +29,19 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
     }
 
     @Override
+    public java.util.List<CouponUsage> findByOrderNo(long userId, String orderNo) {
+        return mapper.selectByOrderNo(userId, orderNo).stream()
+                .map(CouponUsagePOConverter::toDomain)
+                .toList();
+    }
+
+    @Override
+    public Optional<CouponUsage> findByUsageNoForUpdate(String usageNo, long userId) {
+        return Optional.ofNullable(mapper.selectByUsageNoForUpdate(usageNo, userId))
+                .map(CouponUsagePOConverter::toDomain);
+    }
+
+    @Override
     public CouponUsage save(CouponUsage usage) {
         CouponUsagePO po = CouponUsagePOConverter.toPO(usage);
         po.setId(idGenerator.next());   // 雪花ID（批次二）
@@ -86,7 +99,7 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
     }
 
     @Override
-    public boolean casRefund(String usageNo) {
-        return mapper.casRefund(usageNo) == 1;
+    public boolean casRefundState(String usageNo, com.newcoupon.domain.coupon.UsageStatus target) {
+        return mapper.casRefundState(usageNo, target.getCode()) == 1;
     }
 }

@@ -12,14 +12,19 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 /**
- * T+1 日账单：按模板聚合当日分账明细（净额），落 coupon_daily_bill。
+ * T+1 日账单：按模板聚合当日账目（净额），落 coupon_daily_bill。
  *
- * <p>幂等性：聚合源（coupon_share_detail）只增不改，账单行 upsert——重跑任意多次
- * 结果一致。因此多实例重复触发也无害（与过期扫描不同，不需要 Redis 抢锁：
- * 那里消的是重复扫描的 DB 负载，这里一天一次的聚合查询不值得加锁复杂度）。
+ * <p>聚合源：`coupon_share_detail` 的正分账行（核销）减去 `coupon_refund_detail`
+ * 的退款明细（冲回），并兼容旧版写在 `coupon_share_detail` 里的负行。
+ * 两张表都只增不改，账单行 upsert——重跑任意多次结果一致。因此多实例重复触发也无害
+ * （与过期扫描不同，不需要 Redis 抢锁：那里消的是重复扫描的 DB 负载，
+ * 这里一天一次的聚合查询不值得加锁复杂度）。
  *
- * <p>结算语义：退款负行按 create_time 归入退款日的账单——当日退款当日净额归零，
- * 跨日退款（T+7 售后）在退款日记一笔负数行，财务在账单上能单独看到冲回。
+ * <p>计数语义（2026-10-18 起）：`confirm_count` = 正分账行数（一个多行订单会大于 1），
+ * `refund_count` = 退款明细行数（一次退多行会大于 1）。需要“核销笔数”时按 usage_no 去重另算。
+ *
+ * <p>结算语义：退款明细按 create_time 归入退款日的账单——当日退款当日净额归零，
+ * 跨日退款（T+7 售后）在退款日记一笔负数，财务在账单上能单独看到冲回。
  */
 @Service
 public class DailyBillService {

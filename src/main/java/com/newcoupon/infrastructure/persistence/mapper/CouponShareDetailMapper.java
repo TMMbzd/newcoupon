@@ -16,7 +16,7 @@ public interface CouponShareDetailMapper extends BaseMapper<CouponShareDetailPO>
     @Select("SELECT COALESCE(SUM(share_total), 0) FROM coupon_share_detail WHERE usage_no = #{usageNo}")
     long sumShareByUsageNo(@Param("usageNo") String usageNo);
 
-    /** 按占用单号取正分账行（退款冲销的镜像来源） */
+    /** 按占用单号取正分账行（核销快照；退款按行 × 数量读它算冲回额） */
     @Select("SELECT * FROM coupon_share_detail WHERE usage_no = #{usageNo} AND share_total > 0")
     List<CouponShareDetailPO> selectPositiveByUsageNo(@Param("usageNo") String usageNo);
 }

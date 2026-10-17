@@ -11,6 +11,9 @@ package com.newcoupon.domain.coupon;
  * 系统兜底收场：占用单→超时关闭、券→(未过期?待使用:已过期)。
  * 四种终结对财务是四种不同的账目形态（用了/退了/拖着拖死/订单死了系统收场），
  * 对账与客服归因必须可分辨，不能塞进前几种凑合。
+ *
+ * <p>2026-10-18 行级退款新增 PARTIALLY_REFUNDED(6)：订单只退了一部分商品时停在“部分退款”，
+ * 全部退完才转 REFUNDED(5)。两者都是售后态，但一个还能继续退、一个已终结。
  */
 public enum UsageStatus {
 
@@ -19,7 +22,9 @@ public enum UsageStatus {
     RELEASED(2, "已释放"),
     EXPIRED(3, "过期关闭"),
     TIMEOUT_CLOSED(4, "超时关闭"),
-    REFUNDED(5, "已退款");
+    REFUNDED(5, "已退款"),
+    /** 2026-10-18 行级退款：订单只退了一部分商品，占用单进入“部分退款”；全部退完才转 REFUNDED */
+    PARTIALLY_REFUNDED(6, "部分退款");
 
     private final int code;
     private final String desc;

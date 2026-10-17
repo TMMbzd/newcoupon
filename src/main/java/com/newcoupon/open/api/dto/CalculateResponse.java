@@ -51,14 +51,31 @@ public record CalculateResponse(
 
     /**
      * 单行商品的优惠分摊。
-     * 分摊规则：按行金额占总金额的比例分摊，前 n-1 行整除取整，末行 = 总优惠 - 前面之和（保证合计精确）。
+     *
+     * <p>分摊规则（2026-10-18 行业标准版）：每一层优惠按“进入本层前的行剩余金额”比例分摊，
+     * 前 n-1 行向下取整、末行兜底余数；单行不得超过该行剩余金额，溢出再分配给有余量的行。
+     *
+     * <p>{@code couponShares} 是这张行上每一张券各分了多少——按行退款时按“行 × 券”冲回，
+     * 不能只有一个合计（多券叠加时合计无法拆回单张券）。
      */
     public record LineAllocation(
+            /** 商品行号（订单侧行标识；旧调用方不传时平台生成 L1/L2/...） */
+            String lineNo,
             String skuId,
             /** 行金额（单价×数量，分） */
             Long lineAmount,
             /** 该行分摊到的总优惠（分） */
-            Long allocatedDiscount
+            Long allocatedDiscount,
+            /** 该行上每张券的分摊明细（退款按行 × 券冲回） */
+            List<CouponLineShare> couponShares
     ) {
+        /** 兼容旧调用方/旧测试：没有行号与逐券明细的三参构造 */
+        public LineAllocation(String skuId, Long lineAmount, Long allocatedDiscount) {
+            this(null, skuId, lineAmount, allocatedDiscount, List.of());
+        }
+    }
+
+    /** 单行上单张券的分摊额 */
+    public record CouponLineShare(Long couponId, Long amount) {
     }
 }

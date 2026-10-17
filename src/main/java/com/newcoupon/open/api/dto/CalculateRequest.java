@@ -56,7 +56,21 @@ public record CalculateRequest(
 
             @NotNull(message = "商品数量不能为空")
             @Min(value = 1, message = "商品数量至少为1")
-            Integer quantity
+            Integer quantity,
+
+            /**
+             * 商品行号（可选）：订单侧的商品行唯一标识，退款按行时靠它定位。
+             *
+             * <p>不传时平台按列表顺序生成 {@code L1/L2/...}——旧接入方零改动，
+             * 但同一订单多次调用（试算/核销）必须保持相同的行顺序，否则行号会对不上。
+             * 新接入方应传订单系统的行号（如订单明细主键）。
+             */
+            @Size(max = 64, message = "商品行号最长 64 字符（= 存储列宽）")
+            String lineNo
     ) {
+        /** 兼容旧调用方：不传行号 = 由平台按顺序生成 L1/L2/... */
+        public OrderItem(String skuId, String categoryId, Long price, Integer quantity) {
+            this(skuId, categoryId, price, quantity, null);
+        }
     }
 }

@@ -54,8 +54,9 @@ class TradeTxServiceTest {
     void constructService() {
         // L5 后构造器多了锁定超时网关与窗口参数（long 基本类型 Mockito 注入不了，
         // @InjectMocks 在扩展的 beforeEach 里先炸）——去注解、手工组装
+        // 三个退款 Mapper 传 null：本类是纯状态机单测，退款路径由集成测试覆盖
         service = new TradeTxService(userCouponRepository, couponUsageRepository,
-                couponEventRepository, null, releaseTaskGateway, 30L);  // null = CouponShareDetailMapper（单测不用分账）
+                couponEventRepository, null, null, null, null, releaseTaskGateway, 30L);
     }
 
     private static UserCoupon coupon(CouponStatus status) {
@@ -128,6 +129,22 @@ class TradeTxServiceTest {
         assertThatThrownBy(() -> service.release(new ReleaseRequest("ORD-1:5", "取消"), NOW))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("已核销不可释放");
+    }
+
+    @Test
+    @DisplayName("已退款/部分退款的占用单收到释放 → 4004 明确拒绝（售后中不是“取消”）")
+    void releaseRejectedAfterRefund() {
+        when(couponUsageRepository.findByUsageNo("ORD-1:5"))
+                .thenReturn(Optional.of(usage(UsageStatus.REFUNDED, 1000L)));
+        assertThatThrownBy(() -> service.release(new ReleaseRequest("ORD-1:5", "取消"), NOW))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("不可释放");
+
+        when(couponUsageRepository.findByUsageNo("ORD-1:5"))
+                .thenReturn(Optional.of(usage(UsageStatus.PARTIALLY_REFUNDED, 1000L)));
+        assertThatThrownBy(() -> service.release(new ReleaseRequest("ORD-1:5", "取消"), NOW))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("不可释放");
     }
 
     // ════ 加锁顺序不变量（2026-10-15，死锁对修复）════

@@ -12,8 +12,8 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 /**
- * T+1 日账单 Mapper：聚合 coupon_share_detail（净额）→ 幂等落 coupon_daily_bill。
- * 分账表是单表（未分片），聚合不需要 scatter-gather。
+ * T+1 日账单 Mapper：聚合 coupon_share_detail 正行 - coupon_refund_detail 退款明细
+ * （兼容旧版负分账行）→ 幂等落 coupon_daily_bill。两张表都未分片，聚合不需要 scatter-gather。
  */
 @Mapper
 public interface CouponDailyBillMapper extends BaseMapper<CouponDailyBillPO> {
@@ -41,14 +41,30 @@ public interface CouponDailyBillMapper extends BaseMapper<CouponDailyBillPO> {
         public void setMerchantBurden(Long merchantBurden) { this.merchantBurden = merchantBurden; }
     }
 
-    /** 按 [start, end) 聚合当日分账行：正行计核销、负行计冲回，金额净额 */
+    /**
+     * 按 [start, end) 聚合当日账目：
+     * 正分账行计核销；退款明细（coupon_refund_detail）计冲回；旧版负分账行也兼容计入冲回。
+     * 金额净额 = 正行 - 退款明细 - 旧负行。
+     */
     @Select("SELECT template_id AS templateId, " +
-            "       COALESCE(SUM(CASE WHEN share_total > 0 THEN 1 ELSE 0 END), 0) AS confirmCount, " +
-            "       COALESCE(SUM(CASE WHEN share_total < 0 THEN 1 ELSE 0 END), 0) AS refundCount, " +
-            "       COALESCE(SUM(share_total), 0) AS discountTotal, " +
-            "       COALESCE(SUM(platform_burden), 0) AS platformBurden, " +
-            "       COALESCE(SUM(merchant_burden), 0) AS merchantBurden " +
-            "FROM coupon_share_detail WHERE create_time >= #{start} AND create_time < #{end} " +
+            "       COALESCE(SUM(confirmCount), 0) AS confirmCount, " +
+            "       COALESCE(SUM(refundCount), 0) AS refundCount, " +
+            "       COALESCE(SUM(discountTotal), 0) AS discountTotal, " +
+            "       COALESCE(SUM(platformBurden), 0) AS platformBurden, " +
+            "       COALESCE(SUM(merchantBurden), 0) AS merchantBurden " +
+            "FROM ( " +
+            "  SELECT template_id, 1 AS confirmCount, 0 AS refundCount, " +
+            "         share_total AS discountTotal, platform_burden AS platformBurden, " +
+            "         merchant_burden AS merchantBurden, create_time " +
+            "  FROM coupon_share_detail WHERE share_total > 0 " +
+            "  UNION ALL " +
+            "  SELECT template_id, 0, 1, -share_total, -platform_burden, -merchant_burden, create_time " +
+            "  FROM coupon_share_detail WHERE share_total < 0 " +
+            "  UNION ALL " +
+            "  SELECT template_id, 0, 1, -refund_discount_amt, -refund_platform_amt, " +
+            "         -refund_merchant_amt, create_time " +
+            "  FROM coupon_refund_detail " +
+            ") t WHERE create_time >= #{start} AND create_time < #{end} " +
             "GROUP BY template_id")
     List<DailyAgg> aggregateByDate(@Param("start") LocalDateTime start, @Param("end") LocalDateTime end);
 
