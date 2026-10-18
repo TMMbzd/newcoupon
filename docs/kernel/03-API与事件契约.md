@@ -1,6 +1,6 @@
 # 03 · API 与事件契约
 
-> **状态**：v0.1（2026-10-18，待评审）。
+> **状态**：v0.2（2026-10-18，已按对抗审查修订）。
 > **读者**：产品接入方、内核开发、测试。
 > **前置阅读**：[00 定位与能力边界](00-定位与能力边界.md)、[01 内核能力契约](01-内核能力契约.md)、[02 领域模型与数据契约](02-领域模型与数据契约.md)。
 > **这份文档回答**：有哪些接口、每个接口的字段与语义、怎么认证/幂等/重试、事件长什么样、版本怎么兼容、哪些还没实现。
@@ -94,7 +94,7 @@ NONCE
 | 2 | POST | `/templates/{id}/publish` | 发布模板 | ✅ | ✅（管理令牌） | 同 token 回放；重复发布 2003 | ✅ |
 | 3 | GET | `/templates/{id}` | 查模板 | ✅ | ✅ | 只读 | ✅ |
 | 4 | POST | `/coupons/receive` | 领券 | ✅ | ✅（白名单） | `requestId` + token | ✅ |
-| 5 | POST | `/calculate` | 试算 | ✅ | ❌（无 `/api` 路由） | `X-Client-Token` 必填（只读，无业务幂等键） | ✅ |
+| 5 | POST | `/calculate` | 试算 | ✅ | ❌（无 `/api` 路由） | `X-Client-Token` 必填；默认只读；带 `orderNo`/`pricingId` 时写快照，需摘要幂等（目标） | ✅ |
 | 6 | POST | `/coupons/lock` | 锁券 | ✅ | ✅（白名单） | `(orderNo,couponId)` | ✅ |
 | 7 | POST | `/coupons/confirm` | 核销 | ✅ | ✅（白名单） | `usageNo` | ✅ |
 | 8 | POST | `/coupons/release` | 释放 | ✅ | ✅（白名单） | `usageNo` | ✅ |
@@ -243,7 +243,7 @@ NONCE
 
 **说明**：
 
-- 试算只读，不锁券/不扣库存，但 **POST 仍要求 `X-Client-Token`**；
+- 试算默认只读，不锁券/不扣库存；带 `orderNo`/`pricingId` 时会写快照（目标），但 **POST 仍要求 `X-Client-Token`**；
 - 同 token 同 body 在 24 小时内会回放旧结果；想重新算（模板/状态可能变了）请用新 token；
 - 同层同互斥组最多 1 张中选，不同组可叠加；每层按剩余金额递进；
 - `allocations` 合计 = `discountAmount`；
@@ -569,7 +569,7 @@ X-Client-Token: refund-20261018-001
 5. `/api` 长期定位：平台运营面，还是补内部租户身份？
 6. 沙箱/契约测试的落地方式（独立 appId？独立环境？）。
 7. `uk_idem(user_id, idempotent_key)` 不含 appId：跨租户同 userId+requestId 会撞键；是否把 appId 纳入幂等键（需要动 64 张分表）？
-8. `pricingId` 失效的专用错误码（01 暂写“如 4007”，ErrorCode 尚未登记）；编号以 01/03 最终版为准。
+8. `pricingId` 失效的专用错误码：目标新增 `4007 PRICING_SNAPSHOT_INVALID`（ErrorCode 尚未登记；不复用 1000/4002/4004）；编号以 01/03 最终版为准。
 9. 非法查询参数 `status=9` 已由入口转成 `1000`（2026-10-18 修，`TradeControllerTest` 钉住）。
 
 ### 16.2 变更记录
@@ -577,3 +577,4 @@ X-Client-Token: refund-20261018-001
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v0.1 | 2026-10-18 | 初稿：通用协议、接口总表、逐接口字段、错误/幂等、事件目标、版本、限流、安全、示例 |
+| v0.2 | 2026-10-18 | 按对抗审查修订：所有 `/open` POST（含试算）必须带 `X-Client-Token`；枚举响应为中文描述；发件箱仅 ISSUED；INVALIDATED 无产生点；1001 两种语义；错误清单按实修正；`LocalDateTime` 无 offset；5003 仅领券；非法 `status` 改 1000；7001/7002 补 `data:null`；目标错误码 4007 未登记按目标态标注 |
