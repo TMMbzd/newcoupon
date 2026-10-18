@@ -54,6 +54,8 @@ public enum ErrorCode {
      * 一律 fail-closed，不静默回退到“按当前规则重算”——静默改价比拒绝更危险。
      */
     PRICING_SNAPSHOT_INVALID(4007, "价格快照无效（不存在/已过期/归属或券集合不一致）"),
+    /** 退款查询（环 3）：按退款单号查明细但单号不存在 */
+    REFUND_NOT_FOUND(4008, "退款单不存在"),
 
     // ---- 5xxx 系统与依赖 ----
     SYSTEM_ERROR(5000, "系统繁忙，请稍后重试"),

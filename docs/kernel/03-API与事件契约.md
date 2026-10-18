@@ -1,6 +1,6 @@
 # 03 · API 与事件契约
 
-> **状态**：v0.4（2026-10-18，环 2 价格快照已支持）。
+> **状态**：v0.5（2026-10-18，环 3 结算-lite 已支持）。
 > **读者**：产品接入方、内核开发、测试。
 > **前置阅读**：[00 定位与能力边界](00-定位与能力边界.md)、[01 内核能力契约](01-内核能力契约.md)、[02 领域模型与数据契约](02-领域模型与数据契约.md)。
 > **这份文档回答**：有哪些接口、每个接口的字段与语义、怎么认证/幂等/重试、事件长什么样、版本怎么兼容、哪些还没实现。
@@ -104,9 +104,14 @@ NONCE
 | 12 | GET | `/coupons/bills?date=&appId=` | 查日账单/主体汇总 | — | — | 只读 | ○ |
 | 13 | POST | `/webhooks` | 注册事件 Webhook | — | — | — | ○ |
 | 14 | GET/POST | `/pricing-exceptions[...]` | 核销异常列表/人工解除 | — | ✅（管理令牌；路径为 `/api/pricing-exceptions`） | `usageNo` + action | ✅（V23） |
+| 15 | POST | `/refunds/query` | 退款单列表（usageNo/refundNo/orderNo/appId/主体/日期） | — | ✅（管理令牌；路径为 `/api/refunds/query`） | 查询只读 | ✅（V24） |
+| 16 | POST | `/refunds/detail` | 退款单明细（行级主体/冲回） | — | ✅（管理令牌；路径为 `/api/refunds/detail`） | `refundNo` | ✅（V24） |
+| 17 | POST | `/bills/settle-party/query` | 主体日账单 | — | ✅（管理令牌；路径为 `/api/bills/settle-party/query`） | `billDate` 必填 | ✅（V24） |
+| 18 | POST | `/bills/template/query` | 模板日账单 | — | ✅（管理令牌；路径为 `/api/bills/template/query`） | `billDate` 必填 | ✅（V24） |
 
 > 内部面路径 = 把 `/open/v1` 换成 `/api`（如 `/api/coupons/lock`）；`/api` 不是多租户隔离面，只用于平台运营。
 > 例外：`/api/pricing-exceptions` 是管理面专用（没有开放面版本）；POST 由 `AdminTokenFilter` 默认要求 `X-Admin-Token`，GET 沿用项目现状不设令牌（环 4 补 RBAC）。
+> 财务查询（15~18）**只有 POST**：GET 在现有过滤器下不设防，且单号/订单号会进访问日志；POST 自动落入默认拒绝。无开放面版本，租户自助查询留环 4。
 > **所有 `/open/v1` 的 POST 都要求 `X-Client-Token`**（含试算/建模板/发布）；缺失/格式错 → 400/6012。GET 不要求 token。
 > 目标查询接口（#11/#12）的接入面（开放面还是内部面）尚未定；`appId` 不应由查询参数任意指定，必须来自认证上下文。
 
@@ -566,9 +571,9 @@ X-Client-Token: refund-20261018-001
 | 领券 | ✅ | 批量/定向 |
 | 试算 | ✅ 含 `settlePartyId`；带 `orderNo` 返回 `pricingId`（两项灰度默认关） | 扩展结果冻结、多方案比价 |
 | 锁/核销/释放 | ✅ 含结算主体行级归属；锁券绑定快照、核销按冻结价、`CONFIRM_EXCEPTION` 人工解除 | 商家/门店/地区主体 |
-| 退款 | ✅ 整单/按行；明细复制原主体 | 租户级政策、按主体日汇总 |
-| 查券包 | ✅ | 按订单/占用单/退款/账单查询 |
-| 日账单/主体汇总 | ◐ 模板日账单只有表/定时任务，无 HTTP 查询 | 查询 API/导出/主体汇总 |
+| 退款 | ✅ 整单/按行；明细复制原主体；租户级政策 | 按主体退款查询的开放面（内部面已有） |
+| 查券包 | ✅ 券包；✅ 内部面退款/账单查询（POST+管理令牌） | 开放面租户自助查询 |
+| 日账单/主体汇总 | ✅ 模板日账单 + 主体日账单 + 内部查询 API | 导出/结算单/结算时点 |
 | 事件 | ◐ 内部事件；发件箱仅 ISSUED（topic `coupon-issued`），其余只写事件表；默认 log 传输 | 全事件投递、对外 Webhook、至少一次、死信 |
 | 沙箱/契约测试 | ❌ | ✅ |
 | `/api` 多租户隔离 | ❌ | 平台运营面或补内部租户身份 |
@@ -587,6 +592,7 @@ X-Client-Token: refund-20261018-001
 6. 沙箱/契约测试的落地方式（独立 appId？独立环境？）。
 7. `uk_idem(user_id, idempotent_key)` 不含 appId：跨租户同 userId+requestId 会撞键；是否把 appId 纳入幂等键（需要动 64 张分表）？
 8. ~~`pricingId` 失效专用错误码~~ → 已登记 `4007 PRICING_SNAPSHOT_INVALID`（不复用 1000/4002/4004）。
+9. 退款查询专用错误码：已登记 `4008 REFUND_NOT_FOUND`（按退款单号查明细不存在）。
 9. 非法查询参数 `status=9` 已由入口转成 `1000`（2026-10-18 修，`TradeControllerTest` 钉住）。
 
 ### 16.2 变更记录
@@ -597,3 +603,4 @@ X-Client-Token: refund-20261018-001
 | v0.2 | 2026-10-18 | 按对抗审查修订：所有 `/open` POST（含试算）必须带 `X-Client-Token`；枚举响应为中文描述；发件箱仅 ISSUED；INVALIDATED 无产生点；1001 两种语义；错误清单按实修正；`LocalDateTime` 无 offset；5003 仅领券；非法 `status` 改 1000；7001/7002 补 `data:null`；目标错误码 4007 未登记按目标态标注 |
 | v0.3 | 2026-10-18 | 环 1 实施：模板/OrderItem 的 `settlePartyId` 已支持（灰度默认关）；退款不接收主体；接口矩阵/待确认同步 |
 | v0.4 | 2026-10-18 | 环 2 实施：calculate 加 `orderNo`/`pricingId`；lock/confirm 加 `pricingId`+绑定；4007 登记；`CONFIRM_EXCEPTION` 事件与管理面解除接口；兼容/矩阵/待确认同步 |
+| v0.5 | 2026-10-18 | 环 3 实施：内部面退款/主体账单/模板账单查询（POST+管理令牌）；4008 登记；无开放面版本 |

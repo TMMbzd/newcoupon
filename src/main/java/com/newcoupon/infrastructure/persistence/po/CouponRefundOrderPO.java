@@ -33,6 +33,8 @@ public class CouponRefundOrderPO {
     /** 请求摘要（usageNo + 排序后的行号:数量），同号异参检测 */
     private String requestDigest;
     private Integer itemCount;
+    /** V24：0=老式退款无出资明细（platform/merchant=0 不可用于结算） */
+    private Integer fundingKnown;
     /** 整单退时券是否已退回可用（1=是） */
     private Integer couponReturned;
     /** 退款完成时的券状态（CouponStatus.name()，同号重放原样返回） */
@@ -69,6 +71,8 @@ public class CouponRefundOrderPO {
     public void setRequestDigest(String requestDigest) { this.requestDigest = requestDigest; }
     public Integer getItemCount() { return itemCount; }
     public void setItemCount(Integer itemCount) { this.itemCount = itemCount; }
+    public Integer getFundingKnown() { return fundingKnown; }
+    public void setFundingKnown(Integer fundingKnown) { this.fundingKnown = fundingKnown; }
     public Integer getCouponReturned() { return couponReturned; }
     public void setCouponReturned(Integer couponReturned) { this.couponReturned = couponReturned; }
     public String getCouponStatus() { return couponStatus; }

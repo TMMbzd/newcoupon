@@ -45,6 +45,9 @@ public interface CouponDailyBillMapper extends BaseMapper<CouponDailyBillPO> {
      * 按 [start, end) 聚合当日账目：
      * 正分账行计核销；退款明细（coupon_refund_detail）计冲回；旧版负分账行也兼容计入冲回。
      * 金额净额 = 正行 - 退款明细 - 旧负行。
+     *
+     * <p><b>旧负行取 `-ABS(...)`</b>：负行本身的金额已经是负数，直接相加即可净额；
+     * 早期写法 `-share_total` 会把负数翻成正数、反而虚增账单。V24 起修正。
      */
     @Select("SELECT template_id AS templateId, " +
             "       COALESCE(SUM(confirmCount), 0) AS confirmCount, " +
@@ -58,7 +61,8 @@ public interface CouponDailyBillMapper extends BaseMapper<CouponDailyBillPO> {
             "         merchant_burden AS merchantBurden, create_time " +
             "  FROM coupon_share_detail WHERE share_total > 0 " +
             "  UNION ALL " +
-            "  SELECT template_id, 0, 1, -share_total, -platform_burden, -merchant_burden, create_time " +
+            "  SELECT template_id, 0, 1, " +
+            "         -ABS(share_total), -ABS(platform_burden), -ABS(merchant_burden), create_time " +
             "  FROM coupon_share_detail WHERE share_total < 0 " +
             "  UNION ALL " +
             "  SELECT template_id, 0, 1, -refund_discount_amt, -refund_platform_amt, " +
@@ -81,4 +85,64 @@ public interface CouponDailyBillMapper extends BaseMapper<CouponDailyBillPO> {
     /** 读账单（测试/查询用） */
     @Select("SELECT * FROM coupon_daily_bill WHERE bill_date = #{billDate} ORDER BY template_id")
     List<CouponDailyBillPO> selectByDate(@Param("billDate") LocalDate billDate);
+
+    // ---------- 环 3：内部面模板账单查询 ----------
+
+    /** 模板账单查询行（join 模板补 name/app_id；模板账单本身没有 app_id） */
+    class TemplateBillRow {
+        private LocalDate billDate;
+        private Long templateId;
+        private String templateName;
+        private String appId;
+        private Integer confirmCount;
+        private Integer refundCount;
+        private Long discountTotal;
+        private Long platformBurden;
+        private Long merchantBurden;
+
+        public LocalDate getBillDate() { return billDate; }
+        public void setBillDate(LocalDate billDate) { this.billDate = billDate; }
+        public Long getTemplateId() { return templateId; }
+        public void setTemplateId(Long templateId) { this.templateId = templateId; }
+        public String getTemplateName() { return templateName; }
+        public void setTemplateName(String templateName) { this.templateName = templateName; }
+        public String getAppId() { return appId; }
+        public void setAppId(String appId) { this.appId = appId; }
+        public Integer getConfirmCount() { return confirmCount; }
+        public void setConfirmCount(Integer confirmCount) { this.confirmCount = confirmCount; }
+        public Integer getRefundCount() { return refundCount; }
+        public void setRefundCount(Integer refundCount) { this.refundCount = refundCount; }
+        public Long getDiscountTotal() { return discountTotal; }
+        public void setDiscountTotal(Long discountTotal) { this.discountTotal = discountTotal; }
+        public Long getPlatformBurden() { return platformBurden; }
+        public void setPlatformBurden(Long platformBurden) { this.platformBurden = platformBurden; }
+        public Long getMerchantBurden() { return merchantBurden; }
+        public void setMerchantBurden(Long merchantBurden) { this.merchantBurden = merchantBurden; }
+    }
+
+    @Select("<script>SELECT b.bill_date AS billDate, b.template_id AS templateId, " +
+            "       t.name AS templateName, t.app_id AS appId, " +
+            "       b.confirm_count AS confirmCount, b.refund_count AS refundCount, " +
+            "       b.discount_total AS discountTotal, b.platform_burden AS platformBurden, " +
+            "       b.merchant_burden AS merchantBurden " +
+            "FROM coupon_daily_bill b LEFT JOIN coupon_template t ON t.id = b.template_id " +
+            "WHERE b.bill_date = #{billDate} " +
+            "<if test='appId != null'>AND BINARY t.app_id = BINARY #{appId} </if>" +
+            "<if test='templateId != null'>AND b.template_id = #{templateId} </if>" +
+            "ORDER BY b.template_id LIMIT #{size} OFFSET #{offset}</script>")
+    List<TemplateBillRow> selectByFilters(@Param("billDate") LocalDate billDate,
+                                          @Param("appId") String appId,
+                                          @Param("templateId") Long templateId,
+                                          @Param("size") int size,
+                                          @Param("offset") long offset);
+
+    @Select("<script>SELECT COUNT(*) FROM coupon_daily_bill b " +
+            "LEFT JOIN coupon_template t ON t.id = b.template_id " +
+            "WHERE b.bill_date = #{billDate} " +
+            "<if test='appId != null'>AND BINARY t.app_id = BINARY #{appId} </if>" +
+            "<if test='templateId != null'>AND b.template_id = #{templateId} </if>" +
+            "</script>")
+    long countByFilters(@Param("billDate") LocalDate billDate,
+                        @Param("appId") String appId,
+                        @Param("templateId") Long templateId);
 }

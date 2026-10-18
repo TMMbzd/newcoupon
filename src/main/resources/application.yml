@@ -65,6 +65,8 @@ coupon:
     max-refund-times: ${MAX_REFUND_TIMES:50}
     # 一券最多退券次数（整单退款且券在有效期内才退；防“下单-退款-再用”刷券）
     max-return-times: ${MAX_RETURN_TIMES:3}
+    # 整单退完且券在有效期内，是否退回待使用（租户可覆盖）
+    full-refund-return-coupon: ${FULL_REFUND_RETURN_COUPON:true}
     # 环 2 价格快照：默认关，按租户灰度（trade.pricing.enabled 可覆盖）
     # ttl 默认 120 分钟；锁券时还会续期到“锁窗 + 10 分钟宽限”，见 TradeTxService
     pricing:
@@ -73,6 +75,10 @@ coupon:
   # 价格快照清理（过期置空 live_digest；历史行保留 7 天后删除）
   pricing:
     cleanup-cron: ${PRICING_CLEANUP_CRON:0 17 * * * ?}
+  # 环 3 主体日账单开关：默认开（纯增量新表）；关闭后只出旧模板账单，便于回滚
+  billing:
+    settle-party:
+      enabled: ${SETTLE_PARTY_BILL_ENABLED:true}
   # ADR-0009 守恒对账：修复模式 force|shadow（影子=推导落表不执行，v3 修订8 先行 1-2 周）
   reconcile:
     auto-repair:

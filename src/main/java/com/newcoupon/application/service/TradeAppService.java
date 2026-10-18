@@ -59,6 +59,8 @@ public class TradeAppService {
     private final DiscountCalculatorService discountCalculatorService;
     private final PricingSnapshotService pricingSnapshotService;
     private final PricingUsageRepository pricingUsageRepository;
+    private final RefundPolicyService refundPolicyService;
+    private final TradeMetrics tradeMetrics;
 
     /** 申报防线①：单笔优惠占订单金额的上限（百分数，默认 80）。极端促销（0元购）可调高 */
     private final int maxDiscountRatio;
@@ -71,32 +73,26 @@ public class TradeAppService {
 
     private static final long RATE_WINDOW_MS = 60_000;
 
-    /** 部分退款次数上限（对齐微信支付单品退款：同一笔最多 50 次） */
-    private final int maxRefundTimes;
-
-    /** 一券最多退券次数（防“下单-退款-再用”刷券） */
-    private final int maxReturnTimes;
-
     public TradeAppService(TradeTxService tradeTxService,
                            UserCouponRepository userCouponRepository,
                            CouponUsageRepository couponUsageRepository,
                            DiscountCalculatorService discountCalculatorService,
                            PricingSnapshotService pricingSnapshotService,
                            PricingUsageRepository pricingUsageRepository,
+                           RefundPolicyService refundPolicyService,
+                           TradeMetrics tradeMetrics,
                            @Value("${coupon.trade.max-discount-ratio:80}") int maxDiscountRatio,
-                           @Value("${coupon.trade.confirm-rate-per-minute:600}") int confirmRateLimit,
-                           @Value("${coupon.trade.max-refund-times:50}") int maxRefundTimes,
-                           @Value("${coupon.trade.max-return-times:3}") int maxReturnTimes) {
+                           @Value("${coupon.trade.confirm-rate-per-minute:600}") int confirmRateLimit) {
         this.tradeTxService = tradeTxService;
         this.userCouponRepository = userCouponRepository;
         this.couponUsageRepository = couponUsageRepository;
         this.discountCalculatorService = discountCalculatorService;
         this.pricingSnapshotService = pricingSnapshotService;
         this.pricingUsageRepository = pricingUsageRepository;
+        this.refundPolicyService = refundPolicyService;
+        this.tradeMetrics = tradeMetrics;
         this.maxDiscountRatio = maxDiscountRatio;
         this.confirmRateLimit = confirmRateLimit;
-        this.maxRefundTimes = maxRefundTimes;
-        this.maxReturnTimes = maxReturnTimes;
     }
 
     public LockResult lock(LockRequest req) {
@@ -177,6 +173,19 @@ public class TradeAppService {
      */
     @AuditLog(action = "COUPON_CONFIRM", resourceType = "USAGE", describe = "核销占用单（动钱）")
     public ConfirmResult confirm(ConfirmRequest req) {
+        ConfirmResult result;
+        try {
+            result = doConfirm(req);
+        } catch (RuntimeException e) {
+            safeMetric(() -> tradeMetrics.recordConfirmFailed());
+            throw e;
+        }
+        safeMetric(() -> tradeMetrics.recordConfirm(result.duplicated(),
+                result.discountAmt() == null ? 0 : result.discountAmt()));
+        return result;
+    }
+
+    private ConfirmResult doConfirm(ConfirmRequest req) {
         assertUsageAccessible(req.usageNo());   // S1 越权防线（占用单只带 usageNo，需经券取归属）
 
         // 环 2：锁券带快照时，占用单上有唯一绑定。核销漏传 pricingId 也按绑定解析，
@@ -447,6 +456,15 @@ public class TradeAppService {
      * 把占用单钉在 CONFIRM_EXCEPTION。标记失败只记 ERROR，不覆盖原始 4007——
      * 原始错误是调用方/运维最需要看到的现场。
      */
+    /** 指标失败绝不能把一次已经成功的动钱操作变成 500 */
+    private void safeMetric(Runnable metric) {
+        try {
+            metric.run();
+        } catch (RuntimeException e) {
+            log.warn("trade metric failed", e);
+        }
+    }
+
     private void markConfirmExceptionQuietly(String usageNo, String pricingId, String reason) {
         try {
             tradeTxService.markConfirmException(usageNo, pricingId, reason, LocalDateTime.now());
@@ -542,7 +560,26 @@ public class TradeAppService {
 
     @AuditLog(action = "COUPON_REFUND", resourceType = "USAGE", describe = "退款冲销（动钱）")
     public RefundResult refund(RefundRequest req) {
+        RefundResult result;
+        try {
+            result = doRefund(req);
+        } catch (RuntimeException e) {
+            safeMetric(() -> tradeMetrics.recordRefundFailed());
+            throw e;
+        }
+        safeMetric(() -> tradeMetrics.recordRefund(result));
+        return result;
+    }
+
+    private RefundResult doRefund(RefundRequest req) {
         assertUsageAccessible(req.usageNo());
+        // 政策按“券的 appId”解析：内部面没有请求上下文，但券一定属于某个租户。
+        CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo())
+                .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
+        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+                .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
+        RefundPolicy policy = refundPolicyService.resolve(coupon.getAppId());
+
         // 旧调用方不传退款单号：生成确定性的 AUTO:<usageNo>（只能整单退一次），
         // 新调用方必须传自己的退款单号，才能按行多次部分退款且可幂等重放。
         String refundNo = req.refundNo();
@@ -551,8 +588,7 @@ public class TradeAppService {
         }
         RefundRequest normalized = new RefundRequest(req.usageNo(), refundNo, req.items());
         try {
-            return tradeTxService.refundConfirm(normalized, LocalDateTime.now(),
-                    maxRefundTimes, maxReturnTimes);
+            return tradeTxService.refundConfirm(normalized, LocalDateTime.now(), policy);
         } catch (TradeCasRejectedException e) {
             throw freshStateConflict("退款", e);
         }

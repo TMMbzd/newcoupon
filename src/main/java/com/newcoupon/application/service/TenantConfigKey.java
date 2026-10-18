@@ -39,6 +39,18 @@ public enum TenantConfigKey implements ConfigKeySpec {
     TRADE_PRICING_ENABLED("trade.pricing.enabled", "false", Type.BOOL,
             "价格快照开关（false=不写快照；true=带 orderNo 的试算写快照并返回 pricingId）"),
 
+    /** 租户级退款政策（环 3）：未配置回落全站 coupon.trade.max-refund-times，再默认 50 */
+    TRADE_REFUND_MAX_TIMES("trade.refund.max_times", "50", Type.INT,
+            "单个占用单最多退款次数（1~1000；未配置回落全站）", 1, 1000),
+
+    /** 一券最多退券次数：0 = 整单退也不退券 */
+    TRADE_REFUND_MAX_RETURN_TIMES("trade.refund.max_return_times", "3", Type.INT,
+            "一券最多退券次数（0~100；0=整单退也不退券；未配置回落全站）", 0, 100),
+
+    /** 整单退完且券在有效期内，是否退回待使用；false = 券保持已核销 */
+    TRADE_REFUND_FULL_RETURN_COUPON("trade.refund.full_return_coupon", "true", Type.BOOL,
+            "整单退完是否退券（false=券保持已核销；未配置回落全站）"),
+
     /** 熔断的异常比例阈值（百分比） */
     CIRCUIT_BREAKER_FAILURE_RATE("circuit_breaker.failure_rate", "50", Type.INT, "熔断：异常比例阈值（%）", 1, 100),
 

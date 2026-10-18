@@ -187,7 +187,9 @@ public class CachedTenantConfigService implements TenantConfigService {
             upsert(appId, e.getKey(), e.getValue());
             writeLog(appId, e.getKey(), old, e.getValue(), operator);
         }
-        invalidate(appId);   // ③ 改完立刻失效缓存（本实例马上生效，不等 30 秒刷新）
+        // ③ 改完立刻失效缓存；提交后再失效一次——否则并发读者可能在提交前回源旧值
+        // 并把它重新缓存 60 秒，出现“改了配置本实例也不是立刻生效”
+        invalidateAfterCommit(appId);
         // ④ 通知 Sentinel 的规则源也立刻跟上——否则限流阈值要等下一个刷新周期才变
         eventPublisher.publishEvent(new com.newcoupon.infrastructure.ratelimit.TenantQuotaChangedEvent(
                 "配置变更：" + appId));
@@ -203,7 +205,7 @@ public class CachedTenantConfigService implements TenantConfigService {
         String old = currentValue(appId, key);
         mapper.delete(new QueryWrapper<OpenAppConfigPO>().eq("app_id", appId).eq("config_key", key));
         writeLog(appId, key, old, null, operator);
-        invalidate(appId);
+        invalidateAfterCommit(appId);
         // 删除同样要通知规则源（2026-10-08：第一版只给了 put 加事件，remove 漏了——
         // 症状是"清掉配置后限流阈值不收敛"，实测让一条用例红）
         eventPublisher.publishEvent(new com.newcoupon.infrastructure.ratelimit.TenantQuotaChangedEvent(
@@ -214,6 +216,28 @@ public class CachedTenantConfigService implements TenantConfigService {
     public void invalidate(String appId) {
         cache.invalidate(appId);
         log.info("租户配置缓存已失效：appId={}", appId);
+    }
+
+    /**
+     * 写事务内先失效一次（本实例尽快生效），提交后再失效一次。
+     *
+     * <p>只在提交前失效有一个真实竞态：并发读者在事务提交前回源读到旧值，
+     * 把旧值写回缓存，之后 60 秒内本实例都读旧配置。afterCommit 的二次失效
+     * 把这个窗口收掉；多实例仍受各自缓存 TTL 限制（约 60s），文档不承诺全站立即生效。
+     */
+    private void invalidateAfterCommit(String appId) {
+        invalidate(appId);
+        if (org.springframework.transaction.support.TransactionSynchronizationManager
+                .isSynchronizationActive()) {
+            org.springframework.transaction.support.TransactionSynchronizationManager
+                    .registerSynchronization(
+                            new org.springframework.transaction.support.TransactionSynchronization() {
+                                @Override
+                                public void afterCommit() {
+                                    invalidate(appId);
+                                }
+                            });
+        }
     }
 
     /** 直读一项（绕过缓存）：写入前取旧值，用于审计 */

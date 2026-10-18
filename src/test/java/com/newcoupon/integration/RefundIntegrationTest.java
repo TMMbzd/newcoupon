@@ -33,6 +33,11 @@ import com.newcoupon.open.api.dto.CalculateRequest;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -289,5 +294,46 @@ class RefundIntegrationTest extends ShardedIntegrationTestSupport {
                 b.usageNo(), "RF-SHARED", List.of(new RefundItem("L1", 1)))))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("其他占用单");
+    }
+
+    @Test
+    @DisplayName("R10: 并发同号退款 → 一次成功一次重放，不能 500")
+    void r10_concurrentSameRefundNo() throws Exception {
+        Confirmed c = confirmTwoLines("R10");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch go = new CountDownLatch(1);
+        java.util.concurrent.Callable<RefundResult> call = () -> {
+            ready.countDown();
+            go.await();
+            return tradeAppService.refund(new RefundRequest(c.usageNo(), "RF-R10",
+                    List.of(new RefundItem("L1", 1))));
+        };
+        Future<RefundResult> f1 = pool.submit(call);
+        Future<RefundResult> f2 = pool.submit(call);
+        assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+        go.countDown();
+        RefundResult r1 = f1.get(30, TimeUnit.SECONDS);
+        RefundResult r2 = f2.get(30, TimeUnit.SECONDS);
+        pool.shutdownNow();
+
+        assertThat(r1.duplicated() || r2.duplicated())
+                .as("并发同号必须有一个走重放，不能两个都当首次成功").isTrue();
+        assertThat(r1.discountAmt()).isEqualTo(r2.discountAmt());
+        assertThat(refundOrderMapper.selectByRefundNo("RF-R10")).isNotNull();
+    }
+
+    @Test
+    @DisplayName("R9: 已退 1 件后再传 Integer.MAX_VALUE，不能 int 溢出绕过累计校验")
+    void r9_quantityOverflowRejected() {
+        Confirmed c = confirmTwoLines("R9");
+        tradeAppService.refund(new RefundRequest(
+                c.usageNo(), "RF-R9-1", List.of(new RefundItem("L1", 1))));
+
+        assertThatThrownBy(() -> tradeAppService.refund(new RefundRequest(
+                c.usageNo(), "RF-R9-2",
+                List.of(new RefundItem("L1", Integer.MAX_VALUE)))))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("超过原数量");
     }
 }

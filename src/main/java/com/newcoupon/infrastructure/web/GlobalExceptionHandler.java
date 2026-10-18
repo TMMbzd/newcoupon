@@ -87,6 +87,19 @@ public class GlobalExceptionHandler {
         };
     }
 
+    /**
+     * HTTP 方法不支持：例如对只允许 POST 的财务查询发 GET。
+     * 不落到兜底 5000——那是"系统异常"，会误导排障；405 才是准确的。
+     */
+    @ExceptionHandler(org.springframework.web.HttpRequestMethodNotSupportedException.class)
+    public Result<Void> handleMethodNotAllowed(
+            org.springframework.web.HttpRequestMethodNotSupportedException e,
+            jakarta.servlet.http.HttpServletResponse response) {
+        log.warn("method not allowed: {}", e.getMessage());
+        response.setStatus(405);
+        return Result.fail(ErrorCode.PARAM_ERROR, "不支持的 HTTP 方法: " + e.getMethod());
+    }
+
     /** 参数校验失败：JSR-303 注解校验不通过时，把所有字段错误拼出来一次性返回 */
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public Result<Void> handleValidation(MethodArgumentNotValidException e) {

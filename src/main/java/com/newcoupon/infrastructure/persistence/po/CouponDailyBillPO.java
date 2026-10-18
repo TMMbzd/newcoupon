@@ -15,7 +15,7 @@ public class CouponDailyBillPO {
     private LocalDate billDate;
     private Long templateId;
     private Integer confirmCount;   // 核销行数（正分账行）
-    private Integer refundCount;    // 退款冲回行数（负分账行）
+    private Integer refundCount;    // 退款冲回行数（退款明细 + 旧负分账行；不是退款请求数）
     private Long discountTotal;     // 净优惠总额（分）= 平台 + 商家承担
     private Long platformBurden;    // 平台承担净额（分）
     private Long merchantBurden;    // 商家承担净额（分）

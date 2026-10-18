@@ -10,11 +10,14 @@ import com.newcoupon.application.dto.TradeDtos.ConfirmRequest;
 import com.newcoupon.application.dto.TradeDtos.ConfirmResult;
 import com.newcoupon.application.dto.TradeDtos.LockRequest;
 import com.newcoupon.application.dto.TradeDtos.LockResult;
+import com.newcoupon.application.dto.TradeDtos.RefundRequest;
 import com.newcoupon.application.service.ReceiveAppService;
 import com.newcoupon.application.service.TemplateAppService;
 import com.newcoupon.application.service.TradeAppService;
 import com.newcoupon.common.BizException;
+import com.newcoupon.infrastructure.persistence.mapper.CouponRefundOrderMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponShareDetailMapper;
+import com.newcoupon.infrastructure.persistence.po.CouponRefundOrderPO;
 import com.newcoupon.open.api.dto.CalculateRequest;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -37,6 +40,7 @@ class ConfirmByPlatformIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired private ReceiveAppService receiveAppService;
     @Autowired private TradeAppService tradeAppService;
     @Autowired private CouponShareDetailMapper shareDetailMapper;
+    @Autowired private CouponRefundOrderMapper refundOrderMapper;
 
     @org.springframework.test.context.DynamicPropertySource
     static void shardingProperties(org.springframework.test.context.DynamicPropertyRegistry registry) {
@@ -108,6 +112,14 @@ class ConfirmByPlatformIntegrationTest extends ShardedIntegrationTestSupport {
         // 老式核销不写分账（没有 items，平台没有算钱，无从拆分）
         long shareTotal = shareDetailMapper.sumShareByUsageNo(lc.usageNo());
         assertThat(shareTotal).as("老式核销无分账记录").isEqualTo(0L);
+
+        // 老式退款没有出资明细：funding_known=0，platform/merchant=0 不能当真实出资
+        tradeAppService.refund(new RefundRequest(lc.usageNo(), "RF-OLD-STYLE", null));
+        CouponRefundOrderPO refund = refundOrderMapper.selectByRefundNo("RF-OLD-STYLE");
+        assertThat(refund.getFundingKnown()).isZero();
+        assertThat(refund.getRefundDiscountAmt()).isEqualTo(2000L);
+        assertThat(refund.getRefundPlatformAmt()).isZero();
+        assertThat(refund.getRefundMerchantAmt()).isZero();
     }
 
     @Test

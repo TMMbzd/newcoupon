@@ -498,9 +498,23 @@ public class TradeTxService {
      *   <li>部分退款券保持已核销；整单退完且券在有效期内 → 退回待使用（一券限退 N 次）。</li>
      * </ul>
      */
+    /**
+     * 兼容入口：旧调用方/测试只传两个整数上限；整单退券按默认 true。
+     * <b>生产不要用</b>——它会绕过租户的“整单退是否退券”政策。
+     */
+    @Deprecated
     @Transactional
     public RefundResult refundConfirm(RefundRequest req, LocalDateTime now,
                                       int maxRefundTimes, int maxReturnTimes) {
+        return refundConfirm(req, now, new RefundPolicy(maxRefundTimes, maxReturnTimes, true));
+    }
+
+    /**
+     * 退款事务（环 3）：政策由调用方按券的 appId 解析后传入；
+     * 部分退不退券、整单退是否退券、最多退款/退券次数都在策略里。
+     */
+    @Transactional
+    public RefundResult refundConfirm(RefundRequest req, LocalDateTime now, RefundPolicy policy) {
         if (req.refundNo() == null || req.refundNo().isBlank()) {
             throw new BizException(ErrorCode.PARAM_ERROR, "退款单号不能为空");
         }
@@ -532,7 +546,7 @@ public class TradeTxService {
                 .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
 
         // 并发同号：拿到行锁后再查一次（后到者会看到先到者已提交的退款单）
-        existing = couponRefundOrderMapper.selectByRefundNo(req.refundNo());
+        existing = couponRefundOrderMapper.selectByRefundNoForUpdate(req.refundNo());
         if (existing != null) {
             return replayRefund(existing, req, digest);
         }
@@ -543,9 +557,9 @@ public class TradeTxService {
                     "占用单状态=" + usage.getStatus().getDesc() + "，仅已核销/部分退款可退款");
         }
         int refundCount = couponRefundOrderMapper.countByUsageNo(req.usageNo());
-        if (refundCount >= maxRefundTimes) {
+        if (refundCount >= policy.maxRefundTimes()) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
-                    "该占用单退款次数已达上限 " + maxRefundTimes + " 次");
+                    "该占用单退款次数已达上限 " + policy.maxRefundTimes() + " 次");
         }
 
         UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
@@ -553,14 +567,23 @@ public class TradeTxService {
 
         List<CouponShareDetailPO> shares = couponShareDetailMapper.selectPositiveByUsageNo(req.usageNo());
         if (shares.isEmpty()) {
-            return refundWithoutLineData(req, usage, coupon, digest, now, maxReturnTimes);
+            // 有分账行但全是 0/负 = 数据损坏；不能静默降级成“老式退款”（无明细、账单不可见）
+            long shareSum = couponShareDetailMapper.sumShareByUsageNo(req.usageNo());
+            if (shareSum != 0) {
+                throw new BizException(ErrorCode.SYSTEM_ERROR,
+                        "分账数据异常：存在分账行但无正行，拒绝降级为老式退款");
+            }
+            return refundWithoutLineData(req, usage, coupon, digest, now,
+                    policy.maxReturnTimes(), policy.fullRefundReturnCoupon());
         }
-        return refundWithLineData(req, usage, coupon, digest, now, maxReturnTimes, shares);
+        return refundWithLineData(req, usage, coupon, digest, now,
+                policy.maxReturnTimes(), policy.fullRefundReturnCoupon(), shares);
     }
 
     /** 行级退款：按核销快照逐行算“本次退多少数量、冲回多少优惠与各方出资” */
     private RefundResult refundWithLineData(RefundRequest req, CouponUsage usage, UserCoupon coupon,
                                             String digest, LocalDateTime now, int maxReturnTimes,
+                                            boolean fullRefundReturnCoupon,
                                             List<CouponShareDetailPO> shares) {
         List<CouponRefundDetailPO> previous = couponRefundDetailMapper.selectByUsageNo(req.usageNo());
         Map<String, Integer> refundedQty = new HashMap<>();
@@ -613,7 +636,9 @@ public class TradeTxService {
                 throw new BizException(ErrorCode.PARAM_ERROR, "退款数量必须为正: " + lineNo);
             }
             int already = refundedQty.getOrDefault(lineNo, 0);
-            if (already + qty > originalQty) {
+            // 用 long 比较：already + qty 都是 int，恶意传 quantity=Integer.MAX_VALUE
+            // 时相加会溢出成负数、绕过“累计不超原数量”的校验（环 3 对抗审查发现）
+            if ((long) already + qty > originalQty) {
                 throw new BizException(ErrorCode.PARAM_ERROR, String.format(
                         "商品行 %s 累计退款数量超过原数量（原=%d，已退=%d，本次=%d）",
                         lineNo, originalQty, already, qty));
@@ -669,11 +694,12 @@ public class TradeTxService {
 
         UsageStatus target = full ? UsageStatus.REFUNDED : UsageStatus.PARTIALLY_REFUNDED;
         CouponRefundOrderPO order = newRefundOrder(req, usage, coupon, digest, target,
-                full ? "FULL" : "PARTIAL", totalDiscount, totalPlatform, totalMerchant, plans.size());
+                full ? "FULL" : "PARTIAL", totalDiscount, totalPlatform, totalMerchant,
+                plans.size(), true);
         try {
             couponRefundOrderMapper.insert(order);
         } catch (DuplicateKeyException e) {
-            CouponRefundOrderPO raced = couponRefundOrderMapper.selectByRefundNo(req.refundNo());
+            CouponRefundOrderPO raced = couponRefundOrderMapper.selectByRefundNoForUpdate(req.refundNo());
             if (raced != null) {
                 return replayRefund(raced, req, digest);
             }
@@ -682,7 +708,8 @@ public class TradeTxService {
 
         boolean returned = false;
         if (full) {
-            returned = returnCouponIfAllowed(coupon, usage, req.refundNo(), maxReturnTimes);
+            returned = returnCouponIfAllowed(coupon, usage, req.refundNo(), maxReturnTimes,
+                    fullRefundReturnCoupon);
         }
         UserCoupon freshCoupon = userCouponRepository.findById(coupon.getId()).orElse(coupon);
         order.setCouponReturned(returned ? 1 : 0);
@@ -720,25 +747,27 @@ public class TradeTxService {
      * 保留该路径是为了过渡期兼容；新核销一律走行级，退款就能按行 + 数量。
      */
     private RefundResult refundWithoutLineData(RefundRequest req, CouponUsage usage, UserCoupon coupon,
-                                               String digest, LocalDateTime now, int maxReturnTimes) {
+                                               String digest, LocalDateTime now, int maxReturnTimes,
+                                               boolean fullRefundReturnCoupon) {
         if (req.items() != null && !req.items().isEmpty()) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
                     "该占用单是旧式核销（没有行级分账），只能整单退款");
         }
         long amount = usage.getDiscountAmt() == null ? 0 : usage.getDiscountAmt();
         CouponRefundOrderPO order = newRefundOrder(req, usage, coupon, digest,
-                UsageStatus.REFUNDED, "FULL", amount, 0, 0, 0);
+                UsageStatus.REFUNDED, "FULL", amount, 0, 0, 0, false);
         try {
             couponRefundOrderMapper.insert(order);
         } catch (DuplicateKeyException e) {
-            CouponRefundOrderPO raced = couponRefundOrderMapper.selectByRefundNo(req.refundNo());
+            CouponRefundOrderPO raced = couponRefundOrderMapper.selectByRefundNoForUpdate(req.refundNo());
             if (raced != null) {
                 return replayRefund(raced, req, digest);
             }
             throw e;
         }
 
-        boolean returned = returnCouponIfAllowed(coupon, usage, req.refundNo(), maxReturnTimes);
+        boolean returned = returnCouponIfAllowed(coupon, usage, req.refundNo(), maxReturnTimes,
+                fullRefundReturnCoupon);
         UserCoupon freshCoupon = userCouponRepository.findById(coupon.getId()).orElse(coupon);
         order.setCouponReturned(returned ? 1 : 0);
         order.setCouponStatus(freshCoupon.getStatus().name());
@@ -755,7 +784,11 @@ public class TradeTxService {
 
     /** 整单退：券在有效期内回待使用、已过期转已过期；一券最多退 N 次（防“下单-退款”刷券） */
     private boolean returnCouponIfAllowed(UserCoupon coupon, CouponUsage usage,
-                                          String refundNo, int maxReturnTimes) {
+                                          String refundNo, int maxReturnTimes,
+                                          boolean fullRefundReturnCoupon) {
+        if (!fullRefundReturnCoupon) {
+            return false;   // 租户显式关闭：整单退也不退券，券保持已核销
+        }
         int returnedTimes = couponReturnLogMapper.countByCoupon(coupon.getId());
         if (returnedTimes >= maxReturnTimes) {
             return false;
@@ -777,7 +810,8 @@ public class TradeTxService {
 
     private CouponRefundOrderPO newRefundOrder(RefundRequest req, CouponUsage usage, UserCoupon coupon,
                                                String digest, UsageStatus target, String type,
-                                               long discount, long platform, long merchant, int itemCount) {
+                                               long discount, long platform, long merchant,
+                                               int itemCount, boolean fundingKnown) {
         CouponRefundOrderPO order = new CouponRefundOrderPO();
         order.setRefundNo(req.refundNo());
         order.setUsageNo(req.usageNo());
@@ -792,6 +826,7 @@ public class TradeTxService {
         order.setRefundMerchantAmt(merchant);
         order.setRequestDigest(digest);
         order.setItemCount(itemCount);
+        order.setFundingKnown(fundingKnown ? 1 : 0);
         order.setCouponReturned(0);
         order.setCouponStatus(coupon.getStatus().name());
         order.setUsageStatus(target.name());

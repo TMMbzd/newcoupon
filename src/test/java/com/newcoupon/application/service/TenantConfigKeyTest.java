@@ -41,6 +41,24 @@ class TenantConfigKeyTest {
     }
 
     @Test
+    @DisplayName("退款政策三键：范围/类型校验，默认 50/3/true")
+    void refundPolicyKeysValidate() {
+        assertThat(TenantConfigKey.TRADE_REFUND_MAX_TIMES.validate("0")).isNotNull();
+        assertThat(TenantConfigKey.TRADE_REFUND_MAX_TIMES.validate("1001")).isNotNull();
+        assertThat(TenantConfigKey.TRADE_REFUND_MAX_TIMES.validate("1")).isNull();
+        assertThat(TenantConfigKey.TRADE_REFUND_MAX_TIMES.defaultValue()).isEqualTo("50");
+
+        assertThat(TenantConfigKey.TRADE_REFUND_MAX_RETURN_TIMES.validate("-1")).isNotNull();
+        assertThat(TenantConfigKey.TRADE_REFUND_MAX_RETURN_TIMES.validate("0")).isNull();
+        assertThat(TenantConfigKey.TRADE_REFUND_MAX_RETURN_TIMES.validate("101")).isNotNull();
+
+        assertThat(TenantConfigKey.TRADE_REFUND_FULL_RETURN_COUPON.validate("true")).isNull();
+        assertThat(TenantConfigKey.TRADE_REFUND_FULL_RETURN_COUPON.validate("false")).isNull();
+        assertThat(TenantConfigKey.TRADE_REFUND_FULL_RETURN_COUPON.validate("yes")).isNotNull();
+        assertThat(TenantConfigKey.TRADE_REFUND_FULL_RETURN_COUPON.defaultValue()).isEqualTo("true");
+    }
+
+    @Test
     @DisplayName("熔断三键：越界被拒绝，合法值通过")
     void circuitBreakerKeysRejectOutOfRange() {
         assertThat(TenantConfigKey.CIRCUIT_BREAKER_FAILURE_RATE.validate("0")).isNotNull();
