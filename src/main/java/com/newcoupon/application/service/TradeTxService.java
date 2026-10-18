@@ -545,12 +545,9 @@ public class TradeTxService {
                         req.usageNo(), snapshot.getUserId())
                 .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
 
-        // 并发同号：拿到行锁后再查一次（后到者会看到先到者已提交的退款单）
-        existing = couponRefundOrderMapper.selectByRefundNoForUpdate(req.refundNo());
-        if (existing != null) {
-            return replayRefund(existing, req, digest);
-        }
-
+        // 不在插入前做 SELECT ... FOR UPDATE：退款单不存在时，RR 会给唯一索引加间隙锁，
+        // 递增退款单号会让不同占用单/不同用户互相等待，甚至死锁。
+        // 同号由 uk_refund_no 唯一键 + 插入 catch 保证：撞键后重读并重放。
         if (usage.getStatus() != UsageStatus.CONFIRMED
                 && usage.getStatus() != UsageStatus.PARTIALLY_REFUNDED) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,

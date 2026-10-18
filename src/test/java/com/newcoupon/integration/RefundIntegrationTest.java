@@ -34,6 +34,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -335,5 +336,124 @@ class RefundIntegrationTest extends ShardedIntegrationTestSupport {
                 List.of(new RefundItem("L1", Integer.MAX_VALUE)))))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("超过原数量");
+    }
+
+    @Test
+    @DisplayName("R11: 不同占用单、递增退款单号并发 → 都能成功，不互相等待")
+    void r11_concurrentDifferentUsagesDifferentRefundNos_bothSucceed() throws Exception {
+        Confirmed a = confirmTwoLines("R11a");
+        Confirmed b = confirmTwoLines("R11b");
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch go = new CountDownLatch(1);
+
+        Future<RefundResult> f1 = pool.submit(() -> {
+            ready.countDown();
+            go.await();
+            return tradeAppService.refund(new RefundRequest(
+                    a.usageNo(), "RF-R11-0001", List.of(new RefundItem("L1", 1))));
+        });
+        Future<RefundResult> f2 = pool.submit(() -> {
+            ready.countDown();
+            go.await();
+            return tradeAppService.refund(new RefundRequest(
+                    b.usageNo(), "RF-R11-0002", List.of(new RefundItem("L1", 1))));
+        });
+
+        assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+        go.countDown();
+        RefundResult r1 = f1.get(30, TimeUnit.SECONDS);
+        RefundResult r2 = f2.get(30, TimeUnit.SECONDS);
+        pool.shutdownNow();
+
+        assertThat(r1.discountAmt()).isEqualTo(600L);
+        assertThat(r2.discountAmt()).isEqualTo(600L);
+        assertThat(r1.duplicated()).isFalse();
+        assertThat(r2.duplicated()).isFalse();
+    }
+
+    @Test
+    @DisplayName("R12: 同一占用单、不同退款单号并发 → 占用单锁排队，累计数量正确")
+    void r12_concurrentSameUsageDifferentRefundNos_bothSucceed() throws Exception {
+        Confirmed c = confirmTwoLines("R12");
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch go = new CountDownLatch(1);
+
+        Future<RefundResult> f1 = pool.submit(() -> {
+            ready.countDown();
+            go.await();
+            return tradeAppService.refund(new RefundRequest(
+                    c.usageNo(), "RF-R12-0001", List.of(new RefundItem("L1", 1))));
+        });
+        Future<RefundResult> f2 = pool.submit(() -> {
+            ready.countDown();
+            go.await();
+            return tradeAppService.refund(new RefundRequest(
+                    c.usageNo(), "RF-R12-0002", List.of(new RefundItem("L1", 1))));
+        });
+
+        assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+        go.countDown();
+        RefundResult r1 = f1.get(30, TimeUnit.SECONDS);
+        RefundResult r2 = f2.get(30, TimeUnit.SECONDS);
+        pool.shutdownNow();
+
+        assertThat(r1.discountAmt() + r2.discountAmt()).isEqualTo(1200L);
+        assertThat(couponUsageRepository.findByUsageNo(c.usageNo()).orElseThrow().getStatus())
+                .as("L1 退满、L2 未退 → 部分退款")
+                .isEqualTo(UsageStatus.PARTIALLY_REFUNDED);
+        assertThat(userCouponRepository.findById(c.couponId()).orElseThrow().getStatus())
+                .as("部分退款不退券")
+                .isEqualTo(CouponStatus.USED);
+        assertThat(refundDetailMapper.selectByUsageNo(c.usageNo())).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("R13: 不同占用单、同一个退款单号并发 → 一个成功，一个报已用于其他占用单")
+    void r13_concurrentSameRefundNoDifferentUsages_oneWinsOneConflict() throws Exception {
+        Confirmed a = confirmTwoLines("R13a");
+        Confirmed b = confirmTwoLines("R13b");
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch go = new CountDownLatch(1);
+
+        Future<RefundResult> f1 = pool.submit(() -> {
+            ready.countDown();
+            go.await();
+            return tradeAppService.refund(new RefundRequest(
+                    a.usageNo(), "RF-R13-SHARED", List.of(new RefundItem("L1", 1))));
+        });
+        Future<RefundResult> f2 = pool.submit(() -> {
+            ready.countDown();
+            go.await();
+            return tradeAppService.refund(new RefundRequest(
+                    b.usageNo(), "RF-R13-SHARED", List.of(new RefundItem("L1", 1))));
+        });
+
+        assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+        go.countDown();
+
+        int success = 0;
+        String conflict = null;
+        try {
+            f1.get(30, TimeUnit.SECONDS);
+            success++;
+        } catch (ExecutionException e) {
+            conflict = e.getCause().getMessage();
+        }
+        try {
+            f2.get(30, TimeUnit.SECONDS);
+            success++;
+        } catch (ExecutionException e) {
+            conflict = e.getCause().getMessage();
+        }
+        pool.shutdownNow();
+
+        assertThat(success).as("只能有一个占用单成功使用这个退款单号").isEqualTo(1);
+        assertThat(conflict).as("另一个应报退款单号已被使用").contains("其他占用单");
     }
 }
