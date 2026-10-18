@@ -60,7 +60,8 @@ public final class TradeDtos {
      * 每行 platformBurden + merchantBurden = discountAmt；全体平台/商家之和 = FundingSplit。
      */
     public record LineShare(String lineNo, String skuId, long lineAmount, int quantity,
-                            long discountAmt, long platformBurden, long merchantBurden) {
+                            long discountAmt, long platformBurden, long merchantBurden,
+                            String settlePartyId) {
     }
 
     public record ConfirmResult(String usageNo, String couponStatus, Long discountAmt, boolean duplicated) {

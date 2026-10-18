@@ -40,6 +40,9 @@ class TemplateAppServiceTest {
     @Mock
     private CachedTemplateReader cachedTemplateReader;
 
+    @Mock
+    private SettlePartyPolicy settlePartyPolicy;   // 环 1 新增依赖；默认 false = 旧行为
+
     @InjectMocks
     private TemplateAppService service;
 

@@ -31,6 +31,10 @@ public enum TenantConfigKey implements ConfigKeySpec {
      */
     TIMEOUT_DEFAULT_MS("timeout.default_ms", "3000", Type.INT, "默认时间预算（毫秒，1200~30000）", 1200, 30_000),
 
+    /** 结算主体开关：默认关 = 旧行为（主体字段忽略，所有行落 __default__） */
+    TRADE_SETTLE_PARTY_ENABLED("trade.settle_party.enabled", "false", Type.BOOL,
+            "结算主体开关（false=旧行为，忽略主体；true=按主体过滤/落库）"),
+
     /** 熔断的异常比例阈值（百分比） */
     CIRCUIT_BREAKER_FAILURE_RATE("circuit_breaker.failure_rate", "50", Type.INT, "熔断：异常比例阈值（%）", 1, 100),
 

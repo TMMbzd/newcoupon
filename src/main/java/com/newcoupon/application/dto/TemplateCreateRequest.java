@@ -85,16 +85,31 @@ public record TemplateCreateRequest(
 
         @Min(value = 1, message = "共担出资平台百分比 1~99")
         @Max(value = 99, message = "共担出资平台百分比 1~99")
-        Integer budgetRatio        // 仅 budgetOwner=3 时必填（领域层校验）
+        Integer budgetRatio,       // 仅 budgetOwner=3 时必填（领域层校验）
+
+        @Size(max = 64, message = "结算主体最长 64 字符（= 存储列宽）")
+        String settlePartyId      // 商家/共担券必填；平台券可空（租户级）
 ) {
 
-    /** 过渡兼容构造器：第 2 环前的老调用方（14 参）——五维全部取默认值 */
+    /** 过渡兼容构造器：第 2 环前的老调用方（14 参）——五维/结算主体全部取默认值 */
     public TemplateCreateRequest(String name, Long activityId, Integer couponType, Long faceValue,
                                  Long discountCap, Long threshold, Long totalCount, Integer perUserLimit,
                                  Integer validType, LocalDateTime validStart, LocalDateTime validEnd,
                                  Integer validDays, Long dailyLimit, Integer perUserDailyLimit) {
         this(name, activityId, couponType, faceValue, discountCap, threshold, totalCount, perUserLimit,
                 validType, validStart, validEnd, validDays, dailyLimit, perUserDailyLimit,
-                null, null, null, null, null, null);
+                null, null, null, null, null, null, null);
+    }
+
+    /** 五维版旧调用方（20 参，未带结算主体）——settlePartyId 取 null */
+    public TemplateCreateRequest(String name, Long activityId, Integer couponType, Long faceValue,
+                                 Long discountCap, Long threshold, Long totalCount, Integer perUserLimit,
+                                 Integer validType, LocalDateTime validStart, LocalDateTime validEnd,
+                                 Integer validDays, Long dailyLimit, Integer perUserDailyLimit,
+                                 Integer applicableScope, String scopeIds, Integer stackingLayer,
+                                 String exclusionGroup, Integer budgetOwner, Integer budgetRatio) {
+        this(name, activityId, couponType, faceValue, discountCap, threshold, totalCount, perUserLimit,
+                validType, validStart, validEnd, validDays, dailyLimit, perUserDailyLimit,
+                applicableScope, scopeIds, stackingLayer, exclusionGroup, budgetOwner, budgetRatio, null);
     }
 }

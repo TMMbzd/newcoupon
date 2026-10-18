@@ -391,7 +391,8 @@ public class TradeAppService {
             long platform = platformShares[i];
             long merchant = line.discountAmt() - platform;
             result.add(new LineShare(line.lineNo(), line.skuId(), line.lineAmount(),
-                    line.quantity(), line.discountAmt(), platform, merchant));
+                    line.quantity(), line.discountAmt(), platform, merchant,
+                    line.settlePartyId()));
         }
         return result;
     }

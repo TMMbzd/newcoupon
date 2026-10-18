@@ -62,6 +62,7 @@ public class CouponTemplatePO {
     private String exclusionGroup;     // 互斥组名；NULL=不限制
     private Integer funderType;        // 1=PLATFORM(平台) 2=MERCHANT(商家) 3=SPLIT(共担) — V9 列 funder_type
     private Integer budgetRatio;       // 平台百分比 1~99；仅SPLIT时必填
+    private String settlePartyId;      // V22：结算主体（可空=平台券租户级；商家/共担必填）
 
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
@@ -123,6 +124,8 @@ public class CouponTemplatePO {
     public void setFunderType(Integer funderType) { this.funderType = funderType; }
     public Integer getBudgetRatio() { return budgetRatio; }
     public void setBudgetRatio(Integer budgetRatio) { this.budgetRatio = budgetRatio; }
+    public String getSettlePartyId() { return settlePartyId; }
+    public void setSettlePartyId(String settlePartyId) { this.settlePartyId = settlePartyId; }
     public LocalDateTime getCreateTime() { return createTime; }
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }
     public LocalDateTime getUpdateTime() { return updateTime; }

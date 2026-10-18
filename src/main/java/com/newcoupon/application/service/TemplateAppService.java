@@ -45,22 +45,34 @@ public class TemplateAppService {
     private final com.newcoupon.infrastructure.persistence.StockDriftLogGateway driftLog;
     private final StockBucketRouter stockBucketRouter;
     private final CachedTemplateReader cachedTemplateReader;
+    private final SettlePartyPolicy settlePartyPolicy;
 
     // 构造器注入（而非字段 @Autowired）：依赖显式、不可变、单测可直接 new——企业规范
     public TemplateAppService(TemplateRepository templateRepository,
                               RedisStockGateway redisStockGateway,
                               StockDriftLogGateway driftLog,
                               StockBucketRouter stockBucketRouter,
-                              CachedTemplateReader cachedTemplateReader) {
+                              CachedTemplateReader cachedTemplateReader,
+                              SettlePartyPolicy settlePartyPolicy) {
         this.templateRepository = templateRepository;
         this.redisStockGateway = redisStockGateway;
         this.driftLog = driftLog;
         this.stockBucketRouter = stockBucketRouter;
         this.cachedTemplateReader = cachedTemplateReader;
+        this.settlePartyPolicy = settlePartyPolicy;
     }
 
     /** 建券：生成业务编码 → 聚合工厂校验 → 落库（通用限领 1~99 自 ADR-0006 开放） */
     public CreatedTemplate create(TemplateCreateRequest req) {
+        BudgetOwner owner = req.budgetOwner() == null
+                ? BudgetOwner.PLATFORM : BudgetOwner.of(req.budgetOwner());
+        // 灰度开启时，商家/共担券必须绑定主体；关闭时保持旧行为（允许空，运行期按 __default__ 处理）
+        if (settlePartyPolicy.isEnabled()
+                && (owner == BudgetOwner.MERCHANT || owner == BudgetOwner.SPLIT)
+                && (req.settlePartyId() == null || req.settlePartyId().isBlank())) {
+            throw new BizException(ErrorCode.PARAM_ERROR,
+                    "商家出资/共担券必须绑定结算主体（settlePartyId）");
+        }
         String templateCode = generateCode();
         CouponTemplate template = CouponTemplate.create(CouponTemplate.Creation.builder()
                 .templateCode(templateCode)
@@ -86,9 +98,9 @@ public class TemplateAppService {
                 .stackingLayer(req.stackingLayer() == null
                         ? StackingLayer.SHOP : StackingLayer.of(req.stackingLayer()))
                 .exclusionGroup(req.exclusionGroup())
-                .budgetOwner(req.budgetOwner() == null
-                        ? BudgetOwner.PLATFORM : BudgetOwner.of(req.budgetOwner()))
+                .budgetOwner(owner)
                 .budgetRatio(req.budgetRatio())
+                .settlePartyId(req.settlePartyId())
                 .build());
         CouponTemplate saved = templateRepository.save(template);
         log.info("template created: id={}, code={}, name={}, totalCount={}",

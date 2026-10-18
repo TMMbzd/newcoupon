@@ -33,7 +33,8 @@ public record TemplateResponse(
         String stackingLayer,      // 店铺级/平台级
         String exclusionGroup,     // 互斥组名（null=无组）
         String budgetOwner,        // 平台/商家/共担
-        Integer budgetRatio) {     // 共担时平台百分比
+        Integer budgetRatio,       // 共担时平台百分比
+        String settlePartyId) {    // 结算主体（可空=平台券租户级）
 
     public static TemplateResponse from(CouponTemplate t) {
         return new TemplateResponse(
@@ -46,6 +47,6 @@ public record TemplateResponse(
                 null,   // createTime 由 DB 生成，查询场景需要时从 PO 侧带出
                 t.getApplicableScope().getDesc(), t.getScopeIds(),
                 t.getStackingLayer().getDesc(), t.getExclusionGroup(),
-                t.getBudgetOwner().getDesc(), t.getBudgetRatio());
+                t.getBudgetOwner().getDesc(), t.getBudgetRatio(), t.getSettlePartyId());
     }
 }

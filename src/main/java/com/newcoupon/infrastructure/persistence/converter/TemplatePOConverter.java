@@ -50,6 +50,7 @@ public final class TemplatePOConverter {
         p.setExclusionGroup(d.getExclusionGroup());
         p.setFunderType(d.getBudgetOwner().getCode());
         p.setBudgetRatio(d.getBudgetRatio());
+        p.setSettlePartyId(d.getSettlePartyId());
         p.setVersion(0);
         return p;
     }
@@ -88,6 +89,7 @@ public final class TemplatePOConverter {
                         .budgetOwner(p.getFunderType() != null
                                 ? BudgetOwner.of(p.getFunderType()) : BudgetOwner.PLATFORM)
                         .budgetRatio(p.getBudgetRatio())
+                        .settlePartyId(p.getSettlePartyId())
                         .build(),
                 p.getIssuedCount(),
                 ApproveStatus.of(p.getApproveStatus()),

@@ -71,6 +71,8 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class TradeTxService {
 
+    private static final String DEFAULT_PARTY = "__default__";
+
     private final UserCouponRepository userCouponRepository;
     private final CouponUsageRepository couponUsageRepository;
     private final CouponEventRepository couponEventRepository;
@@ -175,6 +177,8 @@ public class TradeTxService {
         share.setUserCouponId(coupon.getId());
         share.setUserId(coupon.getUserId());
         share.setTemplateId(coupon.getTemplateId());
+        share.setAppId(coupon.getAppId());
+        share.setSettlePartyId(DEFAULT_PARTY);
         share.setUsageNo(req.usageNo());
         share.setOrderNo(usage.getOrderNo());
         share.setPlatformBurden(split.platformBurden());
@@ -210,6 +214,9 @@ public class TradeTxService {
             share.setUserCouponId(coupon.getId());
             share.setUserId(coupon.getUserId());
             share.setTemplateId(coupon.getTemplateId());
+            share.setAppId(coupon.getAppId());
+            share.setSettlePartyId(line.settlePartyId() == null
+                    ? DEFAULT_PARTY : line.settlePartyId());
             share.setUsageNo(req.usageNo());
             share.setOrderNo(usage.getOrderNo());
             share.setOrderLineNo(line.lineNo());
@@ -457,7 +464,8 @@ public class TradeTxService {
                 thisPlatform = thisDiscount;
             }
             plans.add(new RefundLinePlan(lineNo, qty, thisDiscount,
-                    thisPlatform, thisDiscount - thisPlatform));
+                    thisPlatform, thisDiscount - thisPlatform,
+                    share.getAppId(), share.getSettlePartyId()));
         }
 
         if (!requested.isEmpty()) {
@@ -517,6 +525,8 @@ public class TradeTxService {
             detail.setUserCouponId(coupon.getId());
             detail.setUserId(coupon.getUserId());
             detail.setTemplateId(coupon.getTemplateId());
+            detail.setAppId(plan.appId());
+            detail.setSettlePartyId(plan.settlePartyId());
             detail.setRefundQty(plan.qty());
             detail.setRefundDiscountAmt(plan.discount());
             detail.setRefundPlatformAmt(plan.platform());
@@ -602,6 +612,7 @@ public class TradeTxService {
         order.setUserCouponId(coupon.getId());
         order.setUserId(coupon.getUserId());
         order.setTemplateId(coupon.getTemplateId());
+        order.setAppId(coupon.getAppId());
         order.setOrderNo(usage.getOrderNo());
         order.setRefundType(type);
         order.setRefundDiscountAmt(discount);
@@ -687,7 +698,8 @@ public class TradeTxService {
 
     /** 一行退款计划：本次退多少数量、冲回多少优惠与平台/商家出资 */
     private record RefundLinePlan(String lineNo, int qty, long discount,
-                                  long platform, long merchant) {
+                                  long platform, long merchant,
+                                  String appId, String settlePartyId) {
     }
 
 }

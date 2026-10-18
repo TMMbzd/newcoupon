@@ -22,6 +22,8 @@ public class CouponRefundOrderPO {
     private Long userCouponId;
     private Long userId;
     private Long templateId;
+    /** V22：租户归属（从券/模板带出，供按租户查询） */
+    private String appId;
     private String orderNo;
     /** PARTIAL / FULL */
     private String refundType;
@@ -51,6 +53,8 @@ public class CouponRefundOrderPO {
     public void setUserId(Long userId) { this.userId = userId; }
     public Long getTemplateId() { return templateId; }
     public void setTemplateId(Long templateId) { this.templateId = templateId; }
+    public String getAppId() { return appId; }
+    public void setAppId(String appId) { this.appId = appId; }
     public String getOrderNo() { return orderNo; }
     public void setOrderNo(String orderNo) { this.orderNo = orderNo; }
     public String getRefundType() { return refundType; }

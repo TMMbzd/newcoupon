@@ -20,6 +20,10 @@ public class CouponShareDetailPO {
     private Long userCouponId;
     private Long userId;
     private Long templateId;
+    /** V22：租户归属（从模板回填；新写入取券的 app_id） */
+    private String appId;
+    /** V22：结算主体（行级；平台券/无商家产品为 __default__） */
+    private String settlePartyId;
     private String usageNo;
     private String orderNo;
     private String orderLineNo;
@@ -39,6 +43,10 @@ public class CouponShareDetailPO {
     public void setUserId(Long userId) { this.userId = userId; }
     public Long getTemplateId() { return templateId; }
     public void setTemplateId(Long templateId) { this.templateId = templateId; }
+    public String getAppId() { return appId; }
+    public void setAppId(String appId) { this.appId = appId; }
+    public String getSettlePartyId() { return settlePartyId; }
+    public void setSettlePartyId(String settlePartyId) { this.settlePartyId = settlePartyId; }
     public String getUsageNo() { return usageNo; }
     public void setUsageNo(String usageNo) { this.usageNo = usageNo; }
     public String getOrderNo() { return orderNo; }

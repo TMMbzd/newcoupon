@@ -66,11 +66,25 @@ public record CalculateRequest(
              * 新接入方应传订单系统的行号（如订单明细主键）。
              */
             @Size(max = 64, message = "商品行号最长 64 字符（= 存储列宽）")
-            String lineNo
+            String lineNo,
+
+            /**
+             * 结算主体（可选）：该行商品最终算到谁头上、平台和谁结算。
+             *
+             * <p>不传 = {@code __default__}（平台券/无商家产品）。商家出资/共担券要求命中行
+             * 有主体；缺失时券不可用，不会用 {@code __default__} 兜底。
+             */
+            @Size(max = 64, message = "结算主体最长 64 字符（= 存储列宽）")
+            String settlePartyId
     ) {
-        /** 兼容旧调用方：不传行号 = 由平台按顺序生成 L1/L2/... */
+        /** 兼容旧调用方：不传行号/主体 = 平台生成行号、落 __default__ */
         public OrderItem(String skuId, String categoryId, Long price, Integer quantity) {
-            this(skuId, categoryId, price, quantity, null);
+            this(skuId, categoryId, price, quantity, null, null);
+        }
+
+        /** 兼容已传行号的旧调用方（第 2 环行级版） */
+        public OrderItem(String skuId, String categoryId, Long price, Integer quantity, String lineNo) {
+            this(skuId, categoryId, price, quantity, lineNo, null);
         }
     }
 }

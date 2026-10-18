@@ -1,6 +1,6 @@
 # 03 · API 与事件契约
 
-> **状态**：v0.2（2026-10-18，已按对抗审查修订）。
+> **状态**：v0.3（2026-10-18，环 1 结算主体已支持）。
 > **读者**：产品接入方、内核开发、测试。
 > **前置阅读**：[00 定位与能力边界](00-定位与能力边界.md)、[01 内核能力契约](01-内核能力契约.md)、[02 领域模型与数据契约](02-领域模型与数据契约.md)。
 > **这份文档回答**：有哪些接口、每个接口的字段与语义、怎么认证/幂等/重试、事件长什么样、版本怎么兼容、哪些还没实现。
@@ -137,7 +137,7 @@ NONCE
 | `exclusionGroup` | string(32) | 否 | 互斥组名；空=默认互斥 |
 | `budgetOwner` | int | 否 | 1 平台 / 2 商家 / 3 共担（空=平台） |
 | `budgetRatio` | int | 共担必填 | 平台承担百分比 1~99 |
-| `settlePartyId` | string(64) | ○ 目标 | 结算主体；商家出资/共担必填；平台券可空。**与 `budgetOwner` 正交**：`budgetOwner` 是成本承担，`settlePartyId` 是平台和谁结算 |
+| `settlePartyId` | string(64) | ✅ 已支持（V22；灰度默认关） | 结算主体；商家出资/共担必填；平台券可空。**与 `budgetOwner` 正交**：`budgetOwner` 是成本承担，`settlePartyId` 是平台和谁结算 |
 
 **响应**（`CreatedTemplate`）：
 
@@ -182,7 +182,7 @@ NONCE
 | `exclusionGroup` | string/null | 互斥组名 |
 | `budgetOwner` | **string** | `平台`/`商家`/`共担` |
 | `budgetRatio` | number/null | 共担时平台百分比 |
-| `settlePartyId` | string/null | ○ 目标：结算主体 |
+| `settlePartyId` | string/null | ✅ 已支持：结算主体（V22，灰度默认关） |
 
 > **注意**：请求里的 `couponType/validType/applicableScope/stackingLayer/budgetOwner` 是数字码，响应里这些字段返回**中文描述字符串**；客户端不要按 int 解析。若需要机器稳定码值，需另加数字字段（目标态，不能混入当前契约）。
 
@@ -225,7 +225,7 @@ NONCE
 | `couponIds` | array<long> | 是 | 候选**用户券 ID**（`user_coupon.id`），最多 10；与锁券的 `couponId`、券包的 `id` 是同一个 ID |
 | `orderNo` | string(64) | ○ 目标 | 价格快照要绑定订单号；使用 `pricingId` 时必填（字段名待定） |
 
-**OrderItem**：`skuId`、`categoryId`、`price`（分）、`quantity`、`lineNo`（可选，≤64；不传生成 `L1/L2...`）。目标新增 `merchantId`/`settlePartyId`（命名待定，统一按“结算主体”理解）。
+**OrderItem**：`skuId`、`categoryId`、`price`（分）、`quantity`、`lineNo`（可选，≤64；不传生成 `L1/L2...`）、`settlePartyId`（可选，≤64；该行结算主体；不传落 `__default__`）。`settlePartyId` 在灰度关闭时被忽略（所有行 `__default__`），开启时商家/共担券要求命中行有主体。
 
 **请求头**：开放面 POST 必须带 `X-Client-Token`；缺 token → 400/6012。试算也是 POST，所以**只读不等于免 token**。
 
@@ -411,7 +411,8 @@ NONCE
 - 废弃：公告 → 双版本并行 → 迁移期 → 下线（**目标，当前没有正式废弃流程**）；
 - 契约测试：提供方维护、接入方接入前跑（**目标，当前没有契约测试套件**）；
 - 沙箱：目标态；外部产品先在沙箱跑通试算/锁/核销/退款；
-- `pricingId`、`settlePartyId` 等目标字段在未启用前不要发送/依赖；DTO 当前不认这些字段，发送后会被忽略（不会报错，但也不会生效）。
+- `settlePartyId` 已由 DTO 接收并落库，但灰度开关 `trade.settle_party.enabled` 默认关；关闭时字段被忽略（所有行 `__default__`），开启后才参与过滤/退款归属。
+- `pricingId` 仍是目标字段；DTO 当前不认，发送后会被忽略（不会报错，但也不会生效）。
 
 ---
 
@@ -545,11 +546,11 @@ X-Client-Token: refund-20261018-001
 
 | 能力 | 当前 | 目标 |
 |---|---|---|
-| 建模板/发布/查模板 | ✅ | 加 `settlePartyId`、模板版本 |
+| 建模板/发布/查模板 | ✅ 含 `settlePartyId`（灰度默认关） | 模板版本 |
 | 领券 | ✅ | 批量/定向 |
-| 试算 | ✅ | `pricingId`、`merchantId`/`settlePartyId` |
-| 锁/核销/释放 | ✅ | `pricingId` 核销、结算主体归属 |
-| 退款 | ✅ 整单/按行 | 租户级政策、结算主体明细 |
+| 试算 | ✅ 含 `settlePartyId`（灰度默认关） | `pricingId` |
+| 锁/核销/释放 | ✅ 含结算主体行级归属 | `pricingId` 核销、商家/门店/地区主体 |
+| 退款 | ✅ 整单/按行；明细复制原主体 | 租户级政策、按主体日汇总 |
 | 查券包 | ✅ | 按订单/占用单/退款/账单查询 |
 | 日账单/主体汇总 | ◐ 模板日账单只有表/定时任务，无 HTTP 查询 | 查询 API/导出/主体汇总 |
 | 事件 | ◐ 内部事件；发件箱仅 ISSUED（topic `coupon-issued`），其余只写事件表；默认 log 传输 | 全事件投递、对外 Webhook、至少一次、死信 |
@@ -563,7 +564,7 @@ X-Client-Token: refund-20261018-001
 ### 16.1 待确认
 
 1. `pricingId` 概念已在 01 G4 定（试算快照、绑定、fail-closed）；待定的是字段名/长度、TTL 具体值、`calculate` 是否必须带 `orderNo`（当前 DTO 没有 `orderNo`，快照无法绑定订单）。
-2. `settlePartyId` 概念已在 01 G5 定（结算主体）；待定的是字段名（`settlePartyId`/`merchantId`/`bizUnitId`）与是否保留别名。
+2. `settlePartyId` 已按推荐名落库/落 DTO；`merchantId` 只作电商场景别名，不再作为契约字段。最终命名如需调整，属于破坏性变更，按 ADR-0016 走新版本。
 3. 对外事件第一版提供哪些类型？Webhook 签名/重试/死信策略？
 4. 查询 API 第一版做哪些：退款明细、日账单、主体汇总？接入面是开放面还是内部面？
 5. `/api` 长期定位：平台运营面，还是补内部租户身份？
@@ -578,3 +579,4 @@ X-Client-Token: refund-20261018-001
 |---|---|---|
 | v0.1 | 2026-10-18 | 初稿：通用协议、接口总表、逐接口字段、错误/幂等、事件目标、版本、限流、安全、示例 |
 | v0.2 | 2026-10-18 | 按对抗审查修订：所有 `/open` POST（含试算）必须带 `X-Client-Token`；枚举响应为中文描述；发件箱仅 ISSUED；INVALIDATED 无产生点；1001 两种语义；错误清单按实修正；`LocalDateTime` 无 offset；5003 仅领券；非法 `status` 改 1000；7001/7002 补 `data:null`；目标错误码 4007 未登记按目标态标注 |
+| v0.3 | 2026-10-18 | 环 1 实施：模板/OrderItem 的 `settlePartyId` 已支持（灰度默认关）；退款不接收主体；接口矩阵/待确认同步 |

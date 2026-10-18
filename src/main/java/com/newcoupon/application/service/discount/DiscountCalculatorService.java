@@ -58,16 +58,21 @@ public class DiscountCalculatorService {
     private final Map<String, DiscountStrategy> strategies;
     private final UserCouponRepository userCouponRepository;
     private final CachedTemplateReader templateReader;
+    private final com.newcoupon.application.service.SettlePartyPolicy settlePartyPolicy;
+    /** 旧商家/共担模板缺主体：每个模板每 JVM 只告警一次，避免热路径刷日志 */
+    private final Set<Long> legacyPartyWarned = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public DiscountCalculatorService(
             List<EligibilityChecker> checkers,
             Map<String, DiscountStrategy> strategies,
             UserCouponRepository userCouponRepository,
-            CachedTemplateReader templateReader) {
+            CachedTemplateReader templateReader,
+            com.newcoupon.application.service.SettlePartyPolicy settlePartyPolicy) {
         this.checkers = checkers;
         this.strategies = strategies;
         this.userCouponRepository = userCouponRepository;
         this.templateReader = templateReader;
+        this.settlePartyPolicy = settlePartyPolicy;
     }
 
     public CalculateResponse calculate(CalculateRequest request) {
@@ -75,13 +80,15 @@ public class DiscountCalculatorService {
     }
 
     CalculateResponse calculate(CalculateRequest request, LocalDateTime now) {
-        List<Line> lines = toLines(request.items());
+        boolean partyEnabled = settlePartyPolicy.isEnabled();
+        List<Line> lines = toLines(request.items(), partyEnabled);
         OrderContext context = toContext(request.userId(), lines, now);
 
         Map<Long, String> unusable = new LinkedHashMap<>();
         List<CandidateCoupon> candidates = new ArrayList<>();
         for (Long couponId : request.couponIds()) {
-            CandidateCoupon cc = checkCoupon(couponId, request.userId(), context, lines, unusable);
+            CandidateCoupon cc = checkCoupon(couponId, request.userId(), context, lines,
+                    partyEnabled, unusable);
             if (cc != null) {
                 candidates.add(cc);
             }
@@ -122,7 +129,7 @@ public class DiscountCalculatorService {
 
     /** 一张券在一行商品上的分摊（退款按行 × 券冲回的最小单位） */
     public record ConfirmLineShare(String lineNo, String skuId, long lineAmount,
-                                   int quantity, long discountAmt) {
+                                   int quantity, long discountAmt, String settlePartyId) {
     }
 
     /**
@@ -147,7 +154,8 @@ public class DiscountCalculatorService {
      */
     public ConfirmCalculation calculateForOrderConfirm(long currentCouponId,
             List<UserCoupon> orderCoupons, List<CalculateRequest.OrderItem> items) {
-        List<Line> lines = toLines(items);
+        boolean partyEnabled = settlePartyPolicy.isEnabled();
+        List<Line> lines = toLines(items, partyEnabled);
         Map<Long, String> reasons = new LinkedHashMap<>();
         Set<Long> excluded = new LinkedHashSet<>();
 
@@ -161,10 +169,14 @@ public class DiscountCalculatorService {
                 continue;
             }
             CouponTemplate template = templateOpt.get();
-            int[] scope = scopeIndices(template, lines);
-            if (template.getApplicableScope() != ApplicableScope.ALL && scope.length == 0) {
-                reasons.put(coupon.getId(), "商品不在券的适用范围内（"
-                        + template.getApplicableScope().getDesc() + "），拒绝核销");
+            if (partyEnabled && isMerchantOrSplit(template) && isMissingParty(template.getSettlePartyId())) {
+                warnLegacyPartyOnce(template);
+                reasons.put(coupon.getId(), "商家/共担券未绑定结算主体（旧模板请迁移）");
+                continue;
+            }
+            int[] scope = scopeIndices(template, lines, partyEnabled);
+            if (scope.length == 0) {
+                reasons.put(coupon.getId(), scopeReason(template, lines, partyEnabled));
                 continue;
             }
             candidates.add(new CandidateCoupon(coupon, template, scope));
@@ -191,7 +203,7 @@ public class DiscountCalculatorService {
             if (discount > 0) {
                 Line line = lines.get(i);
                 shares.add(new ConfirmLineShare(line.lineNo(), line.skuId(), line.amount(),
-                        line.quantity(), discount));
+                        line.quantity(), discount, line.settlePartyId()));
             }
         }
         return new ConfirmCalculation(current.effectiveDiscount(), current.candidate().template(), shares);
@@ -199,9 +211,10 @@ public class DiscountCalculatorService {
 
     // ════ 私有方法 ════
 
-    /** 单张券的独立检查（查券→归属→模板→时间/状态→范围），不含门槛（门槛在层处理时按范围金额判） */
+    /** 单张券的独立检查（查券→归属→模板→时间/状态→范围/主体），不含门槛（门槛在层处理时按范围金额判） */
     private CandidateCoupon checkCoupon(Long couponId, Long userId, OrderContext context,
-                                        List<Line> lines, Map<Long, String> unusable) {
+                                        List<Line> lines, boolean partyEnabled,
+                                        Map<Long, String> unusable) {
         var found = userCouponRepository.findByIdForUser(couponId, userId);
         if (found.isEmpty()) {
             unusable.put(couponId, "券不存在或不可见");
@@ -222,6 +235,11 @@ public class DiscountCalculatorService {
             return null;
         }
         CouponTemplate template = templateOpt.get();
+        if (partyEnabled && isMerchantOrSplit(template) && isMissingParty(template.getSettlePartyId())) {
+            warnLegacyPartyOnce(template);
+            unusable.put(couponId, "商家/共担券未绑定结算主体（旧模板请迁移）");
+            return null;
+        }
 
         for (EligibilityChecker checker : checkers) {
             Result<Void> result = checker.check(coupon, context);
@@ -235,10 +253,9 @@ public class DiscountCalculatorService {
             }
         }
 
-        int[] scope = scopeIndices(template, lines);
-        if (template.getApplicableScope() != ApplicableScope.ALL && scope.length == 0) {
-            unusable.put(couponId, "商品不在券的适用范围内（"
-                    + template.getApplicableScope().getDesc() + "）");
+        int[] scope = scopeIndices(template, lines, partyEnabled);
+        if (scope.length == 0) {
+            unusable.put(couponId, scopeReason(template, lines, partyEnabled));
             return null;
         }
         return new CandidateCoupon(coupon, template, scope);
@@ -412,8 +429,8 @@ public class DiscountCalculatorService {
         return result;
     }
 
-    /** 把请求里的商品行标准化：补行号（L1/L2/...）、查重、算行金额 */
-    private List<Line> toLines(List<CalculateRequest.OrderItem> items) {
+    /** 把请求里的商品行标准化：补行号（L1/L2/...）、主体、查重、算行金额 */
+    private List<Line> toLines(List<CalculateRequest.OrderItem> items, boolean partyEnabled) {
         if (items == null || items.isEmpty()) {
             throw new BizException(ErrorCode.PARAM_ERROR, "订单商品不能为空");
         }
@@ -431,10 +448,59 @@ public class DiscountCalculatorService {
             if (!seen.add(lineNo)) {
                 throw new BizException(ErrorCode.PARAM_ERROR, "商品行号重复: " + lineNo);
             }
+            String party = partyEnabled ? normalizeParty(item.settlePartyId()) : DEFAULT_PARTY;
             lines.add(new Line(lineNo, item.skuId(), item.categoryId(), item.price(),
-                    item.quantity(), item.price() * item.quantity()));
+                    item.quantity(), item.price() * item.quantity(), party));
         }
         return lines;
+    }
+
+    private static final String DEFAULT_PARTY = "__default__";
+
+    private String normalizeParty(String party) {
+        if (party == null || party.isBlank()) {
+            return DEFAULT_PARTY;
+        }
+        String trimmed = party.trim();
+        if (trimmed.length() > 64) {
+            throw new BizException(ErrorCode.PARAM_ERROR, "结算主体最长 64 字符: " + trimmed);
+        }
+        return trimmed;
+    }
+
+    private static boolean isMerchantOrSplit(CouponTemplate template) {
+        return template.getBudgetOwner() == com.newcoupon.domain.coupon.BudgetOwner.MERCHANT
+                || template.getBudgetOwner() == com.newcoupon.domain.coupon.BudgetOwner.SPLIT;
+    }
+
+    private static boolean isMissingParty(String party) {
+        return party == null || party.isBlank() || DEFAULT_PARTY.equals(party);
+    }
+
+    private void warnLegacyPartyOnce(CouponTemplate template) {
+        Long id = template.getId();
+        if (id != null && legacyPartyWarned.add(id)) {
+            log.warn("LEGACY_PARTY_MISSING templateId={} budgetOwner={} settlePartyId={} ——"
+                            + " 旧商家/共担模板没有真实主体，按不可用处理；请迁移或新建模板",
+                    id, template.getBudgetOwner(), template.getSettlePartyId());
+        }
+    }
+
+    /** 范围/主体过滤为空时的可读原因：先看主体，再看范围 */
+    private String scopeReason(CouponTemplate template, List<Line> lines, boolean partyEnabled) {
+        String templateParty = template.getSettlePartyId();
+        if (partyEnabled && templateParty != null && !templateParty.isBlank()
+                && !DEFAULT_PARTY.equals(templateParty)) {
+            boolean anyLineMatchesParty = lines.stream()
+                    .anyMatch(line -> templateParty.equals(line.settlePartyId()));
+            if (!anyLineMatchesParty) {
+                return "订单行不属于券绑定的结算主体（" + templateParty + "）";
+            }
+        }
+        if (template.getApplicableScope() != ApplicableScope.ALL) {
+            return "商品不在券的适用范围内（" + template.getApplicableScope().getDesc() + "）";
+        }
+        return "没有可参与分摊的订单行";
     }
 
     private OrderContext toContext(Long userId, List<Line> lines, LocalDateTime now) {
@@ -463,29 +529,38 @@ public class DiscountCalculatorService {
                 .toList();
     }
 
-    /** 过滤出模板范围内的商品行索引 */
-    private int[] scopeIndices(CouponTemplate template, List<Line> lines) {
+    /**
+     * 过滤出模板范围内、且属于模板绑定结算主体的商品行索引。
+     *
+     * <p>顺序：先按主体过滤，再按品类/SKU 过滤。商家 A 的券不能拿商家 B 的金额凑门槛；
+     * 平台券（模板主体为空/__default__）不按主体过滤，行主体由订单行提供。
+     */
+    private int[] scopeIndices(CouponTemplate template, List<Line> lines, boolean partyEnabled) {
         ApplicableScope scope = template.getApplicableScope();
-        if (scope == ApplicableScope.ALL) {
-            int[] all = new int[lines.size()];
-            for (int i = 0; i < all.length; i++) {
-                all[i] = i;
-            }
-            return all;
-        }
-        Set<String> allowed = parseScopeIds(template.getScopeIds());
-        if (allowed.isEmpty()) {
+        Set<String> allowed = scope == ApplicableScope.ALL
+                ? Set.of() : parseScopeIds(template.getScopeIds());
+        if (scope != ApplicableScope.ALL && allowed.isEmpty()) {
             // 非 ALL 但没配范围值 = 配置错误。旧版会放行全部商品，等于把品类券变成全场券；
             // 现在按“不可用”处理，宁可拒绝也不越权给优惠。
             return new int[0];
         }
+        String templateParty = template.getSettlePartyId();
+        boolean filterParty = partyEnabled && templateParty != null && !templateParty.isBlank()
+                && !DEFAULT_PARTY.equals(templateParty);
+
         List<Integer> indices = new ArrayList<>();
         for (int i = 0; i < lines.size(); i++) {
             Line line = lines.get(i);
-            String value = scope == ApplicableScope.CATEGORY ? line.categoryId() : line.skuId();
-            if (allowed.contains(value)) {
-                indices.add(i);
+            if (filterParty && !templateParty.equals(line.settlePartyId())) {
+                continue;
             }
+            if (scope != ApplicableScope.ALL) {
+                String value = scope == ApplicableScope.CATEGORY ? line.categoryId() : line.skuId();
+                if (!allowed.contains(value)) {
+                    continue;
+                }
+            }
+            indices.add(i);
         }
         return indices.stream().mapToInt(Integer::intValue).toArray();
     }
@@ -512,9 +587,9 @@ public class DiscountCalculatorService {
         return sum;
     }
 
-    /** 内部行模型：行号 + 商品 + 行金额 */
+    /** 内部行模型：行号 + 商品 + 行金额 + 结算主体 */
     private record Line(String lineNo, String skuId, String categoryId,
-                        long price, int quantity, long amount) {
+                        long price, int quantity, long amount, String settlePartyId) {
     }
 
     /** 候选券：券 + 模板 + 范围行索引 */

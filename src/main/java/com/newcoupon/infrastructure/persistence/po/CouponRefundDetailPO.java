@@ -17,6 +17,10 @@ public class CouponRefundDetailPO {
     private Long userCouponId;
     private Long userId;
     private Long templateId;
+    /** V22：租户归属（从分账行复制） */
+    private String appId;
+    /** V22：结算主体（从分账行复制，不读退款请求） */
+    private String settlePartyId;
     private Integer refundQty;
     private Long refundDiscountAmt;
     private Long refundPlatformAmt;
@@ -37,6 +41,10 @@ public class CouponRefundDetailPO {
     public void setUserId(Long userId) { this.userId = userId; }
     public Long getTemplateId() { return templateId; }
     public void setTemplateId(Long templateId) { this.templateId = templateId; }
+    public String getAppId() { return appId; }
+    public void setAppId(String appId) { this.appId = appId; }
+    public String getSettlePartyId() { return settlePartyId; }
+    public void setSettlePartyId(String settlePartyId) { this.settlePartyId = settlePartyId; }
     public Integer getRefundQty() { return refundQty; }
     public void setRefundQty(Integer refundQty) { this.refundQty = refundQty; }
     public Long getRefundDiscountAmt() { return refundDiscountAmt; }

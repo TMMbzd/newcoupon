@@ -56,6 +56,8 @@ public final class CouponTemplate {
     private final String exclusionGroup;
     private final BudgetOwner budgetOwner;
     private final Integer budgetRatio;
+    /** 结算主体（可选）：商家/共担券必填，平台券可空（租户级，按订单行主体解析） */
+    private final String settlePartyId;
 
     private CouponTemplate(Creation c, ApproveStatus approveStatus, PublishStatus publishStatus) {
         this.id = null;
@@ -84,6 +86,7 @@ public final class CouponTemplate {
         this.exclusionGroup = c.exclusionGroup();
         this.budgetOwner = c.budgetOwner();
         this.budgetRatio = c.budgetRatio();
+        this.settlePartyId = c.settlePartyId();
     }
 
     private CouponTemplate(CouponTemplate src, Long id) {
@@ -117,6 +120,7 @@ public final class CouponTemplate {
         this.exclusionGroup = src.exclusionGroup;
         this.budgetOwner = src.budgetOwner;
         this.budgetRatio = src.budgetRatio;
+        this.settlePartyId = src.settlePartyId;
     }
 
     /**
@@ -173,6 +177,11 @@ public final class CouponTemplate {
                     "共担出资必须配平台百分比 1~99（如 70 = 平台 70% + 商家 30%）");
         } else {
             require(c.budgetRatio() == null, "非共担出资不设百分比（budgetRatio 必须为 null）");
+        }
+        // 结算主体形态：可空（平台券租户级），非空时不能是空白、不能超列宽
+        if (c.settlePartyId() != null) {
+            require(!c.settlePartyId().isBlank(), "结算主体不能为空白");
+            require(c.settlePartyId().length() <= 64, "结算主体最长 64 字符（= 存储列宽）");
         }
 
         // —— 有效期不变量 ——
@@ -316,6 +325,7 @@ public final class CouponTemplate {
     public String getExclusionGroup() { return exclusionGroup; }
     public BudgetOwner getBudgetOwner() { return budgetOwner; }
     public Integer getBudgetRatio() { return budgetRatio; }
+    public String getSettlePartyId() { return settlePartyId; }
 
     public int getPerUserLimit() {
         return perUserLimit;
@@ -381,7 +391,9 @@ public final class CouponTemplate {
             StackingLayer stackingLayer,
             String exclusionGroup,
             BudgetOwner budgetOwner,
-            Integer budgetRatio) {
+            Integer budgetRatio,
+            /** 结算主体（可选）：商家/共担券必填，平台券可空 */
+            String settlePartyId) {
 
         /** 手写 Builder：15 个字段的长构造器可读性极差（"第 7 个参数是啥"），测试里只改一个字段的写法依赖它 */
         public static CreationBuilder builder() {
@@ -413,6 +425,7 @@ public final class CouponTemplate {
             private String exclusionGroup = null;
             private BudgetOwner budgetOwner = BudgetOwner.PLATFORM;
             private Integer budgetRatio = null;
+            private String settlePartyId = null;
 
             private CreationBuilder() {
             }
@@ -440,12 +453,14 @@ public final class CouponTemplate {
             public CreationBuilder exclusionGroup(String v) { this.exclusionGroup = v; return this; }
             public CreationBuilder budgetOwner(BudgetOwner v) { this.budgetOwner = v; return this; }
             public CreationBuilder budgetRatio(Integer v) { this.budgetRatio = v; return this; }
+            public CreationBuilder settlePartyId(String v) { this.settlePartyId = v; return this; }
 
             public Creation build() {
                 return new Creation(templateCode, activityId, name, couponType, faceValue,
                         discountCap, threshold, totalCount, perUserLimit, dailyLimit,
                         perUserDailyLimit, validType, validStart, validEnd, validDays, appId,
-                        applicableScope, scopeIds, stackingLayer, exclusionGroup, budgetOwner, budgetRatio);
+                        applicableScope, scopeIds, stackingLayer, exclusionGroup, budgetOwner,
+                        budgetRatio, settlePartyId);
             }
         }
     }

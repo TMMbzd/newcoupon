@@ -48,6 +48,18 @@ class TradeDtosValidationTest {
     }
 
     @Test
+    @DisplayName("结算主体超过 64 字符被入口校验拒绝（@Size）")
+    void settlePartyTooLongRejected() {
+        ConfirmRequest req = new ConfirmRequest("ORD-1:1", null,
+                List.of(new CalculateRequest.OrderItem("SKU", "CAT", 100L, 1, "L1",
+                        "P".repeat(65))));
+
+        assertThat(VALIDATOR.validate(req))
+                .as("结算主体列宽 64，超长必须在入口拒绝")
+                .isNotEmpty();
+    }
+
+    @Test
     @DisplayName("合法核销 items 通过校验")
     void validConfirmPasses() {
         ConfirmRequest req = new ConfirmRequest("ORD-1:1", null,
