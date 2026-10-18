@@ -19,12 +19,15 @@ import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.application.service.discount.DiscountCalculatorService;
 import com.newcoupon.application.service.discount.DiscountCalculatorService.ConfirmLineShare;
+import com.newcoupon.domain.coupon.BudgetOwner;
 import com.newcoupon.domain.coupon.CouponStatus;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.CouponUsage;
 import com.newcoupon.domain.coupon.UsageStatus;
 import com.newcoupon.domain.coupon.UserCoupon;
+import com.newcoupon.domain.pricing.PricingUsage;
 import com.newcoupon.domain.repository.CouponUsageRepository;
+import com.newcoupon.domain.repository.PricingUsageRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -54,6 +57,8 @@ public class TradeAppService {
     private final UserCouponRepository userCouponRepository;
     private final CouponUsageRepository couponUsageRepository;
     private final DiscountCalculatorService discountCalculatorService;
+    private final PricingSnapshotService pricingSnapshotService;
+    private final PricingUsageRepository pricingUsageRepository;
 
     /** 申报防线①：单笔优惠占订单金额的上限（百分数，默认 80）。极端促销（0元购）可调高 */
     private final int maxDiscountRatio;
@@ -76,6 +81,8 @@ public class TradeAppService {
                            UserCouponRepository userCouponRepository,
                            CouponUsageRepository couponUsageRepository,
                            DiscountCalculatorService discountCalculatorService,
+                           PricingSnapshotService pricingSnapshotService,
+                           PricingUsageRepository pricingUsageRepository,
                            @Value("${coupon.trade.max-discount-ratio:80}") int maxDiscountRatio,
                            @Value("${coupon.trade.confirm-rate-per-minute:600}") int confirmRateLimit,
                            @Value("${coupon.trade.max-refund-times:50}") int maxRefundTimes,
@@ -84,6 +91,8 @@ public class TradeAppService {
         this.userCouponRepository = userCouponRepository;
         this.couponUsageRepository = couponUsageRepository;
         this.discountCalculatorService = discountCalculatorService;
+        this.pricingSnapshotService = pricingSnapshotService;
+        this.pricingUsageRepository = pricingUsageRepository;
         this.maxDiscountRatio = maxDiscountRatio;
         this.confirmRateLimit = confirmRateLimit;
         this.maxRefundTimes = maxRefundTimes;
@@ -112,8 +121,20 @@ public class TradeAppService {
                     "该订单的占用已终结（" + u.getStatus().getDesc() + "），请使用新订单号");
         }
 
+        // 环 2：带 pricingId 的锁券先做快照绑定校验（快照不锁价，核销时才按冻结价）。
+        // 幂等快查在前面：已锁成功的重放即使快照过期也应答成功，不因快照失效破坏幂等。
+        boolean pricingRequested = req.pricingId() != null && !req.pricingId().isBlank();
+        LocalDateTime now = LocalDateTime.now();
+        if (pricingRequested) {
+            pricingSnapshotService.assertLockable(req.pricingId(), req.orderNo(),
+                    req.userId(), req.couponId(), now);
+        }
+
         try {
-            return tradeTxService.lock(req, LocalDateTime.now());
+            if (pricingRequested) {
+                return tradeTxService.lock(req, now, req.pricingId());
+            }
+            return tradeTxService.lock(req, now);
         } catch (DuplicateKeyException e) {
             // 撞 uk_usage_no = 同一订单并发重复锁（快查同时穿过）——回滚后重查当成功
             LockResult existing = idempotentLock(req);
@@ -158,20 +179,31 @@ public class TradeAppService {
     public ConfirmResult confirm(ConfirmRequest req) {
         assertUsageAccessible(req.usageNo());   // S1 越权防线（占用单只带 usageNo，需经券取归属）
 
-        // 契约兜实（TradeDtos 注释："两者必须提供其一，服务层校验"——2026-10-15 二轮补上）：
-        // 老式核销（无 items）必须带正数金额。缺了它，下游 casConfirm(long) 会把 null 拆箱、
-        // 以空指针（500）冒出；在这里变成明确的参数错误。
-        if ((req.items() == null || req.items().isEmpty())
+        // 环 2：锁券带快照时，占用单上有唯一绑定。核销漏传 pricingId 也按绑定解析，
+        // 防止调用方漏传后退回“按当前模板重算”——价格保证不能依赖调用方记性。
+        String requestedPricingId = req.pricingId() == null || req.pricingId().isBlank()
+                ? null : req.pricingId();
+        String boundPricingId = pricingUsageRepository.findByUsageNo(req.usageNo())
+                .map(PricingUsage::pricingId)
+                .orElse(null);
+        String effectivePricingId = requestedPricingId != null
+                ? requestedPricingId : boundPricingId;
+        boolean pricingRequested = effectivePricingId != null;
+        boolean itemsPresent = req.items() != null && !req.items().isEmpty();
+        // 契约兜实：老式核销（无 items/无 pricingId）必须带正数金额；带 pricingId 时
+        // 金额来自快照，items 可省（省了就直接用快照行）。
+        if (!pricingRequested && !itemsPresent
                 && (req.discountAmt() == null || req.discountAmt() <= 0)) {
             throw new BizException(ErrorCode.PARAM_ERROR,
-                    "核销必须提供 items（平台算钱）或正数 discountAmt（老式金额）其一");
+                    "核销必须提供 pricingId（快照算钱）、items（平台算钱）"
+                            + "或正数 discountAmt（老式金额）其一");
         }
 
-        // ════ 第 2 环：核销由平台算钱 + 出资拆分 + 行级分账 ════
+        // ════ 核销：快照冻结价 / 平台整栈复算 / 老式金额 三条路径 ════
         FundingSplit split = null;
         List<LineShare> lineShares = List.of();
         ConfirmRequest txReq = req;   // 不重赋值参数 req（lambda 要求 effectively final）
-        if (req.items() != null && !req.items().isEmpty()) {
+        if (pricingRequested || itemsPresent) {
             CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo())
                     .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
 
@@ -185,10 +217,20 @@ public class TradeAppService {
             // “售后守卫”把 4004/4006 盖成笼统的 4002。
             usage.checkConfirmable();
 
-            UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
-                    .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
+            // 绑定一致性：锁券时用了哪份快照，核销就必须用同一份；
+            // 锁券没带快照的占用单，不接受核销时临时塞一个 ID（否则可换价）。
+            if (requestedPricingId != null && boundPricingId == null) {
+                String message = "该占用单未绑定价格快照，不能只凭核销请求携带 pricingId";
+                markConfirmExceptionQuietly(req.usageNo(), requestedPricingId, message);
+                throw new BizException(ErrorCode.PRICING_SNAPSHOT_INVALID, message);
+            }
+            if (requestedPricingId != null && !requestedPricingId.equals(boundPricingId)) {
+                String message = "核销 pricingId 与锁券时绑定的价格快照不一致";
+                markConfirmExceptionQuietly(req.usageNo(), requestedPricingId, message);
+                throw new BizException(ErrorCode.PRICING_SNAPSHOT_INVALID, message);
+            }
 
-            // ── L64：把同一订单的全部占用单找回来一起复算（核销不能只看这一张券）──
+            // ── L64：把同一订单的全部占用单找回来（快照校验/整栈复算都要）──
             List<CouponUsage> orderUsages = couponUsageRepository.findByOrderNo(
                     usage.getUserId(), usage.getOrderNo());
             boolean afterSales = orderUsages.stream().anyMatch(u ->
@@ -198,45 +240,85 @@ public class TradeAppService {
                 throw new BizException(ErrorCode.STATE_CONFLICT,
                         "订单已进入售后（部分/全部退款），不能再核销其他券");
             }
-            // 只让“当前生效”的合同参与优惠栈：占用中 + 已核销；已释放/过期/超时的合同不属于本单
-            Map<Long, UserCoupon> orderCoupons = new LinkedHashMap<>();
-            for (CouponUsage sibling : orderUsages) {
-                if (sibling.getStatus() != UsageStatus.OCCUPYING
-                        && sibling.getStatus() != UsageStatus.CONFIRMED) {
-                    continue;
+
+            if (pricingRequested) {
+                PricingSnapshotService.SnapshotConfirm snapshot;
+                try {
+                    snapshot = pricingSnapshotService.prepareConfirm(
+                            effectivePricingId, usage, req.items(), false, LocalDateTime.now());
+                } catch (BizException e) {
+                    // 用户已支付但快照无法核销：先把占用单钉在 CONFIRM_EXCEPTION，
+                    // 不让 30 分钟超时任务把券放回可用（双重优惠）。标记失败不掩盖原错误。
+                    if (e.getErrorCode() == ErrorCode.PRICING_SNAPSHOT_INVALID) {
+                        markConfirmExceptionQuietly(req.usageNo(), effectivePricingId, e.getMessage());
+                    }
+                    throw e;
                 }
-                userCouponRepository.findByIdForUser(sibling.getUserCouponId(), sibling.getUserId())
-                        .ifPresent(c -> orderCoupons.putIfAbsent(c.getId(), c));
+
+                // 申报防线①：优惠占比上限，用快照冻结的整单金额与冻结的上限判——
+                // 当前配置在试算后改了，不能反过来改变已达成的报价。
+                int ratioLimit = snapshot.maxDiscountRatio();
+                long maxAllowed = snapshot.orderAmount() * ratioLimit / 100;
+                if (snapshot.discountAmt() > maxAllowed) {
+                    log.warn("DEFENSE DISCOUNT_RATIO usageNo={} discount={} order={} ratio>={}%",
+                            req.usageNo(), snapshot.discountAmt(), snapshot.orderAmount(),
+                            ratioLimit);
+                    throw new BizException(ErrorCode.PARAM_ERROR,
+                            String.format("优惠金额(%d)超过订单金额(%d)的%d%%上限，拒绝核销",
+                                    snapshot.discountAmt(), snapshot.orderAmount(), ratioLimit));
+                }
+                alarmConfirmRate();
+
+                split = calculateFundingSplit(snapshot.budgetOwner(), snapshot.budgetRatio(),
+                        snapshot.discountAmt());
+                lineShares = buildLineShares(snapshot.lineShares(), split);
+                txReq = new ConfirmRequest(req.usageNo(), snapshot.discountAmt(), null,
+                        effectivePricingId);
+            } else {
+                UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+                        .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
+
+                // 只让“当前生效”的合同参与优惠栈：占用中 + 已核销；已释放/过期/超时的合同不属于本单
+                Map<Long, UserCoupon> orderCoupons = new LinkedHashMap<>();
+                for (CouponUsage sibling : orderUsages) {
+                    if (sibling.getStatus() != UsageStatus.OCCUPYING
+                            && sibling.getStatus() != UsageStatus.CONFIRMED) {
+                        continue;
+                    }
+                    userCouponRepository.findByIdForUser(
+                                    sibling.getUserCouponId(), sibling.getUserId())
+                            .ifPresent(c -> orderCoupons.putIfAbsent(c.getId(), c));
+                }
+                orderCoupons.putIfAbsent(coupon.getId(), coupon);
+
+                var calc = discountCalculatorService.calculateForOrderConfirm(coupon.getId(),
+                        new ArrayList<>(orderCoupons.values()), req.items());
+
+                // ── 申报防线（门槛/范围复核已由整栈复算先行完成）──
+                // ①优惠占比上限：平台算出的优惠不得超过订单金额的 maxDiscountRatio%。
+                // 防的是"合法高力度券 × 刚过门槛的小订单"（如满100减90配 100 元订单，占比 90%）——
+                // 这类单笔合理、比例离谱的申报，直接拒绝；极端促销（0元购）由运营调高环境变量放行。
+                long orderAmount = req.items().stream()
+                        .mapToLong(i -> i.price() * i.quantity()).sum();
+                long maxAllowed = orderAmount * maxDiscountRatio / 100;
+                if (calc.discountAmt() > maxAllowed) {
+                    log.warn("DEFENSE DISCOUNT_RATIO usageNo={} discount={} order={} ratio>={}%",
+                            req.usageNo(), calc.discountAmt(), orderAmount, maxDiscountRatio);
+                    throw new BizException(ErrorCode.PARAM_ERROR,
+                            String.format("优惠金额(%d)超过订单金额(%d)的%d%%上限，拒绝核销",
+                                    calc.discountAmt(), orderAmount, maxDiscountRatio));
+                }
+
+                // ②申报速率告警：单接入方每分钟核销次数超阈值时告警（只记不拦——
+                // 防线挡的是攻击者，不能反过来 brick 正常大促流量；拦截交给接入方治理）
+                alarmConfirmRate();
+
+                split = calculateFundingSplit(calc.template(), calc.discountAmt());
+                lineShares = buildLineShares(calc.lineShares(), split);
+
+                // 用平台计算出的金额（调用方传入的 discountAmt 被忽略）
+                txReq = new ConfirmRequest(req.usageNo(), calc.discountAmt(), null, null);
             }
-            orderCoupons.putIfAbsent(coupon.getId(), coupon);
-
-            var calc = discountCalculatorService.calculateForOrderConfirm(coupon.getId(),
-                    new ArrayList<>(orderCoupons.values()), req.items());
-
-            // ── 申报防线（门槛/范围复核已由整栈复算先行完成）──
-            // ①优惠占比上限：平台算出的优惠不得超过订单金额的 maxDiscountRatio%。
-            // 防的是"合法高力度券 × 刚过门槛的小订单"（如满100减90配 100 元订单，占比 90%）——
-            // 这类单笔合理、比例离谱的申报，直接拒绝；极端促销（0元购）由运营调高环境变量放行。
-            long orderAmount = req.items().stream()
-                    .mapToLong(i -> i.price() * i.quantity()).sum();
-            long maxAllowed = orderAmount * maxDiscountRatio / 100;
-            if (calc.discountAmt() > maxAllowed) {
-                log.warn("DEFENSE DISCOUNT_RATIO usageNo={} discount={} order={} ratio>={}%",
-                        req.usageNo(), calc.discountAmt(), orderAmount, maxDiscountRatio);
-                throw new BizException(ErrorCode.PARAM_ERROR,
-                        String.format("优惠金额(%d)超过订单金额(%d)的%d%%上限，拒绝核销",
-                                calc.discountAmt(), orderAmount, maxDiscountRatio));
-            }
-
-            // ②申报速率告警：单接入方每分钟核销次数超阈值时告警（只记不拦——
-            // 防线挡的是攻击者，不能反过来 brick 正常大促流量；拦截交给接入方治理）
-            alarmConfirmRate();
-
-            split = calculateFundingSplit(calc.template(), calc.discountAmt());
-            lineShares = buildLineShares(calc.lineShares(), split);
-
-            // 用平台计算出的金额（调用方传入的 discountAmt 被忽略）
-            txReq = new ConfirmRequest(req.usageNo(), calc.discountAmt(), null);
         }
 
         try {
@@ -361,12 +443,41 @@ public class TradeAppService {
         }
     }
 
-    private FundingSplit calculateFundingSplit(CouponTemplate template, long discountAmt) {
-        return switch (template.getBudgetOwner()) {
+    /**
+     * 把占用单钉在 CONFIRM_EXCEPTION。标记失败只记 ERROR，不覆盖原始 4007——
+     * 原始错误是调用方/运维最需要看到的现场。
+     */
+    private void markConfirmExceptionQuietly(String usageNo, String pricingId, String reason) {
+        try {
+            tradeTxService.markConfirmException(usageNo, pricingId, reason, LocalDateTime.now());
+        } catch (RuntimeException e) {
+            log.error("mark confirm exception failed: usageNo={} pricingId={}", usageNo, pricingId, e);
+        }
+    }
+
+    private static FundingSplit calculateFundingSplit(CouponTemplate template, long discountAmt) {
+        return calculateFundingSplit(template.getBudgetOwner().name(),
+                template.getBudgetRatio(), discountAmt);
+    }
+
+    /** 快照路径：出资方/比例全部来自冻结 payload，不读当前模板 */
+    static FundingSplit calculateFundingSplit(String budgetOwner, Integer budgetRatio,
+                                              long discountAmt) {
+        BudgetOwner owner;
+        try {
+            owner = BudgetOwner.valueOf(budgetOwner);
+        } catch (RuntimeException e) {
+            throw new BizException(ErrorCode.PRICING_SNAPSHOT_INVALID, "价格快照出资方不合法");
+        }
+        return switch (owner) {
             case PLATFORM -> new FundingSplit(discountAmt, 0);
             case MERCHANT -> new FundingSplit(0, discountAmt);
             case SPLIT -> {
-                long platform = discountAmt * template.getBudgetRatio() / 100;
+                if (budgetRatio == null || budgetRatio < 1 || budgetRatio > 99) {
+                    throw new BizException(ErrorCode.PRICING_SNAPSHOT_INVALID,
+                            "价格快照共担比例不合法");
+                }
+                long platform = discountAmt * budgetRatio / 100;
                 yield new FundingSplit(platform, discountAmt - platform);
             }
         };
@@ -379,7 +490,7 @@ public class TradeAppService {
      * <p>先按各行优惠额比例分平台出资（前 n-1 行取整、末行兜底，末行超行容量再回补），
      * 商家 = 行优惠 - 平台——这样既不会出现“某行商家为负”，也不会出现合计差一分。
      */
-    private List<LineShare> buildLineShares(List<ConfirmLineShare> lines, FundingSplit split) {
+    static List<LineShare> buildLineShares(List<ConfirmLineShare> lines, FundingSplit split) {
         if (lines == null || lines.isEmpty()) {
             return List.of();
         }
@@ -398,7 +509,7 @@ public class TradeAppService {
     }
 
     /** 按容量比例分一笔钱：前 n-1 行向下取整、末行兜底；末行超容量则回补前面的行 */
-    private long[] allocateFunding(long amount, long[] capacities) {
+    private static long[] allocateFunding(long amount, long[] capacities) {
         long[] shares = new long[capacities.length];
         long total = 0;
         for (long capacity : capacities) {

@@ -100,6 +100,18 @@ class UserCouponTest {
     }
 
     @Test
+    @DisplayName("领取时间按 DATETIME(0) 截断：领取后立刻试算不会被判未到使用时间")
+    void receiveTimeTruncatedToStoragePrecision() {
+        CouponTemplate tpl = published(ValidType.AFTER_RECEIVE, null, null, 7);
+        LocalDateTime now = LocalDateTime.of(2026, 9, 5, 10, 0, 0, 999_000_000);
+        UserCoupon uc = UserCoupon.issue(tpl, 42L, "req-007", 1, now);
+
+        // MySQL DATETIME(0) 会把 .999 四舍五入到下一秒；领域层先截断，落库值才与内存一致
+        assertThat(uc.getReceiveTime()).isEqualTo(LocalDateTime.of(2026, 9, 5, 10, 0, 0));
+        assertThat(uc.getReceiveTime()).isBeforeOrEqualTo(now);
+    }
+
+    @Test
     @DisplayName("非法参数：userId<=0 / 空幂等键 拒绝")
     void illegalParamsRejected() {
         CouponTemplate tpl = published(ValidType.AFTER_RECEIVE, null, null, 7);

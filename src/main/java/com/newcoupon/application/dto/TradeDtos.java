@@ -24,7 +24,17 @@ public final class TradeDtos {
     public record LockRequest(
             @NotBlank(message = "orderNo 不能为空") @Size(max = 64) String orderNo,
             @NotNull(message = "userId 不能为空") @Min(1) Long userId,
-            @NotNull(message = "couponId 不能为空") @Min(1) Long couponId) {
+            @NotNull(message = "couponId 不能为空") @Min(1) Long couponId,
+            /**
+             * 价格快照 ID（可选，环 2）：带上则校验券在快照的可用券集合内；
+             * 不带 = 旧行为。快照不锁定价格本身，核销时再按快照冻结金额。
+             */
+            @Size(max = 64, message = "pricingId 最长 64 字符") String pricingId) {
+
+        /** 兼容旧调用方：不带价格快照 */
+        public LockRequest(String orderNo, Long userId, Long couponId) {
+            this(orderNo, userId, couponId, null);
+        }
     }
 
     public record LockResult(String usageNo, Long couponId, String couponStatus, boolean duplicated) {
@@ -41,11 +51,22 @@ public final class TradeDtos {
             @Min(value = 1, message = "抵扣金额必须为正（单位分）") Long discountAmt,
             @Valid
             @Size(max = 100, message = "核销商品最多 100 行")
-            List<CalculateRequest.OrderItem> items) {
+            List<CalculateRequest.OrderItem> items,
+
+            /**
+             * 价格快照 ID（可选，环 2）：带上则完全按冻结的快照核销，
+             * 不再读当前模板/重算；items 可省（省了就直接用快照行）。
+             */
+            @Size(max = 64, message = "pricingId 最长 64 字符") String pricingId) {
 
         /** 过渡兼容构造器：老调用方只传 usageNo + discountAmt */
         public ConfirmRequest(String usageNo, Long discountAmt) {
-            this(usageNo, discountAmt, null);
+            this(usageNo, discountAmt, null, null);
+        }
+
+        /** 兼容已传 items 的调用方（第 2 环平台算钱版） */
+        public ConfirmRequest(String usageNo, Long discountAmt, List<CalculateRequest.OrderItem> items) {
+            this(usageNo, discountAmt, items, null);
         }
     }
 

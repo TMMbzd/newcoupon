@@ -24,7 +24,16 @@ public enum UsageStatus {
     TIMEOUT_CLOSED(4, "超时关闭"),
     REFUNDED(5, "已退款"),
     /** 2026-10-18 行级退款：订单只退了一部分商品，占用单进入“部分退款”；全部退完才转 REFUNDED */
-    PARTIALLY_REFUNDED(6, "部分退款");
+    PARTIALLY_REFUNDED(6, "部分退款"),
+    /**
+     * 2026-10-18 环 2：支付后核销异常。
+     *
+     * <p>用户已支付，但带 pricingId 的核销因快照过期/归属不符/券集合不一致/行不一致
+     * 而无法完成。占用单进入本状态后：券保持 LOCKED、**不进入 30 分钟超时释放**
+     * （否则“已付款 + 券回可用”= 双重优惠），由人工核实订单后按快照原价核销，
+     * 或确认订单已退款后释放。
+     */
+    CONFIRM_EXCEPTION(7, "核销异常");
 
     private final int code;
     private final String desc;

@@ -32,6 +32,15 @@ class TenantConfigKeyTest {
     }
 
     @Test
+    @DisplayName("价格快照开关：只接受 true/false，默认 false")
+    void pricingSwitchIsBooleanAndOffByDefault() {
+        assertThat(TenantConfigKey.TRADE_PRICING_ENABLED.validate("true")).isNull();
+        assertThat(TenantConfigKey.TRADE_PRICING_ENABLED.validate("false")).isNull();
+        assertThat(TenantConfigKey.TRADE_PRICING_ENABLED.validate("1")).isNotNull();
+        assertThat(TenantConfigKey.TRADE_PRICING_ENABLED.defaultValue()).isEqualTo("false");
+    }
+
+    @Test
     @DisplayName("熔断三键：越界被拒绝，合法值通过")
     void circuitBreakerKeysRejectOutOfRange() {
         assertThat(TenantConfigKey.CIRCUIT_BREAKER_FAILURE_RATE.validate("0")).isNotNull();

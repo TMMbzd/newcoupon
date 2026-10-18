@@ -49,6 +49,11 @@ public enum ErrorCode {
     USAGE_STATE_CONFLICT(4004, "占用单状态冲突"),
     COUPON_EXPIRED(4005, "券已过期（核销被拒，占用单已过期关闭）"),
     USAGE_TIMEOUT_CLOSED(4006, "占用单已超时关闭（券已回收/过期），核销拒绝——订单侧按无券价处理"),
+    /**
+     * 价格快照无效（环 2）：不存在/已过期/归属不符/券集合不一致/行不一致。
+     * 一律 fail-closed，不静默回退到“按当前规则重算”——静默改价比拒绝更危险。
+     */
+    PRICING_SNAPSHOT_INVALID(4007, "价格快照无效（不存在/已过期/归属或券集合不一致）"),
 
     // ---- 5xxx 系统与依赖 ----
     SYSTEM_ERROR(5000, "系统繁忙，请稍后重试"),

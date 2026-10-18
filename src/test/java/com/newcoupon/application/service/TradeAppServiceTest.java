@@ -40,6 +40,8 @@ class TradeAppServiceTest {
     private UserCouponRepository userCouponRepository;
     @Mock
     private CouponUsageRepository couponUsageRepository;
+    @Mock
+    private com.newcoupon.domain.repository.PricingUsageRepository pricingUsageRepository;
 
     // 手动构造：构造器新增了两个 @Value 基本类型参数（占比上限/速率阈值），
     // @InjectMocks 无法给基本类型注入值——按生产默认值 80/600 手工传入。
@@ -51,7 +53,8 @@ class TradeAppServiceTest {
     @org.junit.jupiter.api.BeforeEach
     void setUp() {
         service = new TradeAppService(
-                tradeTxService, userCouponRepository, couponUsageRepository, null, 80, 600, 50, 3);
+                tradeTxService, userCouponRepository, couponUsageRepository, null, null,
+                pricingUsageRepository, 80, 600, 50, 3);
     }
 
     private static CouponUsage usage() {

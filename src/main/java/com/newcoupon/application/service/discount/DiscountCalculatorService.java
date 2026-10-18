@@ -76,11 +76,24 @@ public class DiscountCalculatorService {
     }
 
     public CalculateResponse calculate(CalculateRequest request) {
-        return calculate(request, LocalDateTime.now());
+        return calculateWithDetails(request, settlePartyPolicy.isEnabled(), LocalDateTime.now())
+                .response();
     }
 
     CalculateResponse calculate(CalculateRequest request, LocalDateTime now) {
-        boolean partyEnabled = settlePartyPolicy.isEnabled();
+        return calculateWithDetails(request, settlePartyPolicy.isEnabled(), now).response();
+    }
+
+    /**
+     * 带详细结果的试算（环 2）：除响应外还带回标准化行与中选券模板，
+     * 供价格快照冻结“为什么是这个价”。老调用方继续用 {@link #calculate(CalculateRequest)}。
+     */
+    public CalculationOutcome calculateWithDetails(CalculateRequest request, boolean partyEnabled) {
+        return calculateWithDetails(request, partyEnabled, LocalDateTime.now());
+    }
+
+    public CalculationOutcome calculateWithDetails(CalculateRequest request, boolean partyEnabled,
+                                                   LocalDateTime now) {
         List<Line> lines = toLines(request.items(), partyEnabled);
         OrderContext context = toContext(request.userId(), lines, now);
 
@@ -112,8 +125,19 @@ public class DiscountCalculatorService {
                 .map(e -> new CalculateResponse.CouponReason(e.getKey(), e.getValue()))
                 .toList();
 
-        return new CalculateResponse(orderAmount, totalDiscount, orderAmount - totalDiscount,
-                usageList, allocations, unusableList);
+        CalculateResponse response = new CalculateResponse(orderAmount, totalDiscount,
+                orderAmount - totalDiscount, usageList, allocations, unusableList);
+
+        Map<Long, CouponTemplate> appliedTemplates = new LinkedHashMap<>();
+        for (AppliedCoupon applied : stack.applied()) {
+            appliedTemplates.put(applied.candidate().coupon().getId(),
+                    applied.candidate().template());
+        }
+        List<LineView> lineViews = lines.stream()
+                .map(l -> new LineView(l.lineNo(), l.skuId(), l.categoryId(), l.price(),
+                        l.quantity(), l.amount(), l.settlePartyId()))
+                .toList();
+        return new CalculationOutcome(response, lineViews, appliedTemplates);
     }
 
     // ════ 核销算钱 ════
@@ -130,6 +154,19 @@ public class DiscountCalculatorService {
     /** 一张券在一行商品上的分摊（退款按行 × 券冲回的最小单位） */
     public record ConfirmLineShare(String lineNo, String skuId, long lineAmount,
                                    int quantity, long discountAmt, String settlePartyId) {
+    }
+
+    /**
+     * 试算详细结果（环 2 价格快照用）：响应 + 标准化商品行 + 中选券的模板。
+     * 快照据此冻结行级分摊与规则摘要；老调用方只看 response。
+     */
+    public record CalculationOutcome(CalculateResponse response, List<LineView> lines,
+                                     Map<Long, CouponTemplate> appliedTemplates) {
+    }
+
+    /** 标准化商品行：行号已补齐（L1/L2/...）、主体已按灰度归一 */
+    public record LineView(String lineNo, String skuId, String categoryId, long price,
+                           int quantity, long lineAmount, String settlePartyId) {
     }
 
     /**
@@ -453,6 +490,19 @@ public class DiscountCalculatorService {
                     item.quantity(), item.price() * item.quantity(), party));
         }
         return lines;
+    }
+
+    /**
+     * 只做行标准化（补行号、按灰度归一主体、查重），不算钱。
+     * 价格快照用它生成请求摘要——摘要必须与真正参与计算的行完全一致，
+     * 否则“同摘要复用”会命中一份行集合不同的快照。
+     */
+    public List<LineView> normalizeLines(List<CalculateRequest.OrderItem> items,
+                                         boolean partyEnabled) {
+        return toLines(items, partyEnabled).stream()
+                .map(l -> new LineView(l.lineNo(), l.skuId(), l.categoryId(), l.price(),
+                        l.quantity(), l.amount(), l.settlePartyId()))
+                .toList();
     }
 
     private static final String DEFAULT_PARTY = "__default__";

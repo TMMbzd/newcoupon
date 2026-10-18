@@ -43,6 +43,25 @@ public interface CouponUsageMapper extends BaseMapper<CouponUsagePO> {
     int casRelease(@Param("usageNo") String usageNo,
                    @Param("releaseTime") LocalDateTime releaseTime);
 
+    // ---------- 环 2：支付后核销异常（CONFIRM_EXCEPTION=7） ----------
+
+    /** 占用中 → 核销异常（CAS）：暂停 30 分钟超时释放，等人工处理 */
+    @Update("UPDATE coupon_usage SET status = 7 WHERE usage_no = #{usageNo} AND status = 0")
+    int casConfirmException(@Param("usageNo") String usageNo);
+
+    /** 核销异常 → 已核销（人工按快照原价核销） */
+    @Update("UPDATE coupon_usage SET status = 1, discount_amt = #{discountAmt}, use_time = #{useTime} "
+            + "WHERE usage_no = #{usageNo} AND status = 7")
+    int casConfirmFromException(@Param("usageNo") String usageNo,
+                                @Param("discountAmt") long discountAmt,
+                                @Param("useTime") LocalDateTime useTime);
+
+    /** 核销异常 → 已释放（人工确认订单已退款后释放；券状态由调用方按 LOCKED/EXPIRED 处理） */
+    @Update("UPDATE coupon_usage SET status = 2, release_time = #{releaseTime} "
+            + "WHERE usage_no = #{usageNo} AND status = 7")
+    int casReleaseFromException(@Param("usageNo") String usageNo,
+                                @Param("releaseTime") LocalDateTime releaseTime);
+
     // ---------- L2 过期关闭（2026-09-12）：占用单的第三种终结方式 ----------
 
     /** 按占用单号过期关闭（CAS）：占用中→过期关闭（核销被拒的收场路径） */

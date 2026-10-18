@@ -3,6 +3,7 @@ package com.newcoupon.application.dto;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.newcoupon.application.dto.TradeDtos.ConfirmRequest;
+import com.newcoupon.application.dto.TradeDtos.LockRequest;
 import com.newcoupon.open.api.dto.CalculateRequest;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -66,5 +67,39 @@ class TradeDtosValidationTest {
                 List.of(new CalculateRequest.OrderItem("SKU", "CAT", 100L, 1, "L1")));
 
         assertThat(VALIDATOR.validate(req)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("核销 pricingId 超过 64 字符被入口校验拒绝")
+    void confirmPricingIdTooLongRejected() {
+        ConfirmRequest req = new ConfirmRequest("ORD-1:1", null,
+                List.of(new CalculateRequest.OrderItem("SKU", "CAT", 100L, 1, "L1")),
+                "P".repeat(65));
+
+        assertThat(VALIDATOR.validate(req))
+                .as("pricingId 列宽 64，超长必须在入口拒绝")
+                .isNotEmpty();
+    }
+
+    @Test
+    @DisplayName("锁券 pricingId 超过 64 字符被入口校验拒绝")
+    void lockPricingIdTooLongRejected() {
+        LockRequest req = new LockRequest("ORD-1", 1L, 2L, "P".repeat(65));
+
+        assertThat(VALIDATOR.validate(req))
+                .as("pricingId 列宽 64，超长必须在入口拒绝")
+                .isNotEmpty();
+    }
+
+    @Test
+    @DisplayName("试算 orderNo 超过 64 字符被入口校验拒绝")
+    void calculateOrderNoTooLongRejected() {
+        CalculateRequest req = new CalculateRequest(1L,
+                List.of(new CalculateRequest.OrderItem("SKU", "CAT", 100L, 1)),
+                List.of(2L), "O".repeat(65));
+
+        assertThat(VALIDATOR.validate(req))
+                .as("orderNo 列宽 64，超长必须在入口拒绝")
+                .isNotEmpty();
     }
 }

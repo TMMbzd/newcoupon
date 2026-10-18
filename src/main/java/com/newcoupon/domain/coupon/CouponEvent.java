@@ -8,8 +8,8 @@ import java.time.LocalDateTime;
  * 券事件（事实源的一条记录）：领取/锁定/核销/释放/过期/作废全部落事件，
  * 统计与对账从事件表回放（docs/01 第 4.1 节"事件明细是唯一事实源"）。
  *
- * <p>已产生的事件：发放(issued)/锁定(locked)/核销(used,含金额)/释放(released)。
- * 尚无产生点：过期(EXPIRED)/作废(INVALIDATED)——随 M1 过期全链路与 M6 作废功能补齐。
+ * <p>已产生的事件：发放/锁定/核销/释放/过期/锁定超时/退款/核销异常。
+ * 尚无产生点：作废(INVALIDATED)——随 M6 作废功能补齐。
  */
 public final class CouponEvent {
 
@@ -100,6 +100,17 @@ public final class CouponEvent {
                 BoundedKey.of("RFD:", refundNo), EventType.REFUNDED,
                 coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
                 usage.getOrderNo(), discountAmt, now);
+    }
+
+    /**
+     * 核销异常事件（环 2）：用户已支付但带 pricingId 的核销无法完成。
+     * event_no = "CEX:"+usageNo——占用单只会进入异常一次（CAS 0→7 保证）。
+     */
+    public static CouponEvent confirmException(UserCoupon coupon, CouponUsage usage, LocalDateTime now) {
+        return new CouponEvent(null,
+                BoundedKey.of("CEX:", usage.getUsageNo()), EventType.CONFIRM_EXCEPTION,
+                coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
+                usage.getOrderNo(), null, now);
     }
 
     /** 释放回退事件 */

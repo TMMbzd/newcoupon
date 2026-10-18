@@ -13,7 +13,9 @@ public enum EventType {
     EXPIRED(5, "过期"),
     INVALIDATED(6, "作废"),
     LOCK_TIMEOUT(7, "锁定超时释放"),
-    REFUNDED(8, "退款冲销");
+    REFUNDED(8, "退款冲销"),
+    /** 环 2：支付后核销异常（快照校验失败，进入人工处理，券不回可用） */
+    CONFIRM_EXCEPTION(9, "核销异常");
 
     private final int code;
     private final String desc;

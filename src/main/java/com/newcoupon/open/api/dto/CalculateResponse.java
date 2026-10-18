@@ -29,8 +29,28 @@ public record CalculateResponse(
         List<LineAllocation> allocations,
 
         /** 不可用的优惠券及原因 */
-        List<CouponReason> unusableCoupons
+        List<CouponReason> unusableCoupons,
+
+        /**
+         * 价格快照 ID（环 2）：带 orderNo 且租户开启快照时返回；
+         * 不带 orderNo/未开启时为 null。锁券/核销带上它即可按冻结价格执行。
+         */
+        String pricingId
 ) {
+
+    /** 兼容旧调用方/旧测试：不带价格快照的六参构造 */
+    public CalculateResponse(Long originalPrice, Long discountAmount, Long finalPrice,
+                             List<CouponUsage> usedCoupons, List<LineAllocation> allocations,
+                             List<CouponReason> unusableCoupons) {
+        this(originalPrice, discountAmount, finalPrice, usedCoupons, allocations,
+                unusableCoupons, null);
+    }
+
+    /** 同快照重放时回填 pricingId，不改变金额与分摊 */
+    public CalculateResponse withPricingId(String id) {
+        return new CalculateResponse(originalPrice, discountAmount, finalPrice, usedCoupons,
+                allocations, unusableCoupons, id);
+    }
 
     /** 优惠券使用明细（含叠加层级） */
     public record CouponUsage(

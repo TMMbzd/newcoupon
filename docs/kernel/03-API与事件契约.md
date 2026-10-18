@@ -1,6 +1,6 @@
 # 03 · API 与事件契约
 
-> **状态**：v0.3（2026-10-18，环 1 结算主体已支持）。
+> **状态**：v0.4（2026-10-18，环 2 价格快照已支持）。
 > **读者**：产品接入方、内核开发、测试。
 > **前置阅读**：[00 定位与能力边界](00-定位与能力边界.md)、[01 内核能力契约](01-内核能力契约.md)、[02 领域模型与数据契约](02-领域模型与数据契约.md)。
 > **这份文档回答**：有哪些接口、每个接口的字段与语义、怎么认证/幂等/重试、事件长什么样、版本怎么兼容、哪些还没实现。
@@ -94,7 +94,7 @@ NONCE
 | 2 | POST | `/templates/{id}/publish` | 发布模板 | ✅ | ✅（管理令牌） | 同 token 回放；重复发布 2003 | ✅ |
 | 3 | GET | `/templates/{id}` | 查模板 | ✅ | ✅ | 只读 | ✅ |
 | 4 | POST | `/coupons/receive` | 领券 | ✅ | ✅（白名单） | `requestId` + token | ✅ |
-| 5 | POST | `/calculate` | 试算 | ✅ | ❌（无 `/api` 路由） | `X-Client-Token` 必填；默认只读；带 `orderNo`/`pricingId` 时写快照，需摘要幂等（目标） | ✅ |
+| 5 | POST | `/calculate` | 试算 | ✅ | ❌（无 `/api` 路由） | `X-Client-Token` 必填；默认只读；带 `orderNo` 且开关开启时写/复用快照并返回 `pricingId`（同摘要复用） | ✅ |
 | 6 | POST | `/coupons/lock` | 锁券 | ✅ | ✅（白名单） | `(orderNo,couponId)` | ✅ |
 | 7 | POST | `/coupons/confirm` | 核销 | ✅ | ✅（白名单） | `usageNo` | ✅ |
 | 8 | POST | `/coupons/release` | 释放 | ✅ | ✅（白名单） | `usageNo` | ✅ |
@@ -103,8 +103,10 @@ NONCE
 | 11 | GET | `/coupons/refunds?refundNo=|usageNo=` | 查退款明细 | — | — | 只读 | ○ |
 | 12 | GET | `/coupons/bills?date=&appId=` | 查日账单/主体汇总 | — | — | 只读 | ○ |
 | 13 | POST | `/webhooks` | 注册事件 Webhook | — | — | — | ○ |
+| 14 | GET/POST | `/pricing-exceptions[...]` | 核销异常列表/人工解除 | — | ✅（管理令牌；路径为 `/api/pricing-exceptions`） | `usageNo` + action | ✅（V23） |
 
 > 内部面路径 = 把 `/open/v1` 换成 `/api`（如 `/api/coupons/lock`）；`/api` 不是多租户隔离面，只用于平台运营。
+> 例外：`/api/pricing-exceptions` 是管理面专用（没有开放面版本）；POST 由 `AdminTokenFilter` 默认要求 `X-Admin-Token`，GET 沿用项目现状不设令牌（环 4 补 RBAC）。
 > **所有 `/open/v1` 的 POST 都要求 `X-Client-Token`**（含试算/建模板/发布）；缺失/格式错 → 400/6012。GET 不要求 token。
 > 目标查询接口（#11/#12）的接入面（开放面还是内部面）尚未定；`appId` 不应由查询参数任意指定，必须来自认证上下文。
 
@@ -223,7 +225,7 @@ NONCE
 | `userId` | long | 是 | 终端用户 |
 | `items` | array | 是 | 商品行，最多 100 |
 | `couponIds` | array<long> | 是 | 候选**用户券 ID**（`user_coupon.id`），最多 10；与锁券的 `couponId`、券包的 `id` 是同一个 ID |
-| `orderNo` | string(64) | ○ 目标 | 价格快照要绑定订单号；使用 `pricingId` 时必填（字段名待定） |
+| `orderNo` | string(64) | 否 | 价格快照的绑定键；传了且租户开关开启时返回 `pricingId`；不传 = 纯只读试算 |
 
 **OrderItem**：`skuId`、`categoryId`、`price`（分）、`quantity`、`lineNo`（可选，≤64；不传生成 `L1/L2...`）、`settlePartyId`（可选，≤64；该行结算主体；不传落 `__default__`）。`settlePartyId` 在灰度关闭时被忽略（所有行 `__default__`），开启时商家/共担券要求命中行有主体。
 
@@ -239,15 +241,17 @@ NONCE
 | `usedCoupons` | 生效券：`couponId`、`templateName`、`layer`、`discountAmount` |
 | `allocations` | 每行分摊：`lineNo`、`skuId`、`lineAmount`、`allocatedDiscount`、`couponShares`（每券金额） |
 | `unusableCoupons` | 不可用券及原因 |
-| `pricingId` | ○ 目标：本次试算的价格快照 ID |
+| `pricingId` | 本次试算的价格快照 ID；无 `orderNo`/开关关闭时为 null |
 
 **说明**：
 
-- 试算默认只读，不锁券/不扣库存；带 `orderNo`/`pricingId` 时会写快照（目标），但 **POST 仍要求 `X-Client-Token`**；
+- 试算默认只读，不锁券/不扣库存；带 `orderNo` 且开关开启时会写/复用快照并返回 `pricingId`，但 **POST 仍要求 `X-Client-Token`**；
 - 同 token 同 body 在 24 小时内会回放旧结果；想重新算（模板/状态可能变了）请用新 token；
+- **同 body 换 token**：业务层按摘要复用同一 `pricingId`，并返回快照里冻结的响应（不重算）；
 - 同层同互斥组最多 1 张中选，不同组可叠加；每层按剩余金额递进；
 - `allocations` 合计 = `discountAmount`；
-- 目标 `pricingId` 一次试算一个快照，覆盖整单券集合；使用它时请求需带 `orderNo`（字段名待定），否则无法绑定订单；带它核销时价格冻结。
+- `pricingId` 一次试算一个快照，覆盖整单券集合；TTL 默认 120 分钟；带它核销时价格冻结；
+- 开关：租户 `trade.pricing.enabled` → 全站 `coupon.trade.pricing.enabled` → 默认 false；关闭时忽略 `orderNo`、返回 `pricingId=null`。
 
 **常见错误**：1000 参数；6012 缺 token；券不可用放在 `unusableCoupons`，不是整体失败。
 
@@ -262,13 +266,15 @@ NONCE
 | `orderNo` | string(64) | 是 | 订单号 |
 | `userId` | long | 是 | 终端用户 |
 | `couponId` | long | 是 | 用户券 ID |
-| `pricingId` | string(64) | ○ 目标 | 价格快照 ID |
+| `pricingId` | string(64) | 否 | 价格快照 ID；带上则校验快照归属/过期/该券在快照的可用集合，并在同一事务绑定快照+续期 |
 
 **响应**（`LockResult`）：`usageNo`、`couponId`、`couponStatus`、`duplicated`。
 
-**幂等**：业务键 `(orderNo,couponId)`；同一订单重复锁同一券、仍占用中 → `duplicated=true`；已终结 → 4002。**不要拿 `usageNo` 作为首次锁券的重试键**（首次响应丢失时调用方还没有它）。
+**幂等**：业务键 `(orderNo,couponId)`；同一订单重复锁同一券、仍占用中 → `duplicated=true`；已终结 → 4002。**不要拿 `usageNo` 作为首次锁券的重试键**（首次响应丢失时调用方还没有它）。已锁成功的重放即使快照后来过期也应答成功。
 
-**常见错误**：4001/4002/5001/6012。
+**pricingId 绑定**：锁券事务内写 `coupon_pricing_usage(usage_no→pricing_id)`，并把快照续期到“锁窗+10 分钟宽限”；续期失败（快照过期/撤销）→ 4007，整个锁券回滚。
+
+**常见错误**：4001/4002/4007/5001/6012。
 
 ---
 
@@ -279,9 +285,9 @@ NONCE
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `usageNo` | string(64) | 是 | 锁券返回的占用单号 |
-| `discountAmt` | long | 二选一 | 老式金额（过渡兼容）；与 items 二者必须提供其一 |
-| `items` | array | 二选一 | 商品行（≤100）；平台算钱/行级分账走这个 |
-| `pricingId` | string(64) | ○ 目标 | 价格快照 ID |
+| `discountAmt` | long | 三选一 | 老式金额（过渡兼容）；与 items/pricingId 三者必须提供其一 |
+| `items` | array | 三选一 | 商品行（≤100）；平台算钱/行级分账走这个 |
+| `pricingId` | string(64) | 三选一 | 价格快照 ID；带上则按冻结快照核销，items 可省 |
 
 **OrderItem**：同试算。
 
@@ -289,14 +295,23 @@ NONCE
 
 **语义**：
 
-- 带 `items`：平台按订单级整栈复算，写行级分账；`items` 最多 100 行，`lineNo` 应与试算/锁券时的商品行一致；同一订单的全部券应在支付前锁完，核销按订单号找回整栈；
-- 带 `items` 时单笔优惠占比默认不超过订单金额的 80%（全局配置）；超出 → 1000；
-- 不带 `items`：老式路径，按 `discountAmt` 记账，**不写行级分账、不做门槛/范围/占比复算、不进日账单**；两者都传时以 `items` 为准（`discountAmt` 被忽略）；
-- 已核销重放返回首次金额；其他终态 4004/4006；
-- 带 `pricingId` 时按快照（目标）；快照过期/归属不符/券集合不一致 fail-closed；
+- 带 `pricingId`：**完全按快照核销**，不读当前模板、不跑整栈复算、不调扩展；出资拆分/行分摊/结算主体全部来自 payload；`items` 可省，带了则逐行校验（行号/SKU/品类/单价/数量/主体必须一致，否则 4007）；
+- 带 `pricingId` 时按锁券绑定校验：占用单没绑定快照却临时传 ID → 4007；传了与绑定不同的 ID → 4007；漏传 ID 但锁券时绑定过 → 自动按绑定快照核销；
+- 快照券集合必须等于订单当前生效占用单集合（占用中+已核销）；少锁/多锁 → 4007（L70 契约）；
+- 带 `items` 且无 `pricingId`/绑定：平台按订单级整栈复算，写行级分账；`items` 最多 100 行；同一订单的全部券应在支付前锁完；
+- 单笔优惠占比默认不超过订单金额的 80%；快照路径用快照冻结的 `maxDiscountRatio` 判，不受当前配置变化影响；超出 → 1000；
+- 不带 `items`/`pricingId`/绑定：老式路径，按 `discountAmt` 记账，**不写行级分账、不做门槛/范围/占比复算、不进日账单**；
+- 已核销重放返回首次金额；其他终态 4004/4006；4007 会把占用单钉在 `CONFIRM_EXCEPTION`（券不回 USABLE），由管理面人工处理；
 - 请求头：开放面 POST 必须带 `X-Client-Token`，缺 → 400/6012。
 
-**常见错误**：1000/3004/4002/4003/4004/4005/4006/5001/6012。
+**常见错误**：1000/3004/4002/4003/4004/4005/4006/4007/5001/6012。
+
+**人工解除异常（仅内部面，需 X-Admin-Token）**：
+
+- `GET /api/pricing-exceptions?limit=100`：列出 PENDING 异常；
+- `POST /api/pricing-exceptions/{usageNo}/resolve`，body `{"action":"CONFIRM"|"RELEASE","reason":"..."}`；
+  - `CONFIRM`：按绑定快照原价核销；快照已过期/损坏则拒绝，只能 `RELEASE`；
+  - `RELEASE`：确认订单已退款/不会使用该优惠后释放；券 LOCKED→USABLE，已过期保持 EXPIRED。
 
 ---
 
@@ -371,6 +386,7 @@ NONCE
 | INVALIDATED | 作废 | null | ○ 类型已定义，当前无产生点 |
 | LOCK_TIMEOUT | 锁定超时收场 | null | ✅ 内部 |
 | REFUNDED | 退款冲销 | 本次冲回 | ✅ 内部 |
+| CONFIRM_EXCEPTION | 支付后快照核销失败 | null | ✅ 内部（V23） |
 
 ### 10.3 目标事件信封
 
@@ -412,7 +428,7 @@ NONCE
 - 契约测试：提供方维护、接入方接入前跑（**目标，当前没有契约测试套件**）；
 - 沙箱：目标态；外部产品先在沙箱跑通试算/锁/核销/退款；
 - `settlePartyId` 已由 DTO 接收并落库，但灰度开关 `trade.settle_party.enabled` 默认关；关闭时字段被忽略（所有行 `__default__`），开启后才参与过滤/退款归属。
-- `pricingId` 仍是目标字段；DTO 当前不认，发送后会被忽略（不会报错，但也不会生效）。
+- `pricingId` 已由 `CalculateRequest`（`orderNo`）/`CalculateResponse`/`LockRequest`/`ConfirmRequest` 接收；灰度 `trade.pricing.enabled` 默认关。关闭时 calculate 不返回 ID，lock/confirm 的旧路径不变；已绑定的占用单仍按快照核销（数据面承诺）。
 
 ---
 
@@ -548,8 +564,8 @@ X-Client-Token: refund-20261018-001
 |---|---|---|
 | 建模板/发布/查模板 | ✅ 含 `settlePartyId`（灰度默认关） | 模板版本 |
 | 领券 | ✅ | 批量/定向 |
-| 试算 | ✅ 含 `settlePartyId`（灰度默认关） | `pricingId` |
-| 锁/核销/释放 | ✅ 含结算主体行级归属 | `pricingId` 核销、商家/门店/地区主体 |
+| 试算 | ✅ 含 `settlePartyId`；带 `orderNo` 返回 `pricingId`（两项灰度默认关） | 扩展结果冻结、多方案比价 |
+| 锁/核销/释放 | ✅ 含结算主体行级归属；锁券绑定快照、核销按冻结价、`CONFIRM_EXCEPTION` 人工解除 | 商家/门店/地区主体 |
 | 退款 | ✅ 整单/按行；明细复制原主体 | 租户级政策、按主体日汇总 |
 | 查券包 | ✅ | 按订单/占用单/退款/账单查询 |
 | 日账单/主体汇总 | ◐ 模板日账单只有表/定时任务，无 HTTP 查询 | 查询 API/导出/主体汇总 |
@@ -563,14 +579,14 @@ X-Client-Token: refund-20261018-001
 
 ### 16.1 待确认
 
-1. `pricingId` 概念已在 01 G4 定（试算快照、绑定、fail-closed）；待定的是字段名/长度、TTL 具体值、`calculate` 是否必须带 `orderNo`（当前 DTO 没有 `orderNo`，快照无法绑定订单）。
+1. ~~`pricingId` 字段名/长度/TTL/orderNo 必填性~~ → 已定并实施：`pricingId` string(64)、TTL 120 分钟（锁券续期）、`orderNo` 可选（不传不返回 ID）。
 2. `settlePartyId` 已按推荐名落库/落 DTO；`merchantId` 只作电商场景别名，不再作为契约字段。最终命名如需调整，属于破坏性变更，按 ADR-0016 走新版本。
 3. 对外事件第一版提供哪些类型？Webhook 签名/重试/死信策略？
 4. 查询 API 第一版做哪些：退款明细、日账单、主体汇总？接入面是开放面还是内部面？
 5. `/api` 长期定位：平台运营面，还是补内部租户身份？
 6. 沙箱/契约测试的落地方式（独立 appId？独立环境？）。
 7. `uk_idem(user_id, idempotent_key)` 不含 appId：跨租户同 userId+requestId 会撞键；是否把 appId 纳入幂等键（需要动 64 张分表）？
-8. `pricingId` 失效的专用错误码：目标新增 `4007 PRICING_SNAPSHOT_INVALID`（ErrorCode 尚未登记；不复用 1000/4002/4004）；编号以 01/03 最终版为准。
+8. ~~`pricingId` 失效专用错误码~~ → 已登记 `4007 PRICING_SNAPSHOT_INVALID`（不复用 1000/4002/4004）。
 9. 非法查询参数 `status=9` 已由入口转成 `1000`（2026-10-18 修，`TradeControllerTest` 钉住）。
 
 ### 16.2 变更记录
@@ -580,3 +596,4 @@ X-Client-Token: refund-20261018-001
 | v0.1 | 2026-10-18 | 初稿：通用协议、接口总表、逐接口字段、错误/幂等、事件目标、版本、限流、安全、示例 |
 | v0.2 | 2026-10-18 | 按对抗审查修订：所有 `/open` POST（含试算）必须带 `X-Client-Token`；枚举响应为中文描述；发件箱仅 ISSUED；INVALIDATED 无产生点；1001 两种语义；错误清单按实修正；`LocalDateTime` 无 offset；5003 仅领券；非法 `status` 改 1000；7001/7002 补 `data:null`；目标错误码 4007 未登记按目标态标注 |
 | v0.3 | 2026-10-18 | 环 1 实施：模板/OrderItem 的 `settlePartyId` 已支持（灰度默认关）；退款不接收主体；接口矩阵/待确认同步 |
+| v0.4 | 2026-10-18 | 环 2 实施：calculate 加 `orderNo`/`pricingId`；lock/confirm 加 `pricingId`+绑定；4007 登记；`CONFIRM_EXCEPTION` 事件与管理面解除接口；兼容/矩阵/待确认同步 |

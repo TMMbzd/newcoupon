@@ -56,7 +56,8 @@ class TradeTxServiceTest {
         // @InjectMocks 在扩展的 beforeEach 里先炸）——去注解、手工组装
         // 三个退款 Mapper 传 null：本类是纯状态机单测，退款路径由集成测试覆盖
         service = new TradeTxService(userCouponRepository, couponUsageRepository,
-                couponEventRepository, null, null, null, null, releaseTaskGateway, 30L);
+                couponEventRepository, null, null, null, null, null, null, null,
+                releaseTaskGateway, 30L);
     }
 
     private static UserCoupon coupon(CouponStatus status) {

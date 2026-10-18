@@ -84,6 +84,10 @@ public final class CouponUsage {
         if (status == UsageStatus.TIMEOUT_CLOSED) {
             throw new BizException(ErrorCode.USAGE_TIMEOUT_CLOSED);
         }
+        if (status == UsageStatus.CONFIRM_EXCEPTION) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
+                    "占用单核销异常（订单已支付但核销失败），需人工处理，不能重复核销");
+        }
     }
 
     /**
@@ -99,6 +103,10 @@ public final class CouponUsage {
         if (status == UsageStatus.REFUNDED || status == UsageStatus.PARTIALLY_REFUNDED) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
                     "占用单状态=" + status.getDesc() + "，已支付订单不可释放（售后走退款流程）");
+        }
+        if (status == UsageStatus.CONFIRM_EXCEPTION) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
+                    "占用单核销异常（订单已支付但核销失败），需人工处理，不能按取消释放");
         }
     }
 

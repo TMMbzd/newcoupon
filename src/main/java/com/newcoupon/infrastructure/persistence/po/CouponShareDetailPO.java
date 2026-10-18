@@ -24,6 +24,8 @@ public class CouponShareDetailPO {
     private String appId;
     /** V22：结算主体（行级；平台券/无商家产品为 __default__） */
     private String settlePartyId;
+    /** V23：核销使用的价格快照ID（老式核销/未启用快照为 NULL） */
+    private String pricingId;
     private String usageNo;
     private String orderNo;
     private String orderLineNo;
@@ -47,6 +49,8 @@ public class CouponShareDetailPO {
     public void setAppId(String appId) { this.appId = appId; }
     public String getSettlePartyId() { return settlePartyId; }
     public void setSettlePartyId(String settlePartyId) { this.settlePartyId = settlePartyId; }
+    public String getPricingId() { return pricingId; }
+    public void setPricingId(String pricingId) { this.pricingId = pricingId; }
     public String getUsageNo() { return usageNo; }
     public void setUsageNo(String usageNo) { this.usageNo = usageNo; }
     public String getOrderNo() { return orderNo; }

@@ -102,4 +102,21 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
     public boolean casRefundState(String usageNo, com.newcoupon.domain.coupon.UsageStatus target) {
         return mapper.casRefundState(usageNo, target.getCode()) == 1;
     }
+
+    // ---------- 环 2：支付后核销异常 ----------
+
+    @Override
+    public boolean casConfirmException(String usageNo) {
+        return mapper.casConfirmException(usageNo) == 1;
+    }
+
+    @Override
+    public boolean casConfirmFromException(String usageNo, long discountAmt, LocalDateTime useTime) {
+        return mapper.casConfirmFromException(usageNo, discountAmt, useTime) == 1;
+    }
+
+    @Override
+    public boolean casReleaseFromException(String usageNo, LocalDateTime releaseTime) {
+        return mapper.casReleaseFromException(usageNo, releaseTime) == 1;
+    }
 }

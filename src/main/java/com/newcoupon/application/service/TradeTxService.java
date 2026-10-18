@@ -17,16 +17,21 @@ import com.newcoupon.domain.coupon.CouponStatus;
 import com.newcoupon.domain.coupon.CouponUsage;
 import com.newcoupon.domain.coupon.UsageStatus;
 import com.newcoupon.domain.coupon.UserCoupon;
+import com.newcoupon.domain.pricing.PricingUsage;
 import com.newcoupon.domain.repository.CouponEventRepository;
 import com.newcoupon.domain.repository.CouponUsageRepository;
+import com.newcoupon.domain.repository.PricingSnapshotRepository;
+import com.newcoupon.domain.repository.PricingUsageRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.domain.statemachine.CouponStateMachine;
 import com.newcoupon.domain.statemachine.CouponTransition;
 import com.newcoupon.infrastructure.persistence.CouponReleaseTaskGateway;
+import com.newcoupon.infrastructure.persistence.mapper.CouponConfirmExceptionMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponRefundDetailMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponRefundOrderMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponReturnLogMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponShareDetailMapper;
+import com.newcoupon.infrastructure.persistence.po.CouponConfirmExceptionPO;
 import com.newcoupon.infrastructure.persistence.po.CouponRefundDetailPO;
 import com.newcoupon.infrastructure.persistence.po.CouponRefundOrderPO;
 import com.newcoupon.infrastructure.persistence.po.CouponReturnLogPO;
@@ -43,6 +48,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -71,6 +78,8 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class TradeTxService {
 
+    private static final Logger log = LoggerFactory.getLogger(TradeTxService.class);
+
     private static final String DEFAULT_PARTY = "__default__";
 
     private final UserCouponRepository userCouponRepository;
@@ -80,6 +89,9 @@ public class TradeTxService {
     private final CouponRefundOrderMapper couponRefundOrderMapper;
     private final CouponRefundDetailMapper couponRefundDetailMapper;
     private final CouponReturnLogMapper couponReturnLogMapper;
+    private final CouponConfirmExceptionMapper couponConfirmExceptionMapper;
+    private final PricingSnapshotRepository pricingSnapshotRepository;
+    private final PricingUsageRepository pricingUsageRepository;
     private final CouponReleaseTaskGateway releaseTaskGateway;
     private final long lockTimeoutMinutes;
 
@@ -90,6 +102,9 @@ public class TradeTxService {
                           CouponRefundOrderMapper couponRefundOrderMapper,
                           CouponRefundDetailMapper couponRefundDetailMapper,
                           CouponReturnLogMapper couponReturnLogMapper,
+                          CouponConfirmExceptionMapper couponConfirmExceptionMapper,
+                          PricingSnapshotRepository pricingSnapshotRepository,
+                          PricingUsageRepository pricingUsageRepository,
                           CouponReleaseTaskGateway releaseTaskGateway,
                           @Value("${coupon.trade.lock-timeout-minutes:30}") long lockTimeoutMinutes) {
         this.userCouponRepository = userCouponRepository;
@@ -99,12 +114,24 @@ public class TradeTxService {
         this.couponRefundOrderMapper = couponRefundOrderMapper;
         this.couponRefundDetailMapper = couponRefundDetailMapper;
         this.couponReturnLogMapper = couponReturnLogMapper;
+        this.couponConfirmExceptionMapper = couponConfirmExceptionMapper;
+        this.pricingSnapshotRepository = pricingSnapshotRepository;
+        this.pricingUsageRepository = pricingUsageRepository;
         this.releaseTaskGateway = releaseTaskGateway;
         this.lockTimeoutMinutes = lockTimeoutMinutes;
     }
 
     @Transactional
     public LockResult lock(LockRequest req, LocalDateTime now) {
+        return lock(req, now, null);
+    }
+
+    /**
+     * 锁券事务（环 2）：带 {@code pricingId} 时在同一事务里续期快照并写 usage 绑定。
+     * 续期失败（快照已过期/撤销）→ 4007 且整个锁券回滚，不会出现“券锁了但价格没冻住”。
+     */
+    @Transactional
+    public LockResult lock(LockRequest req, LocalDateTime now, String pricingId) {
         UserCoupon coupon = userCouponRepository.findByIdForUser(req.couponId(), req.userId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND, "id=" + req.couponId()));
         if (coupon.getUserId() != req.userId()) {
@@ -117,6 +144,17 @@ public class TradeTxService {
         String usageNo = com.newcoupon.common.BoundedKey.usageNo(req.orderNo(), req.couponId());
         CouponUsage usage = couponUsageRepository.save(
                 CouponUsage.occupy(coupon, req.orderNo(), usageNo, now));        // 撞uk_usage_no→DuplicateKey
+        if (pricingId != null && !pricingId.isBlank()) {
+            // 快照续期到“锁窗 + 10 分钟宽限”：试算后第 29 分钟锁券，支付回调也不会
+            // 在锁窗内因快照先过期而失败。0 行 = 快照已过期/撤销 → 整个事务回滚。
+            LocalDateTime minExpiresAt = now.plusMinutes(lockTimeoutMinutes + 10);
+            if (!pricingSnapshotRepository.renewOnLock(pricingId, minExpiresAt, now)) {
+                throw new BizException(ErrorCode.PRICING_SNAPSHOT_INVALID,
+                        "价格快照已过期或已失效");
+            }
+            pricingUsageRepository.save(new PricingUsage(null, usageNo, pricingId,
+                    coupon.getAppId(), coupon.getUserId(), req.orderNo(), coupon.getId(), now));
+        }
         couponEventRepository.append(CouponEvent.locked(coupon, usage, now));
         // L5：注册锁定超时任务（同一事务——"锁了必有兜底"；deadline=占用时间+窗口，
         // 测试用 coupon.trade.lock-timeout-minutes=0 使任务即刻到期）
@@ -179,6 +217,7 @@ public class TradeTxService {
         share.setTemplateId(coupon.getTemplateId());
         share.setAppId(coupon.getAppId());
         share.setSettlePartyId(DEFAULT_PARTY);
+        share.setPricingId(req.pricingId());
         share.setUsageNo(req.usageNo());
         share.setOrderNo(usage.getOrderNo());
         share.setPlatformBurden(split.platformBurden());
@@ -217,6 +256,7 @@ public class TradeTxService {
             share.setAppId(coupon.getAppId());
             share.setSettlePartyId(line.settlePartyId() == null
                     ? DEFAULT_PARTY : line.settlePartyId());
+            share.setPricingId(req.pricingId());
             share.setUsageNo(req.usageNo());
             share.setOrderNo(usage.getOrderNo());
             share.setOrderLineNo(line.lineNo());
@@ -227,6 +267,138 @@ public class TradeTxService {
             share.setShareTotal(line.discountAmt());
             couponShareDetailMapper.insert(share);
         }
+    }
+
+    // ════ 环 2：支付后核销异常（CONFIRM_EXCEPTION）════
+
+    /**
+     * 占用中 → 核销异常（独立事务）。用户已支付但快照校验失败时调用：
+     * 占用单进入 7、券保持 LOCKED、记异常行与事件；30 分钟超时任务看到非 0 状态会 no-op，
+     * 因此不会把券放回 USABLE（否则“已付款 + 券回可用”= 双重优惠）。
+     *
+     * @return true=本次进入异常；false=占用单已不是占用中（已被核销/释放/超时收场），不覆盖
+     */
+    @Transactional
+    public boolean markConfirmException(String usageNo, String pricingId, String reason,
+                                        LocalDateTime now) {
+        CouponUsage usage = couponUsageRepository.findByUsageNo(usageNo).orElse(null);
+        if (usage == null || usage.getStatus() != UsageStatus.OCCUPYING) {
+            return false;
+        }
+        if (!couponUsageRepository.casConfirmException(usageNo)) {
+            return false;
+        }
+        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId()).orElse(null);
+        if (coupon != null) {
+            couponEventRepository.append(CouponEvent.confirmException(coupon, usage, now));
+        }
+        // 异常行只记录“锁券时绑定的快照”，不记录核销请求临时携带的 ID：
+        // 否则人工 CONFIRM 会拿一个未绑定的报价绕过锁券契约。没有绑定就存 null，
+        // 人工只能核对订单后 RELEASE。
+        String boundPricingId = pricingUsageRepository.findByUsageNo(usageNo)
+                .map(PricingUsage::pricingId)
+                .orElse(null);
+        CouponConfirmExceptionPO row = new CouponConfirmExceptionPO();
+        row.setUsageNo(usageNo);
+        // app_id 列 NOT NULL：券极端缺失时落内置应用，保证异常记录能落库（宁可归属不准也要留住现场）
+        row.setAppId(coupon == null
+                ? com.newcoupon.domain.open.OpenApp.BUILTIN_APP_ID : coupon.getAppId());
+        row.setUserId(usage.getUserId());
+        row.setUserCouponId(usage.getUserCouponId());
+        row.setOrderNo(usage.getOrderNo());
+        row.setPricingId(boundPricingId);
+        row.setReason(truncate(reason, 512));
+        row.setResolveStatus("PENDING");
+        row.setCreateTime(now);
+        couponConfirmExceptionMapper.insert(row);
+        log.error("PRICING_CONFIRM_EXCEPTION usageNo={} pricingId={} reason={}",
+                usageNo, pricingId, reason);
+        return true;
+    }
+
+    /**
+     * 人工按快照原价核销异常单（管理面）：占用单 7→1、券 LOCKED→USED、
+     * 落行级分账（带 pricingId）与异常处理留痕。券若已被过期任务收成 EXPIRED，
+     * 拒绝核销——此时只能确认退款后 RELEASE。
+     */
+    @Transactional
+    public ConfirmResult confirmFromException(String usageNo, long discountAmt, FundingSplit split,
+                                              java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares,
+                                              String pricingId, String resolveReason,
+                                              LocalDateTime now) {
+        CouponUsage usage = couponUsageRepository.findByUsageNo(usageNo)
+                .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, usageNo));
+        if (usage.getStatus() != UsageStatus.CONFIRM_EXCEPTION) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
+                    "占用单状态=" + usage.getStatus().getDesc() + "，仅核销异常可人工核销");
+        }
+        if (!couponUsageRepository.casConfirmFromException(usageNo, discountAmt, now)) {
+            throw new TradeCasRejectedException("usage-confirm-exception", usageNo);
+        }
+        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+                .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
+        if (coupon.getStatus() != CouponStatus.LOCKED) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
+                    "券状态=" + coupon.getStatus().getDesc()
+                            + "，已不能按快照核销；请确认订单退款后选择 RELEASE");
+        }
+        CouponStateMachine.transit(coupon.getStatus(), CouponTransition.CONFIRM);
+        if (!userCouponRepository.casConfirm(usage.getUserCouponId(), usage.getUserId())) {
+            throw new TradeCasRejectedException("coupon-confirm-exception", usage.getUserCouponId());
+        }
+        couponEventRepository.append(CouponEvent.used(coupon, usage, discountAmt, now));
+        if (split != null) {
+            ConfirmRequest shareReq = new ConfirmRequest(usageNo, discountAmt, null, pricingId);
+            if (lineShares != null && !lineShares.isEmpty()) {
+                insertLineShares(shareReq, coupon, usage, split, lineShares);
+            } else {
+                insertOrderLevelShare(shareReq, coupon, usage, split);
+            }
+        }
+        couponConfirmExceptionMapper.markResolved(usageNo, "CONFIRMED",
+                truncate(resolveReason, 512), now);
+        return new ConfirmResult(usageNo, CouponStatus.USED.getDesc(), discountAmt, false);
+    }
+
+    /**
+     * 人工释放异常单（管理面）：仅用于“订单已退款/不会使用该优惠”的核实结论。
+     * 占用单 7→2；券 LOCKED 时回 USABLE（已过期则保持 EXPIRED），绝不把已过期券改回可用。
+     */
+    @Transactional
+    public ReleaseResult releaseFromException(String usageNo, String resolveReason, LocalDateTime now) {
+        CouponUsage usage = couponUsageRepository.findByUsageNo(usageNo)
+                .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, usageNo));
+        if (usage.getStatus() != UsageStatus.CONFIRM_EXCEPTION) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
+                    "占用单状态=" + usage.getStatus().getDesc() + "，仅核销异常可人工释放");
+        }
+        if (!couponUsageRepository.casReleaseFromException(usageNo, now)) {
+            throw new TradeCasRejectedException("usage-release-exception", usageNo);
+        }
+        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+                .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
+        if (coupon.getStatus() == CouponStatus.LOCKED) {
+            CouponStateMachine.transit(coupon.getStatus(), CouponTransition.RELEASE);
+            if (!userCouponRepository.casRelease(usage.getUserCouponId(), usage.getUserId())) {
+                throw new TradeCasRejectedException("coupon-release-exception",
+                        usage.getUserCouponId());
+            }
+        } else if (coupon.getStatus() != CouponStatus.EXPIRED) {
+            throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
+                    "券状态=" + coupon.getStatus().getDesc() + "，不能人工释放");
+        }
+        couponEventRepository.append(CouponEvent.released(coupon, usage, now));
+        couponConfirmExceptionMapper.markResolved(usageNo, "RELEASED",
+                truncate(resolveReason, 512), now);
+        UserCoupon fresh = userCouponRepository.findById(usage.getUserCouponId()).orElse(coupon);
+        return new ReleaseResult(usageNo, fresh.getStatus().getDesc(), false);
+    }
+
+    private static String truncate(String value, int max) {
+        if (value == null) {
+            return "";
+        }
+        return value.length() <= max ? value : value.substring(0, max);
     }
 
     /**

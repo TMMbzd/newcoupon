@@ -62,10 +62,14 @@ public final class UserCoupon {
         require(userId > 0, "userId 必须为正");
         require(idempotentKey != null && !idempotentKey.isBlank(), "幂等键(requestId)必填");
         require(seq >= 1, "发放序号必须>=1（来自Redis用户计数）");
+        // receive_time 是 DATETIME(0)：MySQL 插入带小数秒的值会**四舍五入**到下一秒，
+        // 导致“领取后立刻试算”时 now < receiveTime 被 TimeRangeChecker 判成未到使用时间。
+        // 领域层按存储精度截断，保证落库值与内存语义一致（环 2 集成测试抓到的真实边界）。
+        LocalDateTime receiveTime = now.withNano(0);
         return new UserCoupon(null, userId, template.getId(), template.getTemplateCode(),
                 template.getFaceValue(), template.getThreshold(), template.getDiscountCap(),
-                resolveValidEnd(template, now), CouponStatus.USABLE, now, idempotentKey, seq,
-                template.getAppId());   // S1：券的归属 = 模板的归属（写时冗余，读时不 join）
+                resolveValidEnd(template, now), CouponStatus.USABLE, receiveTime, idempotentKey,
+                seq, template.getAppId());   // S1：券的归属 = 模板的归属（写时冗余，读时不 join）
     }
 
     /**

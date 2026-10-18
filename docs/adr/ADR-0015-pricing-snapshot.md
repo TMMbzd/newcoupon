@@ -1,7 +1,7 @@
 # ADR-0015：试算价格快照 `pricingId`
 
-- **状态**：已接受（框架，2026-10-18）；**核心参数待拍板**：写语义/幂等键、TTL、存储、错误码、灰度
-- **实施状态**：目标态；环 2 实施，当前未实现
+- **状态**：已接受并实施（环 2，2026-10-18；V23，灰度 `trade.pricing.enabled` 默认关）
+- **实施状态**：已实施；核对表见文末“实施记录”
 - **关联**：01 G4、02 §2.10/§3.2、03 §4/§5/§6、04 §4.7/§4.8、05 环 2、ADR-0014、ADR-0016
 
 ## 背景
@@ -54,14 +54,14 @@
 appId + userId + orderNo + 券集合
 ```
 
-- 缺少 `orderNo` 时，`pricingId` 不可用（明确报错或返回空，二选一在环 2 开工前拍板）；
+- 缺少 `orderNo` 时，`pricingId` 不可用：不写快照，响应里为 `null`（已实现）；
 - 跨租户/跨用户/跨订单/券集合不一致 → 拒绝；
 - 快照不可修改；要改只能重新试算生成新 ID；
 - **L70 前置契约**：券集合假设接入方在支付前把订单全部券锁完。少锁一张，快照看不到该券，“试算=核销”不成立；环 2 必须把“少锁券”作为负例/告警，或改为核销请求显式携带订单券列表。
 
 ### 3. TTL 与生命周期
 
-- TTL 与锁券窗口/支付窗口对齐；具体值待定；
+- TTL 默认 120 分钟，锁券时续期到“锁窗 + 10 分钟宽限”；过期后带 ID 拒绝；
 - 创建 → 锁券/核销使用 → 过期/清理；
 - 过期后带 ID 拒绝（fail-closed），不静默回退到“按当前规则重算”；
 - 清理任务、存储容量、监控在环 2 设计。
@@ -115,12 +115,13 @@ appId + userId + orderNo + 券集合
 
 ### 代价与边界
 
-- `CalculateRequest` 当前没有 `orderNo`，契约要加字段；
-- 快照存储/清理/大小（大订单/多券）；
-- TTL 与锁窗/支付窗口要配平；
-- 快照与占用单的券集合一致性要校验；
+- `CalculateRequest` 已加可选 `orderNo`（V23）；不传则不生成快照；
+- 快照存储/清理/大小：独立表 + MEDIUMTEXT，1 MiB 上限，7 天保留；
+- TTL 已配平：默认 120 分钟，锁券续期到锁窗+10 分钟；
+- 快照与占用单的券集合一致性已校验（不相等 → 4007）；
 - 不带 `pricingId` 的旧调用方不获得强保证；
-- 快照不能替代分账；核销后仍以分账明细为准。
+- 快照不能替代分账；核销后仍以分账明细为准；
+- 核销校验与事务之间的 TOCTOU 窗口仍在（L75）。
 
 ## 备选方案（已否决）
 
@@ -130,26 +131,50 @@ appId + userId + orderNo + 券集合
 4. **每张券一个快照**：同一订单多券无法共享上下文，L64 整栈复算失去一致性；否决。
 5. **快照长期保存、不过期**：存储膨胀、数据保留/隐私问题；否决。
 
-## 待拍板
+## 实施记录（环 2，2026-10-18）
 
-> 本 ADR 的**框架**（一次试算=一个快照、绑定、fail-closed、扩展结果冻结）已接受；以下参数未定，不构成承诺。
+原“待拍板”7 项的实际取值：
 
-| # | 事项 | 阻塞哪一环 | 推荐 |
+| # | 事项 | 实际决定 | 落点 |
 |---|---|---|---|
-| 1 | `calculate` 写语义/幂等键：同摘要复用还是每次新建？ | 环 2 开工前 | 同 `(appId,userId,orderNo,券集合,行摘要)` 在 TTL 内复用 |
-| 2 | TTL：跟锁窗 30 分钟，还是跟支付窗口？ | 环 2 开工前 | 不短于锁窗；按支付窗口评估 |
-| 3 | `pricingId` 默认关灰度，还是对新接入方默认开启？ | 环 2 | 默认关，按租户灰度 |
-| 4 | 快照存储：独立表/JSON 列/对象存储？大订单上限？ | 环 2 | 独立表 + JSON payload，先按 100 行上限 |
-| 5 | 错误码：推荐新增 4007；复用 1000/4002/4004 会违反 ADR-0016 | 环 2 | 新增 4007 |
-| 6 | `CONFIRM_EXCEPTION` 状态机/暂停超时/人工流程 | 扩展点上线前，且环 2 设计时 | 独立状态 + 暂停超时 + 人工补偿 |
-| 7 | `CalculateRequest.orderNo` 必填还是可选（可选时快照不可用） | 环 2 开工前 | 可选；没有 orderNo 就不返回 pricingId |
+| 1 | 写语义/幂等键 | 同 `(appId,userId,orderNo,主体开关,标准化行,排序券集合)` 摘要复用；`live_digest` 唯一，过期置空后重建 | `PricingSnapshotService.digest/create`、V23 |
+| 2 | TTL | 默认 120 分钟；锁券时同事务续期到 `锁窗+10min`；清理保留 7 天审计 | `coupon.trade.pricing.ttl-minutes`、`TradeTxService.lock` |
+| 3 | 灰度 | 默认关；租户 `trade.pricing.enabled` → 全站 `coupon.trade.pricing.enabled` → false | `PricingSnapshotPolicy` |
+| 4 | 存储 | 独立非分片表 + `MEDIUMTEXT` JSON payload；payload 硬上限 1 MiB；100 行/10 券沿用 DTO 上限 | V23、`PricingSnapshotService` |
+| 5 | 错误码 | 新增 `4007 PRICING_SNAPSHOT_INVALID` | `ErrorCode` |
+| 6 | `CONFIRM_EXCEPTION` | 已实现：状态 7、CAS、事件 9、超时任务跳过、管理面 CONFIRM/RELEASE | V23、`UsageStatus`、`ConfirmExceptionService` |
+| 7 | `orderNo` | 可选；没有 orderNo 不返回 pricingId | `CalculateRequest` |
+
+设计评审补的硬点也已落地：
+
+- **锁券绑定**：`coupon_pricing_usage` 同事务写 `usage_no → pricing_id`；核销漏传 pricingId 时按绑定自动解析，传了不同 ID 直接 4007；
+- **核销完全绕过模板**：带 pricingId/绑定时不读 `CachedTemplateReader`、不跑整栈复算、不调扩展；出资拆分/行分摊/主体全部来自 payload；
+- **冻结配置**：payload 记录 `engineVersion`、`settlePartyEnabled`、`maxDiscountRatio`；核销按冻结值判，不受当前配置漂移影响；
+- **审计**：`coupon_share_detail.pricing_id` 记录核销用的快照；
+- **清理**：过期先置空 `live_digest`（保留历史行），超过 7 天再物理删除。
+
+### 测试证据
+
+- `PricingSnapshotIntegrationTest` 14/14：同摘要复用、无 orderNo、改模板、过期、少锁券、行不一致、跨租户、重复核销、旧调用方、锁券成员校验、payload 冻结、清理、异常态 RELEASE/CONFIRM；
+- `PricingSnapshotOpenApiIntegrationTest` 2/2：真实签名 + X-Client-Token 下 calculate 返回/复用 pricingId，HTTP 全链路 lock→改模板→confirm 金额不变；
+- `PricingSnapshotPolicyTest` 3/3、`TenantConfigKeyTest` 4/4、`TradeDtosValidationTest` 7/7、`UserCouponTest` 7/7；
+- 受影响回归 74 例 + 相邻 39 例全绿。
+
+### 已知边界（未在本环做）
+
+- 核销校验与事务之间仍有极小的 TOCTOU 窗口（同订单 sibling 在该窗口内释放/退款）；旧 L64 路径同样存在，环 3/4 可用事务内 `FOR UPDATE` 重校验消除；
+- 扩展框架尚未接线，payload 的 `extensionDecisions` 结构已冻结但当前为空；
+- 快照过期后带 ID 一律 4007；如果调用方在快照过期后才支付，占用单进入 `CONFIRM_EXCEPTION`，只能人工按快照（快照仍在保留期）或确认退款后 RELEASE；
+- `OpenApiIdempotentFilter` 的响应缓存 24h，快照 TTL 120min；同 token 在 2 小时后重放会拿到已过期 ID，这是已知契约边界。
 
 ## 验收（环 2）
 
-- 试算后改模板，带 `pricingId` 核销金额不变；
-- 过期/跨租户/跨用户/券集合不一致拒绝；
-- 重复核销结果不变；
-- 不带 `pricingId` 的旧调用方行为不变；
-- 试算请求没有 `orderNo` 时，`pricingId` 明确不可用；
-- 扩展结果冻结用例（目标）；
-- 支付后核销失败进入异常态，不把券放回 `USABLE`（目标）。
+- ✅ 试算后改模板，带 `pricingId` 核销金额不变；
+- ✅ 过期/跨租户/跨用户/券集合不一致拒绝（4007）；
+- ✅ 重复核销结果不变；
+- ✅ 不带 `pricingId` 的旧调用方行为不变；
+- ✅ 试算请求没有 `orderNo` 时 `pricingId` 不可用（返回 null）；
+- ✅ 同摘要重试复用同一 `pricingId`；
+- ✅ 少锁券负例（4007 + `CONFIRM_EXCEPTION`）；
+- ✅ 支付后核销失败进入异常态，不把券放回 `USABLE`；
+- ◐ 扩展结果冻结：结构已冻结，扩展框架未接线。

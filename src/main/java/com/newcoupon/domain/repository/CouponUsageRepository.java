@@ -36,6 +36,17 @@ public interface CouponUsageRepository {
     /** 行级退款状态迁移（CAS）：已核销/部分退款 → 部分退款 或 已退款 */
     boolean casRefundState(String usageNo, com.newcoupon.domain.coupon.UsageStatus target);
 
+    // ---------- 环 2：支付后核销异常 ----------
+
+    /** 占用中 → 核销异常（CAS）：暂停超时释放，等人工处理 */
+    boolean casConfirmException(String usageNo);
+
+    /** 核销异常 → 已核销（人工按快照原价核销） */
+    boolean casConfirmFromException(String usageNo, long discountAmt, LocalDateTime useTime);
+
+    /** 核销异常 → 已释放（人工确认订单已退款后释放） */
+    boolean casReleaseFromException(String usageNo, LocalDateTime releaseTime);
+
     /** L2 过期关闭（CAS）：占用中→过期关闭（第三种终结：非核销非释放）。按占用单号 */
     boolean casExpireByUsageNo(String usageNo);
 

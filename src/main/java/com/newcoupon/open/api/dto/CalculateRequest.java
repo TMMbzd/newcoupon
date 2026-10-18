@@ -38,8 +38,22 @@ public record CalculateRequest(
 
         @NotEmpty(message = "优惠券ID列表不能为空")
         @Size(max = 10, message = "最多同时计算10张券")
-        List<Long> couponIds
+        List<Long> couponIds,
+
+        /**
+         * 订单号（可选，环 2）：价格快照的绑定键之一。
+         *
+         * <p>传了且租户开启价格快照时，返回 {@code pricingId}；不传 = 纯只读试算，
+         * 不写快照、不返回 pricingId（旧调用方零改动）。
+         */
+        @Size(max = 64, message = "订单号最长 64 字符（= 存储列宽）")
+        String orderNo
 ) {
+
+    /** 兼容旧调用方：不带订单号 = 纯只读试算，不产生价格快照 */
+    public CalculateRequest(Long userId, List<OrderItem> items, List<Long> couponIds) {
+        this(userId, items, couponIds, null);
+    }
 
     /** 订单商品明细（内嵌：只被本 DTO 使用，聚合根的一部分）。 */
     public record OrderItem(

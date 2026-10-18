@@ -35,6 +35,10 @@ public enum TenantConfigKey implements ConfigKeySpec {
     TRADE_SETTLE_PARTY_ENABLED("trade.settle_party.enabled", "false", Type.BOOL,
             "结算主体开关（false=旧行为，忽略主体；true=按主体过滤/落库）"),
 
+    /** 价格快照开关：默认关 = calculate 不返回 pricingId，lock/confirm 旧行为不变 */
+    TRADE_PRICING_ENABLED("trade.pricing.enabled", "false", Type.BOOL,
+            "价格快照开关（false=不写快照；true=带 orderNo 的试算写快照并返回 pricingId）"),
+
     /** 熔断的异常比例阈值（百分比） */
     CIRCUIT_BREAKER_FAILURE_RATE("circuit_breaker.failure_rate", "50", Type.INT, "熔断：异常比例阈值（%）", 1, 100),
 

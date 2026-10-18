@@ -1,6 +1,6 @@
 package com.newcoupon.open.api;
 
-import com.newcoupon.application.service.discount.DiscountCalculatorService;
+import com.newcoupon.application.service.CalculateAppService;
 import com.newcoupon.common.Result;
 import com.newcoupon.common.context.OpenResource;
 import com.newcoupon.open.api.dto.CalculateRequest;
@@ -21,21 +21,22 @@ import org.springframework.web.bind.annotation.RestController;
  * <p><b>支持全部三种券类型</b>（满减/满折/无门槛）：引擎按券模板的类型字段选策略。
  *
  * <p><b>为什么是试算</b>：下单前用户要知道"用这张券能省多少"，此时不锁券；
- * 引擎只读券规则不改状态，核销时平台再按权威数据复算（第 2 步接入）。
+ * 引擎只读券规则不改状态。带 {@code orderNo} 且租户开启价格快照时返回 {@code pricingId}；
+ * 核销带它即按冻结价，不带则按权威数据复算（旧路径）。
  */
 @RestController
 @RequestMapping("/open/v1")
 public class CouponCalculateController {
 
-    private final DiscountCalculatorService calculatorService;
+    private final CalculateAppService calculateAppService;
 
-    public CouponCalculateController(DiscountCalculatorService calculatorService) {
-        this.calculatorService = calculatorService;
+    public CouponCalculateController(CalculateAppService calculateAppService) {
+        this.calculateAppService = calculateAppService;
     }
 
     @PostMapping("/calculate")
     @OpenResource("coupons/calculate")
     public Result<CalculateResponse> calculate(@Valid @RequestBody CalculateRequest request) {
-        return Result.success(calculatorService.calculate(request));
+        return Result.success(calculateAppService.calculate(request));
     }
 }
