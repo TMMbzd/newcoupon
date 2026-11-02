@@ -12,7 +12,14 @@ import org.testcontainers.utility.DockerImageName;
  * @DynamicPropertySource 把容器地址注入 {@code coupon.sharding.*}
  * （本 Spring 版本的 @DynamicPropertySource 不从父类发现，6.2 起才支持继承——踩坑实录）。
  */
-@SpringBootTest
+@SpringBootTest(properties = {
+        // dev profile 为本地运行默认打开异步/worker；测试默认关闭，避免后台调度抢测试任务。
+        // 需要异步的测试类在自己的 @SpringBootTest(properties=...) 里显式打开。
+        "coupon.issue.async-enabled=false",
+        "coupon.issue.worker.enabled=false",
+        // gate 补偿任务默认随上下文启动；测试用显式 runOnce() 驱动，避免后台轮次改状态。
+        "coupon.issue.gate-compensation.enabled=false"
+})
 public abstract class ShardedIntegrationTestSupport {
 
     @ServiceConnection

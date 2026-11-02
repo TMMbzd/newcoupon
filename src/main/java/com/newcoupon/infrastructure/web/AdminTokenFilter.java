@@ -48,6 +48,10 @@ public class AdminTokenFilter extends OncePerRequestFilter {
      */
     static final Set<String> BUSINESS_WRITE_PATHS = Set.of(
             "/api/coupons/receive",
+            // 异步受理同样是无管理身份要求的 C 端业务口：走 Redis 准入、任务唯一键、
+            // worker 硬日限/库存条件更新。漏登记会让 /api 异步入口被管理令牌挡住，
+            // 而 /open 同名入口又能进——同一业务出现两套身份前提。
+            "/api/coupons/receive-async",
             "/api/coupons/lock",
             "/api/coupons/confirm",
             "/api/coupons/release",

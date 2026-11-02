@@ -43,12 +43,12 @@ public class CouponExpireTaskGateway {
         return mapper.scanDueShard(shardIndex, shardTotal, limit);
     }
 
-    public void finish(long couponId) {
-        mapper.finish(couponId);
+    public void finish(long couponId, long userId) {
+        mapper.finish(couponId, userId);
     }
 
-    public void backoff(long couponId) {
-        mapper.backoff(couponId);
+    public void backoff(long couponId, long userId) {
+        mapper.backoff(couponId, userId);
     }
 
     /** 审计补注册（幂等）：漏注册的券补任务。nextScanTime 传券的有效期终点，已过期则立即到期可扫。

@@ -4,6 +4,10 @@ import com.newcoupon.infrastructure.persistence.mapper.CouponDailyBillMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponSettlePartyDailyBillMapper;
 import com.newcoupon.infrastructure.persistence.po.CouponDailyBillPO;
 import com.newcoupon.infrastructure.persistence.po.CouponSettlePartyDailyBillPO;
+import com.newcoupon.infrastructure.redis.RedisScanLock;
+import com.xxl.job.core.context.XxlJobHelper;
+import com.xxl.job.core.handler.annotation.XxlJob;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -11,21 +15,25 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeParseException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * T+1 日账单：按模板聚合当日账目（净额），落 coupon_daily_bill。
  *
  * <p>聚合源：`coupon_share_detail` 的正分账行（核销）减去 `coupon_refund_detail`
  * 的退款明细（冲回），并兼容旧版写在 `coupon_share_detail` 里的负行。
- * 两张表都只增不改，账单行 upsert——重跑任意多次结果一致。因此多实例重复触发也无害
- * （与过期扫描不同，不需要 Redis 抢锁：那里消的是重复扫描的 DB 负载，
- * 这里一天一次的聚合查询不值得加锁复杂度）。
+ * 两张表都只增不改，账单行 upsert——重跑任意多次结果一致，因此正确性不依赖调度锁。
+ * 多实例仍加 RedisScanLock：一天的聚合虽轻，重复执行会双倍扫描分账/退款表，
+ * 并发窗口还可能让较旧的聚合结果覆盖较新的结果；锁让重跑串行、让路可观测。
  *
  * <p>计数语义（2026-10-18 起）：`confirm_count` = 正分账行数（一个多行订单会大于 1），
  * `refund_count` = 退款明细行数（一次退多行会大于 1）。需要“核销笔数”时按 usage_no 去重另算。
@@ -41,22 +49,32 @@ public class DailyBillService {
     /** 账单日切固定 Asia/Shanghai，不跟随 JVM 默认时区 */
     private static final ZoneId BILL_ZONE = ZoneId.of("Asia/Shanghai");
 
+    /** 多实例调度互斥键：一天一轮，锁 TTL 远大于最坏聚合时长（RedisScanLock 不续期） */
+    private static final String LOCK_KEY = "c:lock:daily-bill";
+    private static final Duration LOCK_TTL = Duration.ofMinutes(60);
+
     private final CouponDailyBillMapper billMapper;
     private final CouponSettlePartyDailyBillMapper settlePartyBillMapper;
     private final TransactionTemplate transactionTemplate;
     /** 主体账单开关：默认开（纯增量新表）；关闭后只出旧模板账单，便于回滚 */
     private final boolean settlePartyBillEnabled;
+    private final RedisScanLock scanLock;
+    private final MeterRegistry meterRegistry;
 
     public DailyBillService(CouponDailyBillMapper billMapper,
                             CouponSettlePartyDailyBillMapper settlePartyBillMapper,
                             PlatformTransactionManager transactionManager,
                             @org.springframework.beans.factory.annotation.Value(
                                     "${coupon.billing.settle-party.enabled:true}")
-                            boolean settlePartyBillEnabled) {
+                            boolean settlePartyBillEnabled,
+                            RedisScanLock scanLock,
+                            MeterRegistry meterRegistry) {
         this.billMapper = billMapper;
         this.settlePartyBillMapper = settlePartyBillMapper;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.settlePartyBillEnabled = settlePartyBillEnabled;
+        this.scanLock = scanLock;
+        this.meterRegistry = meterRegistry;
     }
 
     /** 生成指定日期的账单（幂等，可重跑/补数）。返回聚合出的模板行数 */
@@ -128,7 +146,14 @@ public class DailyBillService {
             return;
         }
         transactionTemplate.executeWithoutResult(status -> generateSettlePartyBill(date));
-        reconcile(date);
+        int mismatches = reconcile(date);
+        if (mismatches > 0) {
+            try {
+                meterRegistry.counter("daily_bill_reconcile_mismatch_total").increment(mismatches);
+            } catch (RuntimeException ignore) {
+                // 指标失败不影响账单
+            }
+        }
     }
 
     /**
@@ -182,15 +207,133 @@ public class DailyBillService {
     }
 
     /**
+     * 调度入口（@Scheduled 降级通道 / @XxlJob 生产通道共用）：抢 Redis 锁后生成指定日期账单。
+     *
+     * <p>返回：1=已生成；0=锁被其他实例持有，本轮让路；-1=失败（已记失败指标与日志）。
+     * 锁只消多实例重复负载，账单本身幂等（upsert 覆盖）；Redis 不可用时**降级直接生成**——
+     * T+1 账单一天只有一轮，错过比重复更贵。锁释放失败只打日志，不把已完成的账单判成失败。
+     *
+     * <p>手动补数不走本方法，直接调用 {@link #generateAll(LocalDate)}（不加锁）。
+     */
+    public int runOnce(LocalDate date) {
+        String owner = "daily-bill-" + UUID.randomUUID();
+        Boolean locked;
+        try {
+            locked = scanLock.tryLock(LOCK_KEY, owner, LOCK_TTL);
+        } catch (RuntimeException e) {
+            locked = null;
+            metric("degraded");
+            log.warn("DAILY_BILL_LOCK_DEGRADED date={} Redis 锁不可用，降级直接生成（账单幂等）",
+                    date, e);
+        }
+        if (Boolean.FALSE.equals(locked)) {
+            metric("skipped");
+            log.debug("daily bill skipped: another instance holds {}", LOCK_KEY);
+            return 0;
+        }
+        boolean acquired = Boolean.TRUE.equals(locked);
+        long started = System.nanoTime();
+        try {
+            generateAll(date);
+            metric("success");
+            return 1;
+        } catch (RuntimeException e) {
+            metric("failed");
+            log.error("DAILY_BILL_FAIL date={} 账单生成失败（次日定时重跑或手动补数）", date, e);
+            return -1;
+        } finally {
+            if (acquired) {
+                try {
+                    scanLock.unlock(LOCK_KEY, owner);
+                } catch (RuntimeException e) {
+                    log.warn("daily bill lock release failed (TTL will expire): {}", LOCK_KEY, e);
+                }
+            }
+            recordDuration(started);
+        }
+    }
+
+    /**
      * 每天 00:30 出昨日账单（T+1，Asia/Shanghai）。幂等——错过/重跑由 generateAll 补。
      * 异常在事务边界外捕获：失败的那张账单已回滚，已提交的那张保留。
      */
     @Scheduled(cron = "0 30 0 * * ?", zone = "Asia/Shanghai")
     public void generateYesterdayBill() {
         try {
-            generateAll(LocalDate.now(BILL_ZONE).minusDays(1));
-        } catch (Exception e) {
+            runOnce(resolveBillDate(null));
+        } catch (RuntimeException e) {
+            metric("failed");
             log.error("DAILY_BILL_FAIL 昨日账单生成失败（次日定时重跑或手动补数）", e);
+        }
+    }
+
+    /**
+     * XXL-JOB 生产通道。任务参数可传 {@code yyyy-MM-dd} 补指定日期；留空=昨日。
+     * 参数非法直接失败并留痕，绝不静默改成昨日（防止手误补错账）。
+     */
+    @XxlJob("couponDailyBillJob")
+    public void xxlGenerateBill() {
+        int result;
+        try {
+            result = runOnce(resolveBillDate(currentJobParam()));
+        } catch (RuntimeException e) {
+            metric("failed");
+            log.error("DAILY_BILL_FAIL XXL 账单任务参数/执行失败", e);
+            markXxlFailed(e.getMessage());
+            return;
+        }
+        if (result < 0) {
+            markXxlFailed("daily bill generation failed");
+        }
+    }
+
+    /** XXL 上下文只在执行器线程存在；@Scheduled/测试/手动线程没有上下文，按昨日处理。 */
+    private static String currentJobParam() {
+        try {
+            return XxlJobHelper.getJobParam();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private LocalDate resolveBillDate(String param) {
+        return parseBillDate(param, LocalDate.now(BILL_ZONE).minusDays(1));
+    }
+
+    /** 纯函数便于单测：空白=fallback（昨日），否则严格 {@code yyyy-MM-dd}。 */
+    static LocalDate parseBillDate(String param, LocalDate fallback) {
+        if (param == null || param.isBlank()) {
+            return fallback;
+        }
+        try {
+            return LocalDate.parse(param.trim());
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("无效的账单日期参数（期望 yyyy-MM-dd）: " + param, e);
+        }
+    }
+
+    private void metric(String result) {
+        try {
+            meterRegistry.counter("daily_bill_job_total", "result", result).increment();
+        } catch (RuntimeException ignore) {
+            // 指标失败不能影响账单
+        }
+    }
+
+    private void recordDuration(long startedNanos) {
+        try {
+            meterRegistry.timer("daily_bill_job_duration_seconds")
+                    .record(System.nanoTime() - startedNanos, TimeUnit.NANOSECONDS);
+        } catch (RuntimeException ignore) {
+            // 指标失败不能影响账单
+        }
+    }
+
+    private static void markXxlFailed(String message) {
+        try {
+            XxlJobHelper.handleFail(message);
+        } catch (RuntimeException ignore) {
+            // 非 XXL 调度线程（测试/手动）没有上下文
         }
     }
 }

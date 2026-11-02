@@ -49,13 +49,71 @@ server:
 # ShardingSphere 真实库连接（dev 默认本机 compose；测试容器由 DynamicPropertySource 注入；
 # 生产用环境变量覆盖）。业务数据源=ShardingSphere 驱动（分片路由见 ShardingDataSourceConfig）
 coupon:
+  # 运行时配置校验（Phase 1）：启动时核对 JVM/MySQL/账单日时区、连接数预算、XXL 多实例参数。
+  # strict-config 留空 = active profile 含 prod 时严格（校验失败阻止启动），否则只 WARN。
+  runtime:
+    strict-config: ${RUNTIME_STRICT_CONFIG:}
+    expected-instances: ${EXPECTED_INSTANCES:1}
+    instances-per-host: ${INSTANCES_PER_HOST:1}
+    mysql-safety-connections: ${MYSQL_SAFETY_CONNECTIONS:20}
+    mysql-max-utilization: ${MYSQL_MAX_UTILIZATION:0.8}
+  # 缓存跨实例失效（Phase 1）：pub/sub 即时通知 + 版本键轮询兜底 + TTL 最终上界。
+  # enabled=false 退回纯本地失效（排查 pub/sub 干扰时用）；instance-id 需每个 JVM 唯一。
+  cache:
+    invalidation:
+      enabled: ${CACHE_INVALIDATION_ENABLED:true}
+      channel: ${CACHE_INVALIDATION_CHANNEL:c:cache:invalidate}
+      poll-ms: ${CACHE_INVALIDATION_POLL_MS:5000}
+      instance-id: ${INSTANCE_ID:${random.uuid}}
   sharding:
     url: jdbc:mysql://127.0.0.1:3306/newcoupon?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
     username: ${DB_USER:root}
     password: ${DB_PASSWORD:root123456}
     sql-show: false
+  # C1 是唯一库存模型（旧 Redis 桶链路已删除）；分片数只影响新模板的布局。
+  stock:
+    shard-count: ${STOCK_SHARD_COUNT:16}
+  # ADR-0019 异步发放：默认全关；allowlist 为空时拒绝启动异步入口（防止误开全量）。
+  # async-template-ids 支持逗号分隔的模板 id，或 "*" 表示全部（仅测试/内部灰度）。
+  issue:
+    async-enabled: ${ISSUE_ASYNC_ENABLED:false}
+    async-template-ids: ${ISSUE_ASYNC_TEMPLATE_IDS:}
+    idem-ttl-seconds: ${ISSUE_IDEM_TTL_SECONDS:604800}
+    day-ttl-seconds: ${ISSUE_DAY_TTL_SECONDS:172800}
+    gate:
+      # Redis 连接/超时：reject=返回可重试 5001；db-fallback=只写 WAL 返回 202（worker DB 终审）
+      redis-down-policy: ${ISSUE_GATE_REDIS_DOWN_POLICY:reject}
+    # V36：请求路径没修成的 gate/计数问题登记到数据库，由后台任务单飞修复。
+    gate-repair:
+      fixed-delay-ms: ${ISSUE_GATE_REPAIR_FIXED_DELAY_MS:5000}
+      initial-delay-ms: ${ISSUE_GATE_REPAIR_INITIAL_DELAY_MS:5000}
+      batch-size: ${ISSUE_GATE_REPAIR_BATCH_SIZE:50}
+      lease-seconds: ${ISSUE_GATE_REPAIR_LEASE_SECONDS:30}
+      max-attempts: ${ISSUE_GATE_REPAIR_MAX_ATTEMPTS:8}
+      cleanup-cron: ${ISSUE_GATE_REPAIR_CLEANUP_CRON:0 23 4 * * ?}
+    worker:
+      enabled: ${ISSUE_ASYNC_WORKER_ENABLED:false}
+      # 同一实例内并行处理已领取任务：单任务一事务，并行让 InnoDB group commit 摊薄 fsync；
+      # 领取仍由 SKIP LOCKED + lease 串行/跨实例协调。默认 4，按压测调。
+      parallelism: ${ISSUE_ASYNC_WORKER_PARALLELISM:4}
+      # 每个批量事务合并多少条任务：一事务一次提交。日限/重复用户等场景自动退回逐条。
+      batch-tx-size: ${ISSUE_ASYNC_WORKER_BATCH_TX_SIZE:50}
+      # 按库存分片分组后的并行事务数：不同分片组各锁一行，可同时提交。
+      group-parallelism: ${ISSUE_ASYNC_WORKER_GROUP_PARALLELISM:16}
+      # 裸 JDBC 物理表批量写：只适配当前 1 物理库 × 64 表；拆物理库时置 false 回退 ShardingSphere。
+      raw-bulk-enabled: ${ISSUE_ASYNC_WORKER_RAW_BULK_ENABLED:true}
+      raw-bulk-pool-size: ${ISSUE_ASYNC_WORKER_RAW_BULK_POOL_SIZE:4}
+    # 任务/计数保留：只删终态任务（SUCCESS/REJECTED/DEAD），PENDING/PROCESSING 永不删。
+    retention-days: ${ISSUE_TASK_RETENTION_DAYS:7}
+    counter-retention-days: ${ISSUE_COUNTER_RETENTION_DAYS:90}
+    cleanup-cron: ${ISSUE_TASK_CLEANUP_CRON:0 17 4 * * ?}
   id:
-    worker-id: ${WORKER_ID:1}
+    # 空=启动时在 Redis 抢一个 0-1023 的 workerId 租约；显式 WORKER_ID 仍优先，但必须唯一。
+    worker-id: ${WORKER_ID:}
+  # Redis 运行数据采集：内存/淘汰/命中率/连接/复制状态，低基数指标，故障排查用。
+  redis:
+    info-interval-ms: ${REDIS_INFO_INTERVAL_MS:30000}
+    info-initial-delay-ms: ${REDIS_INFO_INITIAL_DELAY_MS:5000}
   # L5 锁定超时窗口（分钟）：与订单域支付超时契约对齐（订单超时取消=券超时收场，两边同步死）
   trade:
     lock-timeout-minutes: ${LOCK_TIMEOUT_MINUTES:30}
@@ -140,7 +198,9 @@ xxl:
   job:
     enabled: ${XXL_JOB_ENABLED:false}
     adminAddresses: ${XXL_JOB_ADMIN:http://127.0.0.1:8280/xxl-job-admin}
-    appname: newcoupon-executor
-    port: 9999
-    accessToken: default_token
-    logPath: /tmp/xxl-job/log
+    # 多实例/多环境必须显式覆盖 appname 与 accessToken；同机多实例还必须覆盖 port 与 logPath。
+    # 运行时校验（RuntimeConfigValidator）会在 prod 严格模式下拒绝默认值。
+    appname: ${XXL_JOB_APPNAME:newcoupon-executor}
+    port: ${XXL_JOB_PORT:9999}
+    accessToken: ${XXL_JOB_ACCESS_TOKEN:default_token}
+    logPath: ${XXL_JOB_LOG_PATH:/tmp/xxl-job/log}

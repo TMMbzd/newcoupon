@@ -44,12 +44,12 @@ public class CouponReleaseTaskGateway {
         return mapper.scanDueShard(shardIndex, shardTotal, limit);
     }
 
-    public void finish(String usageNo) {
-        mapper.finish(usageNo);
+    public void finish(String usageNo, long userId) {
+        mapper.finish(usageNo, userId);
     }
 
-    public void backoff(String usageNo) {
-        mapper.backoff(usageNo);
+    public void backoff(String usageNo, long userId) {
+        mapper.backoff(usageNo, userId);
     }
 
     /** 审计补注册（幂等）：漏注册的合同补任务；nextScanTime 传当前时刻（该立即处理） */

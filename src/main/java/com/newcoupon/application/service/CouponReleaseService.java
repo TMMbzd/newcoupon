@@ -34,7 +34,7 @@ import org.springframework.stereotype.Service;
 public class CouponReleaseService {
 
     private static final Logger log = LoggerFactory.getLogger(CouponReleaseService.class);
-    private static final String SCAN_LOCK_KEY = "c:rel:scanlock:0";   // 0=当前单分片，分片广播时按 shard 扩键
+    private static final String SCAN_LOCK_KEY_PREFIX = "c:rel:scanlock:";   // 按 shardIndex 拆键，分片广播互不阻塞
     private static final String AUDIT_LOCK_KEY = "c:rel:auditlock";
 
     private final TradeTxService tradeTxService;
@@ -61,22 +61,23 @@ public class CouponReleaseService {
     @Scheduled(fixedDelay = 60_000, initialDelay = 180_000)
     public int scan() {
         String owner = "rel-scan-" + java.util.UUID.randomUUID();
-        if (!scanLock.tryLock(SCAN_LOCK_KEY, owner, java.time.Duration.ofSeconds(90))) {
-            log.debug("release scan skipped: another instance holds the lock");
+        int[] shard = shardParams();   // 先算分片，再抢该分片的锁：广播时各实例锁键不同
+        String lockKey = SCAN_LOCK_KEY_PREFIX + shard[0];
+        if (!scanLock.tryLock(lockKey, owner, java.time.Duration.ofSeconds(90))) {
+            log.debug("release scan skipped: another instance holds shard lock {}", shard[0]);
             return 0;
         }
         try {
-            int[] shard = shardParams();   // 分片广播：每个实例只扫自己的分片；降级通道=单片全扫
             int processed = scanOnce(shard[0], shard[1]);
             if (processed > 0) {
-                log.info("release scan: {} tasks processed", processed);
+                log.info("release scan: shard={}/{}, {} tasks processed", shard[0], shard[1], processed);
             }
             return processed;
         } catch (Exception e) {
             log.error("release scan round failed (next round retries)", e);
             return -1;
         } finally {
-            scanLock.unlock(SCAN_LOCK_KEY, owner);
+            scanLock.unlock(lockKey, owner);
         }
     }
 
@@ -107,7 +108,7 @@ public class CouponReleaseService {
                 break;
             }
             for (CouponReleaseTaskPO task : batch) {
-                processOne(task.getUsageNo());
+                processOne(task);
                 processed++;
             }
         }
@@ -115,16 +116,18 @@ public class CouponReleaseService {
     }
 
     /** 单合同执行：收场或确认无需收场，任何结局任务终结；失败退避（8 次死信等人工） */
-    private void processOne(String usageNo) {
+    private void processOne(CouponReleaseTaskPO task) {
+        String usageNo = task.getUsageNo();
+        long userId = task.getUserId();
         try {
-            boolean closed = tradeTxService.timeoutClose(usageNo, LocalDateTime.now());
+            boolean closed = tradeTxService.timeoutClose(usageNo, userId, LocalDateTime.now());
             if (closed) {
                 log.warn("lock timeout closed: usageNo={}（订单沉默超窗口，券回池/过期，占用单→超时关闭）", usageNo);
             }
-            taskGateway.finish(usageNo);
+            taskGateway.finish(usageNo, userId);
         } catch (Exception e) {
-            log.error("release task failed → backoff: usageNo={}", usageNo, e);
-            taskGateway.backoff(usageNo);
+            log.error("release task failed → backoff: usageNo={}, userId={}", usageNo, userId, e);
+            taskGateway.backoff(usageNo, userId);
         }
     }
 

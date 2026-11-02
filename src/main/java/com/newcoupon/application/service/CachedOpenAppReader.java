@@ -3,6 +3,7 @@ package com.newcoupon.application.service;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.newcoupon.common.cache.CacheInvalidationPort;
 import com.newcoupon.common.cache.CacheTtl;
 import com.newcoupon.common.crypto.SecretCipher;
 import com.newcoupon.domain.repository.OpenAppRepository;
@@ -11,8 +12,11 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * 接入方认证信息缓存（S1）——只服务**每一次开放面调用**的鉴权读。
@@ -45,19 +49,30 @@ public class CachedOpenAppReader {
 
     private final OpenAppRepository repository;
     private final SecretCipher cipher;
+    private final CacheInvalidationPort invalidation;
     private final long ttlMillis;
     private final long refreshMillis;
     private final long negativeTtlMillis;
 
     private final LoadingCache<String, Optional<AppAuth>> cache;
 
+    /** 兼容构造器（单测/未接跨实例通道）：仅本地失效 + TTL。 */
     public CachedOpenAppReader(OpenAppRepository repository,
                                SecretCipher cipher,
+                               long ttlMillis, long refreshMillis, long negativeTtlMillis) {
+        this(repository, cipher, CacheInvalidationPort.NOOP, ttlMillis, refreshMillis, negativeTtlMillis);
+    }
+
+    @Autowired
+    public CachedOpenAppReader(OpenAppRepository repository,
+                               SecretCipher cipher,
+                               CacheInvalidationPort invalidation,
                                @Value("${coupon.open.auth-cache.ttl-ms:60000}") long ttlMillis,
                                @Value("${coupon.open.auth-cache.refresh-ms:30000}") long refreshMillis,
                                @Value("${coupon.open.auth-cache.negative-ttl-ms:30000}") long negativeTtlMillis) {
         this.repository = repository;
         this.cipher = cipher;
+        this.invalidation = invalidation;
         this.ttlMillis = ttlMillis;
         this.refreshMillis = refreshMillis;
         this.negativeTtlMillis = negativeTtlMillis;
@@ -91,6 +106,9 @@ public class CachedOpenAppReader {
                     }
                 })
                 .build(this::load);
+        this.invalidation.register(CacheInvalidationPort.NAMESPACE_OPEN_APP,
+                cache::invalidate,
+                cache::invalidateAll);
     }
 
     /** @return 应用不存在时返回 {@code Optional.empty()}（负缓存命中，不触库） */
@@ -99,10 +117,36 @@ public class CachedOpenAppReader {
         return cached == null ? Optional.empty() : cached;
     }
 
-    /** 主动失效（注册/轮换/启停后调用——密钥轮换必须立刻生效） */
+    /** 主动失效（注册/轮换/启停后调用——密钥轮换必须立刻生效）：本实例立即清，再广播其他实例。 */
     public void invalidate(String appId) {
         cache.invalidate(appId);
+        invalidation.invalidate(CacheInvalidationPort.NAMESPACE_OPEN_APP, appId);
         log.info("open-app auth cache invalidated: appId={}", appId);
+    }
+
+    /**
+     * 事务内写（create/rotate）专用：本地立即失效，**广播推迟到提交后**。
+     *
+     * <p>若在提交前广播，其他实例会立刻回源——在 REPEATABLE READ 下读到的仍是旧行，
+     * 并把旧值重新缓存一个 TTL，等于"广播了却没生效"。本地立即清是为了让同实例并发读者
+     * 尽早看到变化；提交后的二次本地清除由调用方的 afterCommit 再次完成（本方法注册）。
+     */
+    public void invalidateAfterCommit(String appId) {
+        cache.invalidate(appId);
+        Runnable broadcast = () -> invalidation.invalidate(CacheInvalidationPort.NAMESPACE_OPEN_APP, appId);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    // 提交后本实例再清一次：并发读者可能在提交前回源旧值并重新缓存
+                    cache.invalidate(appId);
+                    broadcast.run();
+                }
+            });
+        } else {
+            broadcast.run();
+        }
+        log.info("open-app auth cache invalidated after commit: appId={}", appId);
     }
 
     private Optional<AppAuth> load(String appId) {

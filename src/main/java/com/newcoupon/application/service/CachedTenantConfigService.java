@@ -6,6 +6,7 @@ import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
+import com.newcoupon.common.cache.CacheInvalidationPort;
 import com.newcoupon.common.cache.CacheTtl;
 import com.newcoupon.domain.repository.OpenAppRepository;
 import com.newcoupon.infrastructure.persistence.mapper.OpenAppConfigLogMapper;
@@ -17,6 +18,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -48,22 +50,36 @@ public class CachedTenantConfigService implements TenantConfigService {
     private final OpenAppConfigMapper mapper;
     private final OpenAppConfigLogMapper logMapper;
     private final OpenAppRepository openAppRepository;
+    private final CacheInvalidationPort invalidation;
     private final long ttlMillis;
     private final long refreshMillis;
 
     /** 值：该租户的 配置键 → 配置值；没有配置 = 空 Map（负缓存） */
     private final LoadingCache<String, Map<String, String>> cache;
 
+    /** 兼容构造器（单测/未接跨实例通道）：仅本地失效 + TTL。 */
     public CachedTenantConfigService(OpenAppConfigMapper mapper,
                                      OpenAppConfigLogMapper logMapper,
                                      OpenAppRepository openAppRepository,
                                      org.springframework.context.ApplicationEventPublisher eventPublisher,
+                                     long ttlMillis, long refreshMillis) {
+        this(mapper, logMapper, openAppRepository, eventPublisher,
+                CacheInvalidationPort.NOOP, ttlMillis, refreshMillis);
+    }
+
+    @Autowired
+    public CachedTenantConfigService(OpenAppConfigMapper mapper,
+                                     OpenAppConfigLogMapper logMapper,
+                                     OpenAppRepository openAppRepository,
+                                     org.springframework.context.ApplicationEventPublisher eventPublisher,
+                                     CacheInvalidationPort invalidation,
                                      @Value("${coupon.tenant-config.ttl-ms:60000}") long ttlMillis,
                                      @Value("${coupon.tenant-config.refresh-ms:30000}") long refreshMillis) {
         this.eventPublisher = eventPublisher;
         this.mapper = mapper;
         this.logMapper = logMapper;
         this.openAppRepository = openAppRepository;
+        this.invalidation = invalidation;
         this.ttlMillis = ttlMillis;
         this.refreshMillis = refreshMillis;
         this.cache = Caffeine.newBuilder()
@@ -91,6 +107,9 @@ public class CachedTenantConfigService implements TenantConfigService {
                     }
                 })
                 .build(this::load);
+        this.invalidation.register(CacheInvalidationPort.NAMESPACE_TENANT_CONFIG,
+                cache::invalidate,
+                cache::invalidateAll);
     }
 
     @Override
@@ -214,19 +233,25 @@ public class CachedTenantConfigService implements TenantConfigService {
 
     @Override
     public void invalidate(String appId) {
+        invalidateLocal(appId);
+        invalidation.invalidate(CacheInvalidationPort.NAMESPACE_TENANT_CONFIG, appId);
+    }
+
+    private void invalidateLocal(String appId) {
         cache.invalidate(appId);
         log.info("租户配置缓存已失效：appId={}", appId);
     }
 
     /**
-     * 写事务内先失效一次（本实例尽快生效），提交后再失效一次。
+     * 写事务内先失效一次（本实例尽快生效），提交后再本地失效一次 + 广播其他实例。
      *
      * <p>只在提交前失效有一个真实竞态：并发读者在事务提交前回源读到旧值，
      * 把旧值写回缓存，之后 60 秒内本实例都读旧配置。afterCommit 的二次失效
-     * 把这个窗口收掉；多实例仍受各自缓存 TTL 限制（约 60s），文档不承诺全站立即生效。
+     * 把这个窗口收掉。**跨实例广播必须放在 afterCommit**：提交前广播会让其他实例
+     * 回源到未提交的旧行并重新缓存，等于"广播了却没生效"。
      */
     private void invalidateAfterCommit(String appId) {
-        invalidate(appId);
+        invalidateLocal(appId);
         if (org.springframework.transaction.support.TransactionSynchronizationManager
                 .isSynchronizationActive()) {
             org.springframework.transaction.support.TransactionSynchronizationManager
@@ -234,9 +259,13 @@ public class CachedTenantConfigService implements TenantConfigService {
                             new org.springframework.transaction.support.TransactionSynchronization() {
                                 @Override
                                 public void afterCommit() {
-                                    invalidate(appId);
+                                    invalidateLocal(appId);
+                                    invalidation.invalidate(
+                                            CacheInvalidationPort.NAMESPACE_TENANT_CONFIG, appId);
                                 }
                             });
+        } else {
+            invalidation.invalidate(CacheInvalidationPort.NAMESPACE_TENANT_CONFIG, appId);
         }
     }
 

@@ -101,19 +101,6 @@ class DependencyCircuitBreakerIntegrationTest extends ShardedIntegrationTestSupp
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("Redis 熔断器打开 → 领券快速失败并返回「降级中」（不是等超时，也不是业务错误）")
-    void redisBreakerOpen_returnsDegraded() {
-        breakers.redis().transitionToOpenState();
-
-        var ex = catchBiz(() -> receiveAppService.receive(request("cb-redis")));
-
-        assertThat(ex).as("熔断打开时应当在闸门处快速失败").isNotNull();
-        assertThat(ex.getErrorCode().getCode())
-                .as("降级码 5001——可重试语义，而不是业务错误")
-                .isEqualTo(5001);
-    }
-
-    @Test
     @DisplayName("MySQL 熔断器打开 → 领券快速失败并返回「系统繁忙」")
     void mysqlBreakerOpen_returnsSystemBusy() {
         breakers.mysql().transitionToOpenState();

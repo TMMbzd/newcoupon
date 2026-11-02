@@ -98,7 +98,8 @@ public class OpenAppService {
             throw new BizException(ErrorCode.PARAM_ERROR, "appId 已存在：" + appId);
         }
         repository.insertSecret(appId, cipher.encrypt(secret), SecretRecord.STATUS_CURRENT, null);
-        authReader.invalidate(appId);   // 让认证缓存立刻看到新密钥（不等 TTL）
+        // 本实例立刻可见；跨实例广播必须等提交后（否则别的实例会回源到未提交的旧行）
+        authReader.invalidateAfterCommit(appId);
 
         // 通知 Sentinel 规则源：新租户的配额要立刻生效，否则它在最多 10 秒内不受限
         eventPublisher.publishEvent(new com.newcoupon.infrastructure.ratelimit.TenantQuotaChangedEvent(
@@ -159,8 +160,8 @@ public class OpenAppService {
         repository.demoteCurrentToRotation(appId, expireAt);
         String secret = SecretCipher.newSecret();
         repository.insertSecret(appId, cipher.encrypt(secret), SecretRecord.STATUS_CURRENT, null);
-        // 轮换后缓存里还是旧密钥集合：必须立刻失效，否则新密钥要等 TTL 才能用
-        authReader.invalidate(appId);
+        // 轮换后缓存里还是旧密钥集合：本实例立刻失效；跨实例广播等提交后
+        authReader.invalidateAfterCommit(appId);
 
         return new AppWithSecret(app.appId(), app.appName(), secret,
                 app.status(), app.qpsLimit(), app.dailyQuota());

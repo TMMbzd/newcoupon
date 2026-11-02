@@ -34,7 +34,7 @@ import org.springframework.stereotype.Service;
 public class CouponExpireService {
 
     private static final Logger log = LoggerFactory.getLogger(CouponExpireService.class);
-    private static final String SCAN_LOCK_KEY = "c:exp:scanlock:0";   // 0=当前单分片，M2 分片广播时按 shard 扩键
+    private static final String SCAN_LOCK_KEY_PREFIX = "c:exp:scanlock:";   // 按 shardIndex 拆键，分片广播互不阻塞
     private static final String AUDIT_LOCK_KEY = "c:exp:auditlock";
 
     private final UserCouponRepository userCouponRepository;
@@ -62,22 +62,23 @@ public class CouponExpireService {
     @Scheduled(fixedDelay = 60_000, initialDelay = 120_000)
     public int scan() {
         String owner = "expire-scan-" + java.util.UUID.randomUUID();
-        if (!scanLock.tryLock(SCAN_LOCK_KEY, owner, java.time.Duration.ofSeconds(90))) {
-            log.debug("expire scan skipped: another instance holds the lock");
+        int[] shard = shardParams();   // 先算分片，再抢该分片的锁：广播时各实例锁键不同
+        String lockKey = SCAN_LOCK_KEY_PREFIX + shard[0];
+        if (!scanLock.tryLock(lockKey, owner, java.time.Duration.ofSeconds(90))) {
+            log.debug("expire scan skipped: another instance holds shard lock {}", shard[0]);
             return 0;
         }
         try {
-            int[] shard = shardParams();   // 分片广播：每个实例只扫自己的分片（XxlJobHelper；降级通道=单片全扫）
             int processed = scanOnce(shard[0], shard[1]);
             if (processed > 0) {
-                log.info("expire scan: {} tasks processed", processed);
+                log.info("expire scan: shard={}/{}, {} tasks processed", shard[0], shard[1], processed);
             }
             return processed;
         } catch (Exception e) {
             log.error("expire scan round failed (next round retries)", e);
             return -1;
         } finally {
-            scanLock.unlock(SCAN_LOCK_KEY, owner);
+            scanLock.unlock(lockKey, owner);
         }
     }
 
@@ -108,7 +109,7 @@ public class CouponExpireService {
                 break;
             }
             for (CouponExpireTaskPO task : batch) {
-                processOne(task.getCouponId());
+                processOne(task);
                 processed++;
             }
         }
@@ -116,11 +117,18 @@ public class CouponExpireService {
     }
 
     /** 单任务执行：按券当前状态选流转（幂等 CAS），真实流转者落事件；任何结局任务终结 */
-    private void processOne(long couponId) {
+    private void processOne(CouponExpireTaskPO task) {
+        long couponId = task.getCouponId();
+        long userId = task.getUserId();
         try {
-            UserCoupon coupon = userCouponRepository.findById(couponId).orElse(null);
+            // 带 userId 的主键查询只命中一张分表；任务 user_id 与券不一致时走一次冷路径广播兜底，
+            // 命中后按券的真实 userId 继续，只有广播也找不到才终结任务。
+            UserCoupon coupon = userCouponRepository.findByIdForUser(couponId, userId).orElse(null);
             if (coupon == null) {
-                taskGateway.finish(couponId);   // 券已不存在（人工清理等）：任务意义消失
+                coupon = userCouponRepository.findById(couponId).orElse(null);
+            }
+            if (coupon == null) {
+                taskGateway.finish(couponId, userId);   // 券已不存在（人工清理等）：任务意义消失
                 return;
             }
             boolean expired = coupon.getValidEnd() != null
@@ -132,13 +140,13 @@ public class CouponExpireService {
                 // 锁定中过期：券收终态 + 占用单过期关闭（用户不再来核销/取消时的兜底收场）
                 transitioned = userCouponRepository.casExpireOnLock(couponId, coupon.getUserId());
                 if (transitioned) {
-                    couponUsageRepository.casExpireByCouponId(couponId);
+                    couponUsageRepository.casExpireByCouponId(couponId, coupon.getUserId());
                 } else {
                     // 抢跑裁决（红队评审#2）：release/超时收场恰在 valid_end 边界把券回池
                     // （CAS 的 IF 走了"未过期"分支），本任务 0 行——若就此划掉任务，
                     // 这张"已过期但回池"的券要等次日审计才收敛、EXPIRED 事件缺位一天。
                     // 重读券：确已回池且仍到期 → 改走"待使用过期"分支当场收掉。
-                    UserCoupon fresh = userCouponRepository.findById(couponId).orElse(null);
+                    UserCoupon fresh = userCouponRepository.findByIdForUser(couponId, coupon.getUserId()).orElse(null);
                     if (fresh != null && fresh.getStatus() == CouponStatus.USABLE) {
                         transitioned = userCouponRepository.casExpireUsable(couponId, coupon.getUserId());
                     }
@@ -148,7 +156,7 @@ public class CouponExpireService {
                 // 旧版收场两条 UPDATE 未捆事务，中途崩溃留下的半截残局；重扫时券已非 LOCKED
                 // 会直接 finish、占用单永久悬挂。此处幂等补关（CAS 0行=no-op），事件缺失则补
                 //（撞 uk_event_no 被弹回=崩溃前已落，无重复）。
-                couponUsageRepository.casExpireByCouponId(couponId);
+                couponUsageRepository.casExpireByCouponId(couponId, coupon.getUserId());
                 try {
                     couponEventRepository.append(CouponEvent.expired(coupon, null, LocalDateTime.now()));
                 } catch (org.springframework.dao.DuplicateKeyException ignore) {
@@ -159,10 +167,10 @@ public class CouponExpireService {
                 couponEventRepository.append(CouponEvent.expired(coupon, null, LocalDateTime.now()));
             }
             // 已核销/已过期/未到期的券：CAS 影响 0 行，任务同样终结（存在意义已消失）
-            taskGateway.finish(couponId);
+            taskGateway.finish(couponId, userId);
         } catch (Exception e) {
-            log.error("expire task failed → backoff: couponId={}", couponId, e);
-            taskGateway.backoff(couponId);
+            log.error("expire task failed → backoff: couponId={}, userId={}", couponId, userId, e);
+            taskGateway.backoff(couponId, userId);
         }
     }
 
@@ -181,6 +189,7 @@ public class CouponExpireService {
         try {
             List<Long> leaked = userCouponRepository.selectExpiredUsableIds(1000);
             for (Long couponId : leaked) {
+                // 审计只拿到券 id（selectExpiredUsableIds），拿不到 userId，保留冷路径广播查询。
                 UserCoupon coupon = userCouponRepository.findById(couponId).orElse(null);
                 if (coupon != null) {
                     taskGateway.registerIfAbsent(couponId, coupon.getUserId(), coupon.getValidEnd());

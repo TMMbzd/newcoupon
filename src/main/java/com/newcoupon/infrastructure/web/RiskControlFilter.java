@@ -6,6 +6,7 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.util.Set;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
@@ -30,10 +31,16 @@ import org.springframework.web.filter.OncePerRequestFilter;
 @Order(Ordered.HIGHEST_PRECEDENCE + 10)   // TraceIdFilter 之后：被拒的请求也有 traceId 可查
 public class RiskControlFilter extends OncePerRequestFilter {
 
-    /** 领券入口路径后缀（ReceiveController：@RequestMapping("/api/coupons") + @PostMapping("/receive")）。
-     * L38 修复（评审 P1-11）：此前与 "/receive" 全等比较，而 getServletPath() 返回完整路径
-     * "/api/coupons/receive"——判据永不匹配、IP 频控整体空转（过滤器单测直调故假绿）。 */
-    private static final String RECEIVE_PATH_SUFFIX = "/receive";
+    /**
+     * 领券入口路径后缀（ReceiveController：@RequestMapping("/api/coupons") + @PostMapping(...)）。
+     *
+     * <p>L38 修复（评审 P1-11）：此前与 "/receive" 全等比较，而 getServletPath() 返回完整路径
+     * "/api/coupons/receive"——判据永不匹配、IP 频控整体空转（过滤器单测直调故假绿）。
+     *
+     * <p>异步受理也必须走同一道 IP 频控：它同样会创建库存预扣和任务行。只拦同步入口时，
+     * 攻击者改用 {@code /receive-async} 就得到一条不限额的任务写入通道。
+     */
+    private static final Set<String> RECEIVE_PATH_SUFFIXES = Set.of("/receive", "/receive-async");
 
     private final IpRateGate ipRateGate;
     /** 治理指标（S2 第 11 步） */
@@ -49,8 +56,7 @@ public class RiskControlFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-        if ("POST".equals(request.getMethod())
-                && request.getServletPath().endsWith(RECEIVE_PATH_SUFFIX)) {
+        if ("POST".equals(request.getMethod()) && isReceivePath(request.getServletPath())) {
             String ip = clientIp(request);
             if (!ipRateGate.allow(ip)) {
                 // 维度码用 risk_ip：与开放面配额过滤器里的 IP 维度（ip）区分开——
@@ -70,6 +76,11 @@ public class RiskControlFilter extends OncePerRequestFilter {
             }
         }
         filterChain.doFilter(request, response);
+    }
+
+    /** 包内可见，便于单测直接钉住路径判据。 */
+    static boolean isReceivePath(String servletPath) {
+        return RECEIVE_PATH_SUFFIXES.stream().anyMatch(servletPath::endsWith);
     }
 
     /**

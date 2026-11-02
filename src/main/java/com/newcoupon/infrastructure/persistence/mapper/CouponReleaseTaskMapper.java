@@ -16,7 +16,8 @@ import org.apache.ibatis.annotations.Update;
 @Mapper
 public interface CouponReleaseTaskMapper extends BaseMapper<CouponReleaseTaskPO> {
 
-    /** 捞到期待办（分片版，走 idx_scan(status, next_scan_time)；XXL-JOB 分片广播时各实例只捞自己的分片） */
+    /** 捞到期待办（分片版，走 idx_scan(status, next_scan_time)；XXL-JOB 按 shard % total 切结果，
+     *  shard 只有 16 个值=作业并行度最多 16 路；没有 user_id 路由键，逻辑 SQL 仍广播 64 张物理表。 */
     @Select("SELECT * FROM coupon_release_task WHERE status = 0 AND next_scan_time <= NOW() "
             + "AND shard % #{shardTotal} = #{shardIndex} "
             + "ORDER BY next_scan_time LIMIT #{limit}")
@@ -24,9 +25,10 @@ public interface CouponReleaseTaskMapper extends BaseMapper<CouponReleaseTaskPO>
                                            @Param("shardTotal") int shardTotal,
                                            @Param("limit") int limit);
 
-    /** 终结任务（幂等：已终结再执行影响 0 行）——按合同号 */
-    @Update("UPDATE coupon_release_task SET status = 1 WHERE usage_no = #{usageNo} AND status = 0")
-    int finish(@Param("usageNo") String usageNo);
+    /** 终结任务（幂等：已终结再执行影响 0 行）——按合同号 + 分片键 user_id。 */
+    @Update("UPDATE coupon_release_task SET status = 1 "
+            + "WHERE usage_no = #{usageNo} AND user_id = #{userId} AND status = 0")
+    int finish(@Param("usageNo") String usageNo, @Param("userId") long userId);
 
     /** 失败退避：retry_count+1、指数退避推进（min(2^retry, 30min)）；总失败满 8 次置死信(3)。
      *  注意 MySQL SET 从左到右求值：第 3 行的 retry_count 已是自增后的新值（=总失败次数），
@@ -35,8 +37,8 @@ public interface CouponReleaseTaskMapper extends BaseMapper<CouponReleaseTaskPO>
             + "retry_count = retry_count + 1, "
             + "next_scan_time = NOW() + INTERVAL LEAST(POW(2, retry_count + 1), 1800) SECOND, "
             + "status = IF(retry_count >= 8, 3, 0) "
-            + "WHERE usage_no = #{usageNo} AND status = 0")
-    int backoff(@Param("usageNo") String usageNo);
+            + "WHERE usage_no = #{usageNo} AND user_id = #{userId} AND status = 0")
+    int backoff(@Param("usageNo") String usageNo, @Param("userId") long userId);
 
     /** 审计补注册：不存在则插入；**死信(3)则复活**为待处理并清零重试（红队评审#1：INSERT IGNORE
      *  会被死信行的唯一键静默吞掉——"补注册"对死信合同永远做不到，且告警谎报已自愈）。

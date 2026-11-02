@@ -54,6 +54,7 @@ class AdminSurfaceProtectionTest extends ShardedIntegrationTestSupport {
 
         // 业务面写接口白名单（C 端功能口，各有自己的防线）
         assertThat(AdminTokenFilter.isProtected("POST", "/api/coupons/receive")).isFalse();
+        assertThat(AdminTokenFilter.isProtected("POST", "/api/coupons/receive-async")).isFalse();
         assertThat(AdminTokenFilter.isProtected("POST", "/api/coupons/lock")).isFalse();
         assertThat(AdminTokenFilter.isProtected("POST", "/api/coupons/confirm")).isFalse();
         assertThat(AdminTokenFilter.isProtected("POST", "/api/coupons/release")).isFalse();

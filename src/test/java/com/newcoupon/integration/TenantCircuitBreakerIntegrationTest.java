@@ -96,10 +96,10 @@ class TenantCircuitBreakerIntegrationTest extends ShardedIntegrationTestSupport 
     @Test
     @DisplayName("隔离：甲的租户级熔断打开 → 甲被拦下，**乙照常发券**")
     void tenantBreakerOpen_isolatesThatTenant() throws Exception {
-        breakers.forTenant("redis", appA).transitionToOpenState();
+        breakers.forTenant("mysql", appA).transitionToOpenState();
 
         OpenApiTestClient.Response asA = receive(appA, secretA, templateA, "iso-a");
-        assertThat(asA.body()).as("甲被熔断，应当快速失败而不是等超时").contains("5001");
+        assertThat(asA.body()).as("甲被熔断，应当快速失败而不是等超时").contains("5000");
 
         OpenApiTestClient.Response asB = receive(appB, secretB, templateB, "iso-b");
         assertThat(asB.body())
@@ -110,10 +110,10 @@ class TenantCircuitBreakerIntegrationTest extends ShardedIntegrationTestSupport 
     @Test
     @DisplayName("对照：依赖级熔断打开 → 所有租户一起快速失败（总闸保护的是依赖本身）")
     void dependencyBreakerOpen_affectsAllTenants() throws Exception {
-        breakers.redis().transitionToOpenState();
+        breakers.mysql().transitionToOpenState();
 
-        assertThat(receive(appA, secretA, templateA, "all-a").body()).contains("5001");
-        assertThat(receive(appB, secretB, templateB, "all-b").body()).contains("5001");
+        assertThat(receive(appA, secretA, templateA, "all-a").body()).contains("5000");
+        assertThat(receive(appB, secretB, templateB, "all-b").body()).contains("5000");
     }
 
     @Test

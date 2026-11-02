@@ -83,14 +83,23 @@ public class OutboxDispatcher {
             List<CouponOutboxPO> batch;
             LocalDateTime now = LocalDateTime.now();
             while (!(batch = outboxMapper.selectDispatchable(now, batchSize)).isEmpty()) {
+                List<Long> dispatchedIds = new java.util.ArrayList<>(batch.size());
                 for (CouponOutboxPO row : batch) {
                     try {
                         publisher.publish(topicOf(row.getEventType()), row.getEventNo(), row.getPayload());
-                        outboxMapper.markDispatched(row.getId());
-                        dispatched++;
+                        dispatchedIds.add(row.getId());
                     } catch (RuntimeException e) {
                         handleFailure(row, e);
                         if (row.getRetryCount() + 1 >= maxRetry) { dead++; } else { retried++; }
+                    }
+                }
+                if (!dispatchedIds.isEmpty()) {
+                    // 一次 IN 更新替代逐行 autocommit；行仍是 status=0 CAS，重复投递由消费端幂等兜底。
+                    int marked = outboxMapper.markDispatchedBatch(dispatchedIds);
+                    dispatched += marked;
+                    if (marked != dispatchedIds.size()) {
+                        log.warn("outbox batch mark partial: published={}, marked={}（其余下一轮重投）",
+                                dispatchedIds.size(), marked);
                     }
                 }
                 now = LocalDateTime.now();   // 重退避的行 next_scan_time 已顺延，不会死循环

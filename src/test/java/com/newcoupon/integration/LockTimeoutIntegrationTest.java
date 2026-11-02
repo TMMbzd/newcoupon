@@ -263,7 +263,7 @@ class LockTimeoutIntegrationTest extends ShardedIntegrationTestSupport {
         long[] ids = freshCoupon("backoff");
         LockResult lock = lock(ids[0], ids[1], "backoff");
 
-        releaseTaskGateway.backoff(lock.usageNo());   // 第 1 次退避
+        releaseTaskGateway.backoff(lock.usageNo(), ids[1]);   // 第 1 次退避
 
         assertThat(taskStatus(lock.usageNo())).as("仍待处理（单值）").isEqualTo(0);
         assertThat(jdbc.queryForObject(
@@ -271,7 +271,7 @@ class LockTimeoutIntegrationTest extends ShardedIntegrationTestSupport {
                 Integer.class, lock.usageNo())).isEqualTo(1);
 
         jdbc.update("UPDATE coupon_release_task SET retry_count = 7 WHERE usage_no = ?", lock.usageNo());
-        releaseTaskGateway.backoff(lock.usageNo());   // 第 8 次
+        releaseTaskGateway.backoff(lock.usageNo(), ids[1]);   // 第 8 次
 
         assertThat(taskStatus(lock.usageNo())).as("重试超限置死信等人工").isEqualTo(3);
     }

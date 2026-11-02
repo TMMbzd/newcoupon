@@ -17,8 +17,9 @@ public interface CouponExpireTaskMapper extends BaseMapper<CouponExpireTaskPO> {
 
     /**
      * 捞到期待办（分片版，走 idx_scan(status, next_scan_time)）：
-     * XXL-JOB 分片广播时每个实例只捞自己的分片（shard % total = index），
-     * 吞吐随实例数线性扩展；单通道（shardIndex=0, shardTotal=1）=全量。
+     * XXL-JOB 分片广播时每个实例按 shard % total = index 过滤结果；shard 只有 16 个值，
+     * 作业并行度最多 16 路。注意这里只切结果、不切物理表：没有 user_id 路由键，
+     * 逻辑 SQL 仍会广播 64 张物理表（scan 不会因分片参数变单表）。
      */
     @Select("SELECT * FROM coupon_expire_task WHERE status = 0 AND next_scan_time <= NOW() "
             + "AND shard % #{shardTotal} = #{shardIndex} "
@@ -27,9 +28,10 @@ public interface CouponExpireTaskMapper extends BaseMapper<CouponExpireTaskPO> {
                                           @Param("shardTotal") int shardTotal,
                                           @Param("limit") int limit);
 
-    /** 终结任务（幂等：已终结再执行影响 0 行） */
-    @Update("UPDATE coupon_expire_task SET status = 1 WHERE coupon_id = #{couponId} AND status = 0")
-    int finish(@Param("couponId") long couponId);
+    /** 终结任务（幂等：已终结再执行影响 0 行）。带 user_id 命中单张分表，不广播 64 表。 */
+    @Update("UPDATE coupon_expire_task SET status = 1 "
+            + "WHERE coupon_id = #{couponId} AND user_id = #{userId} AND status = 0")
+    int finish(@Param("couponId") long couponId, @Param("userId") long userId);
 
     /**
      * 失败退避：retry_count+1、下次扫描时间按指数退避推进（min(2^retry, 30min)）；
@@ -40,8 +42,8 @@ public interface CouponExpireTaskMapper extends BaseMapper<CouponExpireTaskPO> {
             + "retry_count = retry_count + 1, "
             + "next_scan_time = NOW() + INTERVAL LEAST(POW(2, retry_count + 1), 1800) SECOND, "
             + "status = IF(retry_count >= 8, 3, 0) "
-            + "WHERE coupon_id = #{couponId} AND status = 0")
-    int backoff(@Param("couponId") long couponId);
+            + "WHERE coupon_id = #{couponId} AND user_id = #{userId} AND status = 0")
+    int backoff(@Param("couponId") long couponId, @Param("userId") long userId);
 
     /** 审计补注册：不存在则插入；**死信(3)则复活**为待处理并清零重试（红队评审#1：INSERT IGNORE
      *  被死信行唯一键静默吞掉，"补注册"对死信永远做不到）。SET 求值顺序：retry_count 先判旧 status。 */

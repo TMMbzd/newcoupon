@@ -114,13 +114,13 @@ class OutboxDispatcherTest {
     }
 
     @Test
-    @DisplayName("投递成功：markDispatched（且不触发任何失败分支）")
+    @DisplayName("投递成功：批量 markDispatched（且不触发任何失败分支）")
     void success_marksDispatched() {
         givenOneRowThenEmpty(row(0));
 
         dispatcher.dispatch();
 
-        verify(mapper).markDispatched(1L);
+        verify(mapper).markDispatchedBatch(java.util.List.of(1L));
         verify(mapper, never()).markRetry(anyLong(), any(java.time.LocalDateTime.class), anyString());
         verify(mapper, never()).markDead(anyLong(), anyString());
     }

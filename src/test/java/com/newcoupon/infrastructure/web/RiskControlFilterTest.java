@@ -123,6 +123,22 @@ class RiskControlFilterTest {
     }
 
     @Test
+    @DisplayName("异步受理路径同样受 IP 频控：改走 /receive-async 不能绕过")
+    void asyncReceivePath_isFiltered() throws Exception {
+        when(gate.allow("1.2.3.4")).thenReturn(false);
+        MockHttpServletRequest request = post("/api/coupons/receive-async", "1.2.3.4");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+
+        filter.doFilter(request, response, chain);
+
+        assertThat(response.getStatus()).as("异步受理也会写任务/预扣库存，不能成为免频控的旁路")
+                .isEqualTo(429);
+        assertThat(chain.getRequest()).as("拒绝后不得继续过滤链").isNull();
+        verify(gate).allow("1.2.3.4");
+    }
+
+    @Test
     @DisplayName("其他 POST 路径不受频控影响")
     void otherPath_notFiltered() throws Exception {
         MockHttpServletRequest request = post("/api/coupons/mycoupons", "1.2.3.4");

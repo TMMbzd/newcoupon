@@ -1,6 +1,7 @@
 package com.newcoupon.application.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.newcoupon.infrastructure.persistence.mapper.AuditChainHeadMapper;
 import com.newcoupon.infrastructure.persistence.mapper.AuditLogMapper;
 import com.newcoupon.infrastructure.persistence.po.AuditLogPO;
 import java.nio.charset.StandardCharsets;
@@ -11,6 +12,8 @@ import java.util.concurrent.Executors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * 操作审计服务（第 1 环 1-1 项——"动钱先审计"）。
@@ -50,9 +53,15 @@ public class AuditService {
     });
 
     private final AuditLogMapper auditLogMapper;
+    private final AuditChainHeadMapper auditChainHeadMapper;
+    private final TransactionTemplate transactionTemplate;
 
-    public AuditService(AuditLogMapper auditLogMapper) {
+    public AuditService(AuditLogMapper auditLogMapper,
+                        AuditChainHeadMapper auditChainHeadMapper,
+                        PlatformTransactionManager transactionManager) {
         this.auditLogMapper = auditLogMapper;
+        this.auditChainHeadMapper = auditChainHeadMapper;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
     /**
@@ -92,37 +101,33 @@ public class AuditService {
     }
 
     /**
-     * 同步写入（synchronized 保证哈希链连续性）。
-     * "读最后一条 hash → 算新 hash → 插入"三步必须原子。
+     * 写入审计：链头单行 FOR UPDATE 把“读最后 hash → 算新 hash → 插记录 → 更新链头”
+     * 串行化到数据库，跨实例也连续；单实例的 synchronized 已移除。
      */
-    private synchronized void writeRecord(AuditContext ctx) {
-        AuditLogPO po = new AuditLogPO();
-        po.setAppId(ctx.appId() != null ? ctx.appId() : "SYSTEM");
-        po.setUserId(ctx.userId());
-        po.setTraceId(ctx.traceId() != null ? ctx.traceId() : "NO_TRACE");
-        po.setAction(ctx.action());
-        po.setResourceType(ctx.resourceType());
-        po.setResourceId(ctx.resourceId());
-        po.setBeforeSnapshot(ctx.beforeSnapshot());
-        po.setAfterSnapshot(ctx.afterSnapshot());
-        po.setIp(ctx.ip());
-        po.setResultCode(ctx.resultCode() != null ? ctx.resultCode() : 0);
-        po.setCreatedAt(LocalDateTime.now());
-        po.setPrevHash(getLastHash());
-        po.setRecordHash(computeHash(po));
+    private void writeRecord(AuditContext ctx) {
+        transactionTemplate.executeWithoutResult(status -> {
+            AuditLogPO po = new AuditLogPO();
+            po.setAppId(ctx.appId() != null ? ctx.appId() : "SYSTEM");
+            po.setUserId(ctx.userId());
+            po.setTraceId(ctx.traceId() != null ? ctx.traceId() : "NO_TRACE");
+            po.setAction(ctx.action());
+            po.setResourceType(ctx.resourceType());
+            po.setResourceId(ctx.resourceId());
+            po.setBeforeSnapshot(ctx.beforeSnapshot());
+            po.setAfterSnapshot(ctx.afterSnapshot());
+            po.setIp(ctx.ip());
+            po.setResultCode(ctx.resultCode() != null ? ctx.resultCode() : 0);
+            po.setCreatedAt(LocalDateTime.now());
 
-        auditLogMapper.insert(po);
-        log.debug("AUDIT WRITTEN: id={} action={} hash={}",
-                po.getId(), po.getAction(), po.getRecordHash().substring(0, 12) + "…");
-    }
+            String prev = auditChainHeadMapper.selectLastHashForUpdate();
+            po.setPrevHash(prev == null ? GENESIS_HASH : prev);
+            po.setRecordHash(computeHash(po));
 
-    /** 读最后一条记录的 record_hash（无记录时返回创世哈希） */
-    private String getLastHash() {
-        AuditLogPO last = auditLogMapper.selectOne(
-                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<AuditLogPO>()
-                        .orderByDesc(AuditLogPO::getId)
-                        .last("LIMIT 1"));
-        return last != null ? last.getRecordHash() : GENESIS_HASH;
+            auditLogMapper.insert(po);
+            auditChainHeadMapper.updateLastHash(po.getRecordHash());
+            log.debug("AUDIT WRITTEN: id={} action={} hash={}",
+                    po.getId(), po.getAction(), po.getRecordHash().substring(0, 12) + "…");
+        });
     }
 
     /**

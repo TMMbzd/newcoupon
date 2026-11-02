@@ -3,6 +3,7 @@ package com.newcoupon.application.service;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.newcoupon.common.cache.CacheInvalidationPort;
 import com.newcoupon.common.cache.CacheTtl;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.repository.TemplateRepository;
@@ -10,6 +11,7 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -30,8 +32,8 @@ import org.springframework.stereotype.Component;
  * </ul>
  *
  * <p>**一致性**：create/publish 主动 {@link #invalidate(long)}（大促 0 点发布必须立刻可见，
- * 不能等 TTL）；多实例的缓存广播刷新通道按路线排在 P5-⑧（当前单实例本地失效已足够，
- * TTL 是多实例场景的兜底上界）。
+ * 不能等 TTL）：本实例立即清，再经 {@link CacheInvalidationPort} 广播其他实例；
+ * 广播丢失由版本键轮询兜底，TTL 抖动是 Redis 不可用时的最终上界。
  *
  * <p>度量：命中/未命中计数进日志（2e 接 Micrometer 后改为指标）。
  */
@@ -43,15 +45,25 @@ public class CachedTemplateReader {
     private static final long MAX_ENTRIES = 10_000;
 
     private final TemplateRepository delegate;
+    private final CacheInvalidationPort invalidation;
 
     /** 条目值：正缓存=Optional.of(模板)；负缓存=Optional.empty()。Expiry 按正负分别定 TTL */
     private final LoadingCache<Long, Optional<CouponTemplate>> cache;
 
+    /** 兼容构造器（单测/未接跨实例通道）：仅本地失效 + TTL。 */
     public CachedTemplateReader(TemplateRepository delegate,
+                                long ttlMillis, long refreshMillis, long negativeTtlMillis) {
+        this(delegate, CacheInvalidationPort.NOOP, ttlMillis, refreshMillis, negativeTtlMillis);
+    }
+
+    @Autowired
+    public CachedTemplateReader(TemplateRepository delegate,
+                                CacheInvalidationPort invalidation,
                                 @Value("${coupon.template-cache.ttl-ms:300000}") long ttlMillis,
                                 @Value("${coupon.template-cache.refresh-ms:200000}") long refreshMillis,
                                 @Value("${coupon.template-cache.negative-ttl-ms:60000}") long negativeTtlMillis) {
         this.delegate = delegate;
+        this.invalidation = invalidation;
         this.cache = Caffeine.newBuilder()
                 .maximumSize(MAX_ENTRIES)
                 .executor(java.util.concurrent.Executors.newFixedThreadPool(2, r -> {
@@ -84,6 +96,15 @@ public class CachedTemplateReader {
                     }
                 })
                 .build(this::load);
+        this.invalidation.register(CacheInvalidationPort.NAMESPACE_TEMPLATE,
+                key -> {
+                    try {
+                        cache.invalidate(Long.parseLong(key));
+                    } catch (NumberFormatException e) {
+                        log.warn("跨实例模板失效的 key 不是数字，已忽略：{}", key);
+                    }
+                },
+                cache::invalidateAll);
     }
 
     /** 读模板：命中/负命中不触库；越刷新线单人回源 */
@@ -96,9 +117,10 @@ public class CachedTemplateReader {
         return v == null ? Optional.empty() : v;
     }
 
-    /** 主动失效（create/publish 调用——大促发布必须立刻可见） */
+    /** 主动失效（create/publish 调用——大促发布必须立刻可见）：本实例立即清，再广播其他实例。 */
     public void invalidate(long templateId) {
         cache.invalidate(templateId);
+        invalidation.invalidate(CacheInvalidationPort.NAMESPACE_TEMPLATE, Long.toString(templateId));
         log.info("template cache invalidated: id={}", templateId);
     }
 
