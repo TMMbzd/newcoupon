@@ -53,6 +53,8 @@ public class TemplateLifecycleService {
     @Transactional
     public void freeze(long templateId) {
         CouponTemplatePO t = requirePublished(templateId);
+        AppOwnership.assertAccessible(t.getAppId(), "template:" + templateId);   // 开放面归属校验（内部面 appId=null 放行）
+
         shardMapper.updateStatusAll(templateId, layoutVersion(t), 1);
         afterCommit(templateId);
         log.warn("template frozen: id={}, layoutVersion={}", templateId, layoutVersion(t));
@@ -61,6 +63,8 @@ public class TemplateLifecycleService {
     @Transactional
     public void unfreeze(long templateId) {
         CouponTemplatePO t = requirePublished(templateId);
+        AppOwnership.assertAccessible(t.getAppId(), "template:" + templateId);   // 开放面归属校验（内部面 appId=null 放行）
+
         shardMapper.updateStatusAll(templateId, layoutVersion(t), 0);
         afterCommit(templateId);
         log.info("template unfrozen: id={}, layoutVersion={}", templateId, layoutVersion(t));
@@ -72,6 +76,7 @@ public class TemplateLifecycleService {
         if (t == null) {
             throw new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + templateId);
         }
+        AppOwnership.assertAccessible(t.getAppId(), "template:" + templateId);   // 开放面归属校验（内部面 appId=null 放行）
         if (t.getPublishStatus() == null || t.getPublishStatus() != 1) {
             throw new BizException(ErrorCode.STATE_CONFLICT, "仅已发布模板可下线");
         }
@@ -89,6 +94,7 @@ public class TemplateLifecycleService {
         if (t == null) {
             throw new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + templateId);
         }
+        AppOwnership.assertAccessible(t.getAppId(), "template:" + templateId);   // 开放面归属校验（内部面 appId=null 放行）
         if (t.getPublishStatus() == null || t.getPublishStatus() != 2) {
             throw new BizException(ErrorCode.STATE_CONFLICT, "仅已下线模板可重上线");
         }

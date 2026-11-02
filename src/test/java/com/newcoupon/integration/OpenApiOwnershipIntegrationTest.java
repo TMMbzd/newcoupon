@@ -173,6 +173,47 @@ class OpenApiOwnershipIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     // ------------------------------------------------------------------
+    // 越权⑥：模板生命周期与库存调整五个端点（2026-11-02 审计发现的裸奔面）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("越权⑥：乙应用调甲应用模板的 stock-adjust/freeze/unfreeze/offline/reonline → 全部 403 + 6011")
+    void lifecycleEndpoints_rejectCrossApp() throws Exception {
+        // 顺序执行五个端点；每个断言 403+6011。红阶段（无归属校验）第一个就会以
+        // 200≠403 失败并中止——stock-adjust 用 target==expected 的 no-op 请求，红灯不污染状态。
+        String adjustBody = "{\"expectedTotalCount\":100,\"targetTotalCount\":100,"
+                + "\"requestId\":\"own-adj-b-1\",\"reason\":\"越权反例\"}";
+        OpenApiTestClient.Response adjust = client.post(
+                "/open/v1/templates/" + templateIdOfA + "/stock-adjust", adjustBody, APP_B, secretB, "own-adj-b-tok");
+        assertThat(adjust.status()).as("stock-adjust: " + adjust.body()).isEqualTo(403);
+        assertThat(adjust.body()).contains("6011");
+
+        OpenApiTestClient.Response freeze = client.post(
+                "/open/v1/templates/" + templateIdOfA + "/freeze", "", APP_B, secretB, "own-frz-b-tok");
+        assertThat(freeze.status()).as("freeze: " + freeze.body()).isEqualTo(403);
+        assertThat(freeze.body()).contains("6011");
+
+        OpenApiTestClient.Response unfreeze = client.post(
+                "/open/v1/templates/" + templateIdOfA + "/unfreeze", "", APP_B, secretB, "own-unfrz-b-tok");
+        assertThat(unfreeze.status()).as("unfreeze: " + unfreeze.body()).isEqualTo(403);
+        assertThat(unfreeze.body()).contains("6011");
+
+        OpenApiTestClient.Response offline = client.post(
+                "/open/v1/templates/" + templateIdOfA + "/offline", "", APP_B, secretB, "own-off-b-tok");
+        assertThat(offline.status()).as("offline: " + offline.body()).isEqualTo(403);
+        assertThat(offline.body()).contains("6011");
+
+        OpenApiTestClient.Response reonline = client.post(
+                "/open/v1/templates/" + templateIdOfA + "/reonline", "", APP_B, secretB, "own-reon-b-tok");
+        assertThat(reonline.status()).as("reonline: " + reonline.body()).isEqualTo(403);
+        assertThat(reonline.body()).contains("6011");
+
+        // 恢复现场：绿灯路径五个 403 都没改状态，这里只是防御性兜底（幂等 no-op）
+        client.post("/open/v1/templates/" + templateIdOfA + "/unfreeze", "", APP_A, secretA, "own-unfrz-a-tok");
+        client.post("/open/v1/templates/" + templateIdOfA + "/reonline", "", APP_A, secretA, "own-reon-a-tok");
+    }
+
+    // ------------------------------------------------------------------
 
     private String receiveBody(String requestId, long userId) {
         return "{\"requestId\":\"" + requestId + "\",\"userId\":" + userId

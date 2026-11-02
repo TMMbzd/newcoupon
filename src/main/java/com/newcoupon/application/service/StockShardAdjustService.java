@@ -97,6 +97,7 @@ public class StockShardAdjustService {
         if (t == null) {
             throw new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + templateId);
         }
+        AppOwnership.assertAccessible(t.getAppId(), "template:" + templateId);   // 开放面归属校验（内部面 appId=null 放行）
         long current = t.getTotalCount() == null ? 0 : t.getTotalCount();
         if (current != expected) {
             throw new BizException(ErrorCode.STATE_CONFLICT,
