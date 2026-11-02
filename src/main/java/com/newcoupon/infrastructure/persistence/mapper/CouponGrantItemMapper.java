@@ -71,6 +71,13 @@ public interface CouponGrantItemMapper extends BaseMapper<CouponGrantItemPO> {
     List<CouponGrantItemPO> selectFailedByTask(@Param("taskId") long taskId);
 
     /**
+     * FAIL item 的 chunk_no 列表（V6 阶段 1C）：retry-failed 补预算预占时按 chunk
+     * 分组计数用。单查询拉回后 Java 侧分组，避免为 ≤1 万行的任务做 N 次点查。
+     */
+    @Select("SELECT chunk_no FROM coupon_grant_item WHERE task_id = #{taskId} AND status = 2")
+    List<Integer> selectFailChunkNos(@Param("taskId") long taskId);
+
+    /**
      * retry-failed 重置：把任务内全部 FAIL item 批量置回 PENDING，attempt 归零、
      * 失败原因清空。返回重置行数 n——n 是调用方迁移任务计数（fail-n、pending+n）的
      * 唯一依据；WHERE 限定 status=2 保证只重置终态失败项，SUCCESS/SKIP/CANCELED 不被动。

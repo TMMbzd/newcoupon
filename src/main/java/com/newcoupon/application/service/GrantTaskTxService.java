@@ -26,6 +26,12 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>守恒不变量的实现锚点在本类：item 状态 CAS（"AND status = 0"）成功
  * 才在同一事务里累加 chunk/task 计数——两个 worker 重放同一 item 时
  * 只有一个赢家能计数，total = success+fail+skip+pending 在任何时刻成立。
+ *
+ * <p><b>预算结算在本类（V6 阶段 1C）</b>：chunk 终态迁移（markDone/markCanceled）
+ * 与预算收口（{@link BudgetService#settleChunk}）在同一事务——分开会出现
+ * "chunk 已 DONE、预占未结算"的崩溃窗口，僵尸回收把已成功的预算也放回池子。
+ * 这里调用的是同层 {@link BudgetService}（它自身不持事务，落到
+ * {@link BudgetTxService} 的 @Transactional REQUIRED 会加入本事务）。
  */
 @Service
 public class GrantTaskTxService {
@@ -35,13 +41,19 @@ public class GrantTaskTxService {
     private final CouponGrantTaskMapper taskMapper;
     private final CouponGrantChunkMapper chunkMapper;
     private final CouponGrantItemMapper itemMapper;
+    private final BudgetService budgetService;
+    private final BudgetMetrics budgetMetrics;
 
     public GrantTaskTxService(CouponGrantTaskMapper taskMapper,
                               CouponGrantChunkMapper chunkMapper,
-                              CouponGrantItemMapper itemMapper) {
+                              CouponGrantItemMapper itemMapper,
+                              BudgetService budgetService,
+                              BudgetMetrics budgetMetrics) {
         this.taskMapper = taskMapper;
         this.chunkMapper = chunkMapper;
         this.itemMapper = itemMapper;
+        this.budgetService = budgetService;
+        this.budgetMetrics = budgetMetrics;
     }
 
     /**
@@ -144,16 +156,19 @@ public class GrantTaskTxService {
 
     /**
      * chunk 一轮执行的收尾：
-     * 无 PENDING item → DONE + 尝试收尾任务（全部 chunk 终态时迁移任务状态）；
-     * 仍有 PENDING（可重试类）→ 保持 RUNNING、释放租约、next_retry_at 退避。
+     * 无 PENDING item → DONE + 预算结算 + 尝试收尾任务（全部 chunk 终态时迁移任务状态）；
+     * 仍有 PENDING（可重试类）→ 保持 RUNNING、释放租约、next_retry_at 退避
+     * （预算预占继续开口——可重试 item 下一轮可能真实消耗）。
      */
     @Transactional
-    public void finishChunkPass(CouponGrantChunkPO chunk, String owner,
-                                LocalDateTime backoffUntil) {
+    public void finishChunkPass(CouponGrantChunkPO chunk, CouponGrantTaskPO task,
+                                String owner, LocalDateTime backoffUntil) {
         long pending = itemMapper.countPendingByChunk(chunk.getTaskId(), chunk.getChunkNo());
         if (pending == 0) {
             // markDone 打不中=租约已被别人回收（崩溃竞态），接手方自己会收尾
             if (chunkMapper.markDone(chunk.getId(), owner) == 1) {
+                // 同事务结算预算：确认实际成功张数×单张成本、释放失败/跳过部分的预占
+                budgetService.settleChunk(task, chunk);
                 finalizeTaskIfDone(chunk.getTaskId());
             }
         } else {
@@ -202,11 +217,11 @@ public class GrantTaskTxService {
     /**
      * 取消收尾（任务 CANCELING/CANCELED 时被领取的 chunk 走这里）：
      * chunk CAS → FAILED，PENDING item 批量置 CANCELED（数量 n），
-     * skip+n、pending-n，然后尝试收尾任务。**不调用 receive**——
-     * 取消语义是"阻止还没发的"，已发的券不受影响。
+     * skip+n、pending-n，预算结算（已成功部分确认、其余释放），然后尝试收尾任务。
+     * **不调用 receive**——取消语义是"阻止还没发的"，已发的券不受影响。
      */
     @Transactional
-    public void cancelChunk(CouponGrantChunkPO chunk, String owner) {
+    public void cancelChunk(CouponGrantChunkPO chunk, CouponGrantTaskPO task, String owner) {
         if (chunkMapper.markCanceled(chunk.getId(), owner) != 1) {
             return;   // 已被收尾/被其它 worker 接手：幂等让路
         }
@@ -214,6 +229,11 @@ public class GrantTaskTxService {
         if (canceled > 0) {
             chunkMapper.addSkip(chunk.getId(), canceled);
             taskMapper.addSkip(chunk.getTaskId(), canceled);
+        }
+        // 取消也是终态：预算按"已成功的张数"确认、剩余开口全部释放（未执行=未消耗）。
+        // task 为 null 只发生在任务行不存在的理论不可达分支——没有预算账可结
+        if (task != null) {
+            budgetService.settleChunk(task, chunk);
         }
         finalizeTaskIfDone(chunk.getTaskId());
     }
@@ -237,8 +257,12 @@ public class GrantTaskTxService {
         if (swept > 0) {
             taskMapper.addSkip(taskId, swept);
         }
-        taskMapper.finalizeCanceled(taskId);
-        taskMapper.finalizeSuccess(taskId);
+        if (taskMapper.finalizeCanceled(taskId) == 1) {
+            budgetMetrics.recordGrantTaskStatus("canceled");
+        }
+        if (taskMapper.finalizeSuccess(taskId) == 1) {
+            budgetMetrics.recordGrantTaskStatus("success");
+        }
     }
 
 
@@ -259,8 +283,12 @@ public class GrantTaskTxService {
             if (swept > 0) {
                 taskMapper.addSkip(taskId, swept);
             }
-            taskMapper.finalizeCanceled(taskId);
-            taskMapper.finalizeSuccess(taskId);
+            if (taskMapper.finalizeCanceled(taskId) == 1) {
+                budgetMetrics.recordGrantTaskStatus("canceled");
+            }
+            if (taskMapper.finalizeSuccess(taskId) == 1) {
+                budgetMetrics.recordGrantTaskStatus("success");
+            }
             finalized++;
             log.warn("grant task finalize reaped: taskId={}（收尾竞态让路，兜底补收尾）", taskId);
         }

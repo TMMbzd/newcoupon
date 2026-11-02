@@ -66,6 +66,8 @@ public class CouponTemplatePO {
     // ---- C1 库存模型（V25，ADR-0018）----
     private Integer stockShardCount;   // C1 配置分片数 N
     private Integer stockLayoutVersion;// C1 布局版本
+    // ---- 预算（V42，V6 阶段 1C）----
+    private Long budgetUnitCost;       // 单张预算成本（分）：满减/无门槛=面额，满折=优惠上限
 
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
@@ -133,6 +135,8 @@ public class CouponTemplatePO {
     public void setStockShardCount(Integer stockShardCount) { this.stockShardCount = stockShardCount; }
     public Integer getStockLayoutVersion() { return stockLayoutVersion; }
     public void setStockLayoutVersion(Integer stockLayoutVersion) { this.stockLayoutVersion = stockLayoutVersion; }
+    public Long getBudgetUnitCost() { return budgetUnitCost; }
+    public void setBudgetUnitCost(Long budgetUnitCost) { this.budgetUnitCost = budgetUnitCost; }
     public LocalDateTime getCreateTime() { return createTime; }
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }
     public LocalDateTime getUpdateTime() { return updateTime; }

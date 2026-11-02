@@ -122,6 +122,31 @@ coupon:
     # LOCKED 残留独立回收调度（默认关）：grant worker 开着的环境由 worker 每轮顺带回收，
     # 只有"没开 grant worker 但用兑换码"的部署需要单独打开，否则崩窗残留码无人回收。
     reap-enabled: ${CODE_REAP_ENABLED:false}
+  # 营销活动与预算闸门（V6 阶段 1C）。预算的一切都挂在活动级 budget_enabled=1 之后：
+  # 活动不开预算，发放链路不多一条 SQL、行为与 1C 之前完全一致（回滚承诺）。
+  activity:
+    # 建券时校验 activityId 真实存在且归属一致（默认 false：存量测试/调用方的
+    # activityId 多为字面量，直接开会全部被拒；新部署建议开）。
+    check-enabled: ${ACTIVITY_CHECK_ENABLED:false}
+    # 预算开关判断的本地缓存 TTL：开启/关闭预算最多延迟这个时长生效（对闸门两个
+    # 方向都是安全侧——晚开=少拦，晚关=多拦，都不会超发钱）。
+    cache-ttl-ms: ${ACTIVITY_CACHE_TTL_MS:30000}
+  budget:
+    # 单人领取/兑换码预占的存活时长（分钟）：覆盖一次请求的完整收口；崩窗残留由
+    # grant worker 每轮的僵尸预占回收兜底。
+    single-ttl-minutes: ${BUDGET_SINGLE_TTL_MINUTES:10}
+    # 批量 chunk 预占的存活时长（分钟）：定时任务的锚点=定时开始时间+TTL，
+    # 保证任务开跑前预占不会先过期回池（默认 24h）。
+    chunk-ttl-minutes: ${BUDGET_CHUNK_TTL_MINUTES:1440}
+    # 僵尸预占每批扫描条数（回收循环的批大小）。
+    expire-batch-size: ${BUDGET_EXPIRE_BATCH_SIZE:200}
+    # 预算与发放对账任务（默认关，照 GrantTaskWorker 的开关纪律）：四条等式
+    # （账本=账户 / 开口守恒 / 码池守恒 / 任务守恒），差异落 stock_drift_log 只告警不修复。
+    reconcile:
+      enabled: ${BUDGET_RECONCILE_ENABLED:false}
+      fixed-delay-ms: ${BUDGET_RECONCILE_FIXED_DELAY_MS:3600000}
+      initial-delay-ms: ${BUDGET_RECONCILE_INITIAL_DELAY_MS:3600000}
+      code-batch-limit: ${BUDGET_RECONCILE_CODE_BATCH_LIMIT:1000}
   id:
     # 空=启动时在 Redis 抢一个 0-1023 的 workerId 租约；显式 WORKER_ID 仍优先，但必须唯一。
     worker-id: ${WORKER_ID:}

@@ -15,6 +15,7 @@ import com.newcoupon.infrastructure.id.SnowflakeIdGenerator;
 import com.newcoupon.infrastructure.persistence.mapper.CouponGrantChunkMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponGrantItemMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponGrantTaskMapper;
+import com.newcoupon.infrastructure.persistence.po.CouponBudgetReservationPO;
 import com.newcoupon.infrastructure.persistence.po.CouponGrantChunkPO;
 import com.newcoupon.infrastructure.persistence.po.CouponGrantItemPO;
 import com.newcoupon.infrastructure.persistence.po.CouponGrantTaskPO;
@@ -59,19 +60,25 @@ public class GrantTaskService {
     private final CouponGrantItemMapper itemMapper;
     private final GrantTaskTxService txService;
     private final SnowflakeIdGenerator idGenerator;
+    private final BudgetService budgetService;
+    private final BudgetMetrics budgetMetrics;
 
     public GrantTaskService(TemplateRepository templateRepository,
                             CouponGrantTaskMapper taskMapper,
                             CouponGrantChunkMapper chunkMapper,
                             CouponGrantItemMapper itemMapper,
                             GrantTaskTxService txService,
-                            SnowflakeIdGenerator idGenerator) {
+                            SnowflakeIdGenerator idGenerator,
+                            BudgetService budgetService,
+                            BudgetMetrics budgetMetrics) {
         this.templateRepository = templateRepository;
         this.taskMapper = taskMapper;
         this.chunkMapper = chunkMapper;
         this.itemMapper = itemMapper;
         this.txService = txService;
         this.idGenerator = idGenerator;
+        this.budgetService = budgetService;
+        this.budgetMetrics = budgetMetrics;
     }
 
     /**
@@ -112,17 +119,33 @@ public class GrantTaskService {
 
         String taskNo = "GT" + idGenerator.next();
         TaskArtifacts artifacts = buildArtifacts(appId, taskNo, req, users, template);
+        // 预算闸门（V6 阶段 1C）：按 chunk 预估额预占（单张成本×chunk item 数），
+        // 先到先得。预占打不中预算→任务整体不建（BUDGET_EXHAUSTED 原样抛出）——
+        // "建了再发一半"不符合预算硬顶语义；任务落库失败（并发/异常）同样回池。
+        // 预算关着时 tryReserveChunks 是一次缓存判断返回空表，零行为变化。
+        List<CouponBudgetReservationPO> budgetReservations = budgetService.tryReserveChunks(
+                template, taskNo, artifacts.chunks(), req.scheduleTime());
+        boolean created = false;
         try {
-            txService.createTaskInTx(artifacts.task(), artifacts.chunks(), artifacts.items());
-        } catch (DuplicateKeyException e) {
-            // 并发同 requestId：唯一键终审，输家读现状返回（受理幂等）
-            CouponGrantTaskPO winner = taskMapper.selectByAppAndRequest(appId, req.requestId());
-            if (winner != null) {
-                return new GrantTaskCreateResult(winner.getTaskNo(), winner.getStatus(),
-                        winner.getTotalCount(), true);
+            try {
+                txService.createTaskInTx(artifacts.task(), artifacts.chunks(), artifacts.items());
+                created = true;
+            } catch (DuplicateKeyException e) {
+                // 并发同 requestId：唯一键终审，输家读现状返回（受理幂等）
+                CouponGrantTaskPO winner = taskMapper.selectByAppAndRequest(appId, req.requestId());
+                if (winner != null) {
+                    return new GrantTaskCreateResult(winner.getTaskNo(), winner.getStatus(),
+                            winner.getTotalCount(), true);
+                }
+                throw e;
             }
-            throw e;
+        } finally {
+            if (!created) {
+                // 建任务未成（并发输家返回/异常上抛）：本方预占全部回池
+                budgetService.releaseQuietly(budgetReservations);
+            }
         }
+        budgetMetrics.recordGrantTaskStatus("created");
         log.info("grant task created: taskNo={}, templateId={}, users={}, appId={}",
                 taskNo, req.templateId(), users.size(), appId);
         return new GrantTaskCreateResult(taskNo, CouponGrantTaskPO.STATUS_PENDING,
@@ -175,9 +198,21 @@ public class GrantTaskService {
             throw new BizException(ErrorCode.STATE_CONFLICT,
                     "仅已完成任务可重试失败项，当前 status=" + task.getStatus());
         }
-        int retried = txService.retryFailedInTx(task.getId());
+        // 预算（V6 阶段 1C）：重开前按"各 chunk 的 FAIL 张数"补预占——上轮 chunk 结算时
+        // 已把剩余预占释放回池，不补的话重发出去的新券游离在预算账外（可无限套娃超发）。
+        // 预算不足→整体拒绝（先 reset 后补会留下"账外已重置"的窗口，必须先补后 reset）
+        List<CouponBudgetReservationPO> retryReservations = reserveBudgetForRetry(task);
+        int retried;
+        try {
+            retried = txService.retryFailedInTx(task.getId());
+        } catch (RuntimeException e) {
+            budgetService.releaseQuietly(retryReservations);
+            throw e;
+        }
         if (retried == 0) {
             // 没有 FAIL item 可重置：上一受理已重开（任务在 RUNNING 重跑）或本就零失败。
+            // 刚补的预占没有对应的重试项，立即回池
+            budgetService.releaseQuietly(retryReservations);
             // 回当前实时状态而不是方法开头的快照——重开后的任务此刻多半已是 RUNNING
             Integer current = taskMapper.selectStatus(task.getId());
             return new GrantTaskRetryResult(taskNo,
@@ -186,6 +221,34 @@ public class GrantTaskService {
         log.info("grant task retry-failed accepted: taskNo={}, retried={}, appId={}",
                 taskNo, retried, task.getAppId());
         return new GrantTaskRetryResult(taskNo, CouponGrantTaskPO.STATUS_RUNNING, true, retried);
+    }
+
+    /**
+     * retry-failed 的预算补占：按各 chunk 当前 FAIL 张数 × 单张成本，biz 键与首占相同
+     * （taskNo-chunkNo）——chunk 下轮结算时按"累计应收-已确认"的差额算法自然吃掉新旧
+     * 两批预占，不需要区分轮次。预算关着/模板没了返回空表（后者理论不可达）。
+     */
+    private List<CouponBudgetReservationPO> reserveBudgetForRetry(CouponGrantTaskPO task) {
+        CouponTemplate template = templateRepository.findById(task.getTemplateId()).orElse(null);
+        if (template == null || !budgetService.gateOn(template)) {
+            return List.of();
+        }
+        // FAIL item 的 chunk_no 列表：Java 侧按 chunk 分组计数（单查询；task 用户 ≤1 万）
+        List<Integer> failChunkNos = itemMapper.selectFailChunkNos(task.getId());
+        if (failChunkNos.isEmpty()) {
+            return List.of();
+        }
+        Map<Integer, List<Integer>> byChunk = failChunkNos.stream()
+                .collect(java.util.stream.Collectors.groupingBy(n -> n));
+        List<CouponGrantChunkPO> chunksToReserve = new ArrayList<>();
+        for (Map.Entry<Integer, List<Integer>> entry : byChunk.entrySet()) {
+            // 合成轻量 chunk PO：tryReserveChunks 只读 chunkNo 与 totalCount（=FAIL 张数）
+            CouponGrantChunkPO chunk = new CouponGrantChunkPO();
+            chunk.setChunkNo(entry.getKey());
+            chunk.setTotalCount((long) entry.getValue().size());
+            chunksToReserve.add(chunk);
+        }
+        return budgetService.tryReserveChunks(template, task.getTaskNo(), chunksToReserve, null);
     }
 
     /**

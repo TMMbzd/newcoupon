@@ -63,6 +63,8 @@ public final class CouponTemplate {
     private final int stockShardCount;
     /** C1 布局版本；改 N 时走离线布局迁移 */
     private final int stockLayoutVersion;
+    /** 单张预算成本（分，V6 阶段 1C）：满减/无门槛=面额，满折=优惠上限；建券时算好写死 */
+    private final long budgetUnitCost;
 
     private CouponTemplate(Creation c, ApproveStatus approveStatus, PublishStatus publishStatus) {
         this.id = null;
@@ -94,6 +96,7 @@ public final class CouponTemplate {
         this.settlePartyId = c.settlePartyId();
         this.stockShardCount = c.stockShardCount();
         this.stockLayoutVersion = c.stockLayoutVersion();
+        this.budgetUnitCost = c.budgetUnitCost();
     }
 
     private CouponTemplate(CouponTemplate src, Long id) {
@@ -130,6 +133,7 @@ public final class CouponTemplate {
         this.settlePartyId = src.settlePartyId;
         this.stockShardCount = src.stockShardCount;
         this.stockLayoutVersion = src.stockLayoutVersion;
+        this.budgetUnitCost = src.budgetUnitCost;
     }
 
     /**
@@ -341,6 +345,19 @@ public final class CouponTemplate {
     public String getSettlePartyId() { return settlePartyId; }
     public int getStockShardCount() { return stockShardCount; }
     public int getStockLayoutVersion() { return stockLayoutVersion; }
+    /** 单张预算成本（分）：预占按 张数×本值 计（V6 阶段 1C） */
+    public long getBudgetUnitCost() { return budgetUnitCost; }
+
+    /**
+     * 单张预算成本的推导口径（V6 阶段 1C）：满减/无门槛券一张最多让利面额本身；
+     * 满折券一张的让利上限是 discount_cap（领域不变量已强制满折必填上限——
+     * 无上限的折扣券一张就能吃光预算，这正是"满折必须设上限"不变量的资损论据）。
+     * 建券时算好写进 coupon_template.budget_unit_cost，发放路径不再按类型现场推导。
+     */
+    public static long deriveUnitCost(CouponType couponType, long faceValue, Long discountCap) {
+        // 满折按优惠上限计；其余类型（满减/无门槛）按面额计——两者都是"发一张最多花多少"
+        return couponType == CouponType.DISCOUNT ? discountCap : faceValue;
+    }
 
     public int getPerUserLimit() {
         return perUserLimit;
@@ -412,7 +429,9 @@ public final class CouponTemplate {
             /** C1 配置分片数；实际 N_eff=min(stockShardCount,totalCount) */
             int stockShardCount,
             /** C1 布局版本 */
-            int stockLayoutVersion) {
+            int stockLayoutVersion,
+            /** 单张预算成本（分，V6 阶段 1C）：deriveUnitCost 的产物，建券时算好 */
+            long budgetUnitCost) {
 
         /** 手写 Builder：15 个字段的长构造器可读性极差（"第 7 个参数是啥"），测试里只改一个字段的写法依赖它 */
         public static CreationBuilder builder() {
@@ -447,6 +466,7 @@ public final class CouponTemplate {
             private String settlePartyId = null;
             private int stockShardCount = 16;
             private int stockLayoutVersion = 1;
+            private long budgetUnitCost = 0L;
 
             private CreationBuilder() {
             }
@@ -477,13 +497,15 @@ public final class CouponTemplate {
             public CreationBuilder settlePartyId(String v) { this.settlePartyId = v; return this; }
             public CreationBuilder stockShardCount(int v) { this.stockShardCount = v; return this; }
             public CreationBuilder stockLayoutVersion(int v) { this.stockLayoutVersion = v; return this; }
+            public CreationBuilder budgetUnitCost(long v) { this.budgetUnitCost = v; return this; }
 
             public Creation build() {
                 return new Creation(templateCode, activityId, name, couponType, faceValue,
                         discountCap, threshold, totalCount, perUserLimit, dailyLimit,
                         perUserDailyLimit, validType, validStart, validEnd, validDays, appId,
                         applicableScope, scopeIds, stackingLayer, exclusionGroup, budgetOwner,
-                        budgetRatio, settlePartyId, stockShardCount, stockLayoutVersion);
+                        budgetRatio, settlePartyId, stockShardCount, stockLayoutVersion,
+                        budgetUnitCost);
             }
         }
     }

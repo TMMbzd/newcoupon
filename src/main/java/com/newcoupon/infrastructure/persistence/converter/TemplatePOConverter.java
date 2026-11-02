@@ -53,6 +53,7 @@ public final class TemplatePOConverter {
         p.setSettlePartyId(d.getSettlePartyId());
         p.setStockShardCount(d.getStockShardCount());
         p.setStockLayoutVersion(d.getStockLayoutVersion());
+        p.setBudgetUnitCost(d.getBudgetUnitCost());   // V42：单张预算成本，建券时算好
         p.setVersion(0);
         return p;
     }
@@ -94,6 +95,13 @@ public final class TemplatePOConverter {
                         .settlePartyId(p.getSettlePartyId())
                         .stockShardCount(p.getStockShardCount() == null ? 16 : p.getStockShardCount())
                         .stockLayoutVersion(p.getStockLayoutVersion() == null ? 1 : p.getStockLayoutVersion())
+                        // V42 之前的行没有单张成本（列默认 0）：按类型现场重推——
+                        // 推导口径只有一个（deriveUnitCost），重推与建券写入不会漂移
+                        .budgetUnitCost(p.getBudgetUnitCost() != null && p.getBudgetUnitCost() > 0
+                                ? p.getBudgetUnitCost()
+                                : CouponTemplate.deriveUnitCost(
+                                        CouponType.of(p.getCouponType()),
+                                        p.getFaceValue(), p.getDiscountCap()))
                         .build(),
                 p.getIssuedCount(),
                 ApproveStatus.of(p.getApproveStatus()),

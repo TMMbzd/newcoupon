@@ -34,6 +34,12 @@ public enum ErrorCode {
     TEMPLATE_NOT_FOUND(2001, "券模板不存在"),
     TEMPLATE_NOT_RECEIVABLE(2002, "券模板不可领取（未发布/不在领取期/审批未通过）"),
     TEMPLATE_STATE_INVALID(2003, "模板状态不允许该操作"),
+    /**
+     * 营销活动不存在或不属于当前应用（V6 阶段 1C）。
+     * 两种原因统一一句文案：对开放面调用方区分"不存在"与"不归你"会暴露活动 id 的存在性
+     * （与兑换码防枚举同一立场）。
+     */
+    ACTIVITY_NOT_FOUND(2004, "营销活动不存在或不属于当前应用"),
 
     // ---- 3xxx 领券域 ----
     STOCK_OUT(3001, "已售罄"),
@@ -53,6 +59,12 @@ public enum ErrorCode {
     CODE_INVALID(3007, "兑换失败：码无效或已使用"),
     /** 兑换码批次查询/导出：batchNo 不存在或不属于当前应用（V6 阶段 1B） */
     CODE_BATCH_NOT_FOUND(3008, "兑换码批次不存在"),
+    /**
+     * 预算已耗尽（V6 阶段 1C）：活动预算账户 reserved+consumed 已达 total，
+     * 本次预占的条件更新打 0 行。只会在活动 budget_enabled=1 时出现——开关关着
+     * 的存量活动永远不会返回这个码。
+     */
+    BUDGET_EXHAUSTED(3009, "活动预算已耗尽"),
 
     // ---- 4xxx 用券域 ----
     USER_COUPON_NOT_FOUND(4001, "用户券不存在"),

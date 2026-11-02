@@ -18,6 +18,7 @@ import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.infrastructure.id.SnowflakeIdGenerator;
 import com.newcoupon.infrastructure.persistence.mapper.CouponCodeBatchMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponCodeMapper;
+import com.newcoupon.infrastructure.persistence.po.CouponBudgetReservationPO;
 import com.newcoupon.infrastructure.persistence.po.CouponCodeBatchPO;
 import com.newcoupon.infrastructure.persistence.po.CouponCodePO;
 import java.security.SecureRandom;
@@ -95,6 +96,7 @@ public class CouponCodeService {
     private final StringRedisTemplate redis;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
     private final String pepper;
+    private final BudgetService budgetService;
 
     public CouponCodeService(TemplateRepository templateRepository,
                              UserCouponRepository userCouponRepository,
@@ -105,6 +107,7 @@ public class CouponCodeService {
                              SnowflakeIdGenerator idGenerator,
                              StringRedisTemplate redis,
                              com.fasterxml.jackson.databind.ObjectMapper objectMapper,
+                             BudgetService budgetService,
                              @Value("${coupon.code.pepper}") String pepper) {
         this.templateRepository = templateRepository;
         this.userCouponRepository = userCouponRepository;
@@ -115,6 +118,7 @@ public class CouponCodeService {
         this.idGenerator = idGenerator;
         this.redis = redis;
         this.objectMapper = objectMapper;
+        this.budgetService = budgetService;
         this.pepper = pepper;
         if (DEV_DEFAULT_PEPPER.equals(pepper)) {
             // 不 fail-fast（默认值合法可用），但生产忘配 CODE_PEPPER 时必须有人看见：
@@ -392,7 +396,22 @@ public class CouponCodeService {
                     req.requestId(), ErrorCode.TEMPLATE_NOT_FOUND.getCode(), "模板不存在");
             throw new BizException(ErrorCode.TEMPLATE_NOT_FOUND);
         }
+        // 预算租约（V6 阶段 1C）：同同步领取的口径——活动开预算才预占一张，先于库存。
+        // 幂等重放（同 requestId 已有券）不占：那张券的预算在首次兑换时已确认。
+        // 预占放在 try 内：3009 走 BizException 出口，码必须同样回 ACTIVE
+        // （放在 try 外的话预算拒绝会把码永久卡在 LOCKED，直到超时回收）
+        CouponBudgetReservationPO budgetLease = null;
+        // 幂等预查只在预算闸门开着时才做：它是一次真实的 user_coupon SELECT，
+        // 放在闸门外会让"预算关=发放链路不多一条 SQL"的回滚承诺失效（审查发现）。
+        // 但预占本身必须留在 try 内：3009 要走 BizException 出口把码回 ACTIVE
+        boolean budgetOn = budgetService.gateOn(template);
+        boolean replayed = budgetOn && userCouponRepository.findByIdempotentKey(
+                req.userId(), template.getAppId(), redeemIdemKey(req.requestId())).isPresent();
         try {
+            if (budgetOn && !replayed) {
+                budgetLease = budgetService.tryReserveSingle(template,
+                        CouponBudgetReservationPO.BIZ_CODE, req.requestId());
+            }
             // 发券复用 C1：幂等/限领/库存/日限全部沿用既有链路。
             // 幂等键 redeem-{requestId} 派生自 requestId——同码同人重试返回原券；
             // 兜底回收后的重兑也在这一步命中幂等自愈（码回 USED、券不双发）
@@ -409,26 +428,38 @@ public class CouponCodeService {
                         req.requestId(), ErrorCode.REQUEST_DUPLICATED.getCode(),
                         "duplicated_reactivate:命中券 id=" + result.couponId()
                                 + " 非本码新发，返回原券不结算");
+                // duplicated 的券是之前那次兑换发的：预算当时已确认，本次预占释放
+                budgetService.settleSingle(budgetLease, false);
+                budgetLease = null;
                 return new CouponCodeRedeemResult(batch.getBatchNo(), result.couponId(),
                         result.templateCode(), result.faceValue(), result.validEnd(), true);
             }
             txService.markRedeemedWithLog(code.getId(), batch.getId(), callerApp,
                     req.userId(), req.requestId(), result.couponId());
+            // 新发的券：预占确认成消耗（一发一收）
+            budgetService.settleSingle(budgetLease, true);
+            budgetLease = null;
             return new CouponCodeRedeemResult(batch.getBatchNo(), result.couponId(),
                     result.templateCode(), result.faceValue(), result.validEnd(),
                     result.duplicated());
         } catch (BizException e) {
             // 售罄/限领/日限/模板不可领：券没发出去，码回 ACTIVE 允许补库存后再兑；
-            // 业务错原样抛给调用方（这类失败与码本身无关，不属于防枚举面）
+            // 业务错原样抛给调用方（这类失败与码本身无关，不属于防枚举面）。
+            // 预算同因释放（3009 预算耗尽也走这里：码没兑出去，预算不该被吃掉）
+            budgetService.releaseSingle(budgetLease);
+            budgetLease = null;
             txService.reactivateWithLog(code.getId(), batch.getId(), callerApp, req.userId(),
                     req.requestId(), e.getErrorCode().getCode(), e.getMessage());
             throw e;
         } catch (RuntimeException e) {
             // receive 已把 DataAccess 类翻译成 SYSTEM_ERROR，这里只剩真正的意外。
             // 状态未知（券可能已发）：码**保持 LOCKED** 交给超时回收——此刻盲目回
-            // ACTIVE，若券已发就打开"同码他人兑走"的归因窗口，保持 LOCKED 最保守
+            // ACTIVE，若券已发就打开"同码他人兑走"的归因窗口，保持 LOCKED 最保守。
+            // 预算租约同样保持开口（券可能已发，确认与否未知），交给僵尸预占回收——
+            // 盲目释放会在"券已发"时把预算退回池子造成超发
             log.error("code redeem unexpected failure: codeId={}, userId={}",
                     code.getId(), req.userId(), e);
+            budgetLease = null;
             txService.insertFailLog(batch.getId(), code.getId(), callerApp, req.userId(),
                     req.requestId(), "system_error:" + e.getClass().getSimpleName());
             throw new BizException(ErrorCode.SYSTEM_ERROR);

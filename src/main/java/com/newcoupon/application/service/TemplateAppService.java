@@ -42,20 +42,31 @@ public class TemplateAppService {
     private final CachedTemplateReader cachedTemplateReader;
     private final SettlePartyPolicy settlePartyPolicy;
     private final TemplatePublishTxService templatePublishTxService;
+    private final CachedActivityReader cachedActivityReader;
 
     /** C1 默认分片数；实际 N_eff=min(N,total_count)。字段初始化同时服务无 Spring 的单测。 */
     @Value("${coupon.stock.shard-count:16}")
     private int c1ShardCount = 16;
 
+    /**
+     * 建券时校验活动存在且归属一致（V6 阶段 1C）。默认 false：存量测试/调用方的
+     * activityId 多为字面量（1001），库里并无对应活动行——直接开校验会让全部存量
+     * 建券红。开=true 后建券必须引用真实活动（归属链：券→活动→app 与券自身一致）。
+     */
+    @Value("${coupon.activity.check-enabled:false}")
+    private boolean activityCheckEnabled = false;
+
     // 构造器注入（而非字段 @Autowired）：依赖显式、不可变、单测可直接 new——企业规范
     public TemplateAppService(TemplateRepository templateRepository,
                               CachedTemplateReader cachedTemplateReader,
                               SettlePartyPolicy settlePartyPolicy,
-                              TemplatePublishTxService templatePublishTxService) {
+                              TemplatePublishTxService templatePublishTxService,
+                              CachedActivityReader cachedActivityReader) {
         this.templateRepository = templateRepository;
         this.cachedTemplateReader = cachedTemplateReader;
         this.settlePartyPolicy = settlePartyPolicy;
         this.templatePublishTxService = templatePublishTxService;
+        this.cachedActivityReader = cachedActivityReader;
     }
 
     /** 建券：生成业务编码 → 聚合工厂校验 → 落库（通用限领 1~99 自 ADR-0006 开放） */
@@ -68,6 +79,18 @@ public class TemplateAppService {
                 && (req.settlePartyId() == null || req.settlePartyId().isBlank())) {
             throw new BizException(ErrorCode.PARAM_ERROR,
                     "商家出资/共担券必须绑定结算主体（settlePartyId）");
+        }
+        // 活动归属校验（1C，可关）：开启后 activityId 必须是真实存在且与新建模板同 app 的
+        // 活动。"不存在"与"不归你"同一句文案——区分它们=向探测者暴露活动 id 存在性
+        if (activityCheckEnabled) {
+            String ownerApp = AppOwnership.ownerForNewResource();
+            boolean activityOk = cachedActivityReader.get(req.activityId())
+                    .map(a -> ownerApp.equals(a.getAppId()))
+                    .orElse(false);
+            if (!activityOk) {
+                throw new BizException(ErrorCode.ACTIVITY_NOT_FOUND,
+                        "activityId=" + req.activityId());
+            }
         }
         String templateCode = generateCode();
         CouponTemplate template = CouponTemplate.create(CouponTemplate.Creation.builder()
@@ -100,6 +123,9 @@ public class TemplateAppService {
                 // 唯一库存模型：C1。
                 .stockShardCount(c1ShardCount)
                 .stockLayoutVersion(1)
+                // 单张预算成本（1C）：满减/无门槛=面额、满折=优惠上限，建券时算好写死
+                .budgetUnitCost(CouponTemplate.deriveUnitCost(
+                        CouponType.of(req.couponType()), req.faceValue(), req.discountCap()))
                 .build());
         CouponTemplate saved = templateRepository.save(template);
         log.info("template created: id={}, code={}, name={}, totalCount={}",

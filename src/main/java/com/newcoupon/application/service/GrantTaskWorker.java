@@ -61,6 +61,7 @@ public class GrantTaskWorker {
     private final CouponGrantTaskMapper taskMapper;
     private final CouponGrantItemMapper itemMapper;
     private final CouponCodeService couponCodeService;
+    private final BudgetService budgetService;
     private final RedisScanLock scanLock;
     private final String workerId;
     private final long budgetMs;
@@ -76,6 +77,7 @@ public class GrantTaskWorker {
                            CouponGrantTaskMapper taskMapper,
                            CouponGrantItemMapper itemMapper,
                            CouponCodeService couponCodeService,
+                           BudgetService budgetService,
                            RedisScanLock scanLock,
                            @Value("${coupon.grant.worker.budget-ms:60000}") long budgetMs,
                            @Value("${coupon.grant.worker.retry-backoff-base-ms:1000}") long backoffBaseMs,
@@ -88,6 +90,7 @@ public class GrantTaskWorker {
         this.taskMapper = taskMapper;
         this.itemMapper = itemMapper;
         this.couponCodeService = couponCodeService;
+        this.budgetService = budgetService;
         this.scanLock = scanLock;
         this.budgetMs = budgetMs;
         this.backoffBaseMs = backoffBaseMs;
@@ -143,6 +146,17 @@ public class GrantTaskWorker {
             }
         } catch (RuntimeException e) {
             log.warn("code reap failed (continue claiming)", e);
+        }
+        // 僵尸预算预占回收（V6 阶段 1C）同乘这班车：崩在"预占后、收口前"的预占
+        // 超时回池。失败同样不阻塞——残留预占只是占住池子到下一轮
+        try {
+            int budgetReaped = budgetService.expireStale();
+            if (budgetReaped > 0) {
+                log.warn("budget reservation reap: {} stale reservation(s) returned to pool",
+                        budgetReaped);
+            }
+        } catch (RuntimeException e) {
+            log.warn("budget reservation reap failed (continue claiming)", e);
         }
         if (!running.compareAndSet(false, true)) {
             return 0;
@@ -216,12 +230,12 @@ public class GrantTaskWorker {
             // 任务行不存在（理论不可能）：按取消收尾防 chunk 永远悬挂
             log.error("grant chunk references missing task: chunkId={}, taskId={}",
                     chunk.getId(), chunk.getTaskId());
-            txService.cancelChunk(chunk, workerId);
+            txService.cancelChunk(chunk, null, workerId);
             return;
         }
         if (task.getStatus() == CouponGrantTaskPO.STATUS_CANCELING
                 || task.getStatus() == CouponGrantTaskPO.STATUS_CANCELED) {
-            txService.cancelChunk(chunk, workerId);
+            txService.cancelChunk(chunk, task, workerId);
             return;
         }
         CouponTemplate template = templateRepository.findById(task.getTemplateId()).orElse(null);
@@ -234,7 +248,7 @@ public class GrantTaskWorker {
                 txService.completeItemFail(chunk, task.getId(), item.getId(),
                         ErrorCode.TEMPLATE_NOT_FOUND.getCode(), "模板不存在");
             }
-            txService.finishChunkPass(chunk, workerId, backoffUntil(chunk.getAttempt()));
+            txService.finishChunkPass(chunk, task, workerId, backoffUntil(chunk.getAttempt()));
             return;
         }
 
@@ -269,10 +283,10 @@ public class GrantTaskWorker {
             executeItem(task, template, chunk, item);
         }
         if (canceled) {
-            txService.cancelChunk(chunk, workerId);
+            txService.cancelChunk(chunk, task, workerId);
             return;
         }
-        txService.finishChunkPass(chunk, workerId, backoffUntil(chunk.getAttempt()));
+        txService.finishChunkPass(chunk, task, workerId, backoffUntil(chunk.getAttempt()));
     }
 
     /**
