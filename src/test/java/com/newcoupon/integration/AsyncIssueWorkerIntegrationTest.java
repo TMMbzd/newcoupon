@@ -61,6 +61,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
         "coupon.issue.worker.initial-delay-ms=3600000",
         "coupon.issue.worker.fixed-delay-ms=3600000",
         "coupon.issue.worker.batch-size=10",
+        // 重试上限压到 1：retry() 分类里 next >= max-retry 即判 DEAD（见 DEAD 用例）。
+        // 本类其余用例的裁决都一次到位（SUCCESS/REJECTED），不经过 retry 分支，不受影响。
+        "coupon.issue.worker.max-retry=1",
         "coupon.issue.gate-compensation.enabled=true",
         "coupon.issue.gate-compensation.initial-delay-ms=3600000",
         "coupon.issue.gate-compensation.fixed-delay-ms=3600000",
@@ -751,6 +754,34 @@ class AsyncIssueWorkerIntegrationTest extends ShardedIntegrationTestSupport {
 
     private static String ulKey(long templateId, long userId) {
         return "c:issue:ul:{" + templateId + "}:" + userId;
+    }
+
+    @Test
+    @DisplayName("重试耗尽：瞬时失败（分片全被冻结）在 retry_count 达到 max-retry 时 → DEAD(4)，不再退避")
+    void retryExhaustionMarksTaskDead() {
+        long templateId = createC1Template(10, 1, 0, 0);
+        long userId = USER.incrementAndGet();
+        CouponIssueTaskPO task = manualTask(templateId, userId, "worker-dead-1");
+        try {
+            // 冻结该模板的全部库存分片（status=1）：每片探测都被拒（used<quota 且 status=0 不再成立），
+            // 且 countActive=0 —— 这正是 process() 里"布局冻结/reshard 窗口"的判定，走 retry 分支
+            // 而不是 STOCK_OUT 终态拒绝。max-retry=1 时首次 retry 即 markDead。
+            jdbc.update("UPDATE coupon_stock_shard SET status = 1 WHERE template_id = ?", templateId);
+
+            worker.runOnce();
+
+            CouponIssueTaskPO dead = taskMapper.selectById(task.getId());
+            assertThat(dead.getStatus()).as("任务行必须落 DEAD 终态").isEqualTo(CouponIssueTaskPO.STATUS_DEAD);
+            assertThat(dead.getErrorCode()).isEqualTo(5000);
+            assertThat(dead.getErrorMsg()).as("留痕冻结原因，排查时能定位到 retry 分支")
+                    .contains("frozen");
+            // DEAD 不是发券成功：不能有券、库存不能被扣
+            assertThat(dead.getCouponId()).isNull();
+            assertThat(shardMapper.sumUsed(templateId)).isZero();
+        } finally {
+            // 恢复分片可用：模板行仍保留（与其它用例一致），冻结残留会被 C1 全量审计当成异常
+            jdbc.update("UPDATE coupon_stock_shard SET status = 0 WHERE template_id = ?", templateId);
+        }
     }
 
     @Test

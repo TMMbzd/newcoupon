@@ -7,12 +7,18 @@ import com.newcoupon.application.service.OpenAppService.CreateAppRequest;
 import com.newcoupon.common.crypto.OpenApiSignature;
 import com.newcoupon.domain.open.OpenApp;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.data.redis.RedisConnectionFailureException;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -34,6 +40,7 @@ import org.springframework.http.ResponseEntity;
  *   <li>时间戳超窗（6004）</li>
  *   <li>签名不匹配（6003）——含"改了 body 但签名没变"的完整性反例</li>
  *   <li>nonce 重放（6005）</li>
+ *   <li>nonce 消费时 Redis 故障 → fail-closed：503 + 5000（系统故障，不是放行也不是 6005）</li>
  * </ol>
  */
 @org.springframework.boot.test.context.SpringBootTest(
@@ -61,6 +68,16 @@ class OpenApiAuthIntegrationTest extends ShardedIntegrationTestSupport {
 
     @Autowired
     private TestRestTemplate rest;
+
+    /**
+     * 真实 Redis 的 Mockito 代理（默认行为 = 原样转发）。
+     * 只在 fail-closed 用例里临时把 {@code opsForValue()} 换成抛连接异常的桩，
+     * 用完 {@code reset} 恢复——本类其它用例（重放、六步链）都依赖真实 Redis。
+     * 不用 @MockBean 整体替换：WorkerIdLease 在容器启动期就要用真模板抢租约，
+     * 整体换成未打桩的 mock 会让上下文起不来。
+     */
+    @SpyBean
+    private StringRedisTemplate redisTemplate;
 
     /** 只在首个用例前建一次（@BeforeEach + CAS：不用 @BeforeAll 是因为它需要 PER_CLASS 实例，
      *  而 PER_CLASS 会让测试实例先于容器启动被创建——Spring 上下文提前加载，
@@ -218,6 +235,35 @@ class OpenApiAuthIntegrationTest extends ShardedIntegrationTestSupport {
                 APP_ID, secret, ts, nonce);
         assertThat(replay.getStatusCode().value()).as("原样重放必须被拒").isEqualTo(401);
         assertThat(replay.getBody()).contains("6005");
+    }
+
+    @Test
+    @DisplayName("反例⑥-补：nonce 消费时 Redis 故障 → 503 + 5000（fail-closed 拒绝，绝不放行也绝不误报 6005）")
+    void nonceRedisFailure_failsClosedWith503() {
+        // 签名/时间窗全部合法：保证六步链一定走到第 6 步 nonce，唯一的失败源就是注入的 Redis 故障。
+        // RedisIssueGate 那套故障注入手法（ReceiveAsyncRedisDownTest）mock 的是领域依赖，
+        // 这里过滤器直接持模板，所以在 StringRedisTemplate.opsForValue() 这一层注入。
+        @SuppressWarnings("unchecked")
+        ValueOperations<String, String> broken = Mockito.mock(ValueOperations.class);
+        Mockito.when(broken.setIfAbsent(Mockito.anyString(), Mockito.any(), Mockito.any(Duration.class)))
+                .thenThrow(new RedisConnectionFailureException("redis down (injected)"));
+        Mockito.doReturn(broken).when(redisTemplate).opsForValue();
+        try {
+            ResponseEntity<String> r = call(HttpMethod.GET, "/open/v1/coupons", "userId=123", null,
+                    APP_ID, secret, System.currentTimeMillis(), newNonce());
+
+            assertThat(r.getStatusCode().value())
+                    .as(String.valueOf(r.getBody()))
+                    .as("nonce 是安全防线：Redis 不可用时必须 fail-closed 拒绝（503），不能放行")
+                    .isEqualTo(503);
+            assertThat(r.getBody())
+                    .as("归因必须是系统故障 5000（可重试），绝不能是 6005——那等于告诉对方'你在重放'")
+                    .contains("5000")
+                    .doesNotContain("6005");
+        } finally {
+            // 恢复真实 Redis：spy 回到全量转发，本类其它用例不受影响
+            Mockito.reset(redisTemplate);
+        }
     }
 
     @Test

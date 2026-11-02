@@ -13,10 +13,13 @@ import com.newcoupon.application.dto.TradeDtos.RefundItem;
 import com.newcoupon.application.dto.TradeDtos.RefundRequest;
 import com.newcoupon.application.dto.TradeDtos.RefundResult;
 import com.newcoupon.application.service.DailyBillService;
+import com.newcoupon.application.service.OpenAppService;
+import com.newcoupon.application.service.OpenAppService.CreateAppRequest;
 import com.newcoupon.application.service.ReceiveAppService;
 import com.newcoupon.application.service.TemplateAppService;
 import com.newcoupon.application.service.TradeAppService;
 import com.newcoupon.common.BizException;
+import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.domain.coupon.CouponStatus;
 import com.newcoupon.domain.coupon.UsageStatus;
 import com.newcoupon.domain.repository.CouponUsageRepository;
@@ -61,6 +64,7 @@ class RefundIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired private TemplateAppService templateAppService;
     @Autowired private ReceiveAppService receiveAppService;
     @Autowired private TradeAppService tradeAppService;
+    @Autowired private OpenAppService openAppService;
     @Autowired private DailyBillService dailyBillService;
     @Autowired private CouponUsageRepository couponUsageRepository;
     @Autowired private UserCouponRepository userCouponRepository;
@@ -298,6 +302,71 @@ class RefundIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
+    @DisplayName("R14: 平台/商家共担（平台 30%）——分账双方都>0 且逐行守恒；退款按行内出资比例冲回双方")
+    void r14_splitFundingSharesAndProportionalRefund() {
+        // 与 confirmTwoLines 同一张"满100减20"券，唯一差别：出资方=3 共担、平台 30%。
+        // 14 参过渡构造器没有出资字段，这里用 21 参全量构造（后 7 参：范围/层级/互斥/出资）。
+        LocalDateTime start = LocalDateTime.now().minusDays(1);
+        LocalDateTime end = LocalDateTime.now().plusDays(30);
+        TemplateAppService.CreatedTemplate created = templateAppService.create(
+                new TemplateCreateRequest(
+                        "共担分账测试", 3102L, 1, 2000L, null, 10000L, 10L, 1, 1, start, end,
+                        null, null, null, null, null, null, null, 3, 30, "MCH-SPLIT-01"));
+        templateAppService.publish(created.id());
+
+        long userId = System.nanoTime();
+        ReceiveResult rcv = receiveAppService.receive(
+                new ReceiveRequest("refund-split", userId, created.id()));
+        LockResult lock = tradeAppService.lock(
+                new LockRequest("ORD-REFUND-SPLIT", userId, rcv.couponId()));
+        tradeAppService.confirm(new ConfirmRequest(lock.usageNo(), null, List.of(
+                new CalculateRequest.OrderItem("SKU_A", "CAT1", 6000L, 2, "L1"),
+                new CalculateRequest.OrderItem("SKU_B", "CAT1", 4000L, 2, "L2"))));
+
+        // 核销分账：券优惠 2000，平台 30% = 600，再按行优惠比例（1200/800）拆到行
+        List<CouponShareDetailPO> shares = shareDetailMapper.selectPositiveByUsageNo(lock.usageNo());
+        assertThat(shares).hasSize(2);
+        CouponShareDetailPO l1 = shares.stream()
+                .filter(s -> "L1".equals(s.getOrderLineNo())).findFirst().orElseThrow();
+        CouponShareDetailPO l2 = shares.stream()
+                .filter(s -> "L2".equals(s.getOrderLineNo())).findFirst().orElseThrow();
+
+        assertThat(l1.getPlatformBurden()).as("平台 600×(1200/2000)=360").isEqualTo(360L);
+        assertThat(l1.getMerchantBurden()).as("行内守恒：1200-360=840").isEqualTo(840L);
+        assertThat(l2.getPlatformBurden()).isEqualTo(240L);
+        assertThat(l2.getMerchantBurden()).isEqualTo(560L);
+        // 共担的判据是"双方都真的出了钱"，且每一行 平台+商家 == 该行优惠
+        assertThat(l1.getPlatformBurden()).isPositive();
+        assertThat(l1.getMerchantBurden()).isPositive();
+        assertThat(l1.getPlatformBurden() + l1.getMerchantBurden())
+                .isEqualTo(l1.getShareTotal());
+        assertThat(l2.getPlatformBurden() + l2.getMerchantBurden())
+                .isEqualTo(l2.getShareTotal());
+
+        // 部分退款：退 L1 一件 600，按行内比例冲回 平台 30% = 180 / 商家 420
+        RefundResult first = tradeAppService.refund(new RefundRequest(
+                lock.usageNo(), "RF-SPLIT-1", List.of(new RefundItem("L1", 1))));
+        assertThat(first.discountAmt()).isEqualTo(600L);
+        List<CouponRefundDetailPO> detail = refundDetailMapper.selectByRefundNo("RF-SPLIT-1");
+        assertThat(detail).hasSize(1);
+        assertThat(detail.get(0).getRefundPlatformAmt())
+                .as("冲回平台 360×600/1200=180").isEqualTo(180L);
+        assertThat(detail.get(0).getRefundMerchantAmt())
+                .as("冲回商家 600-180=420").isEqualTo(420L);
+
+        // 退剩余全部：两次退款合计把两方出资各自冲平（多一分少一分都是分账错了人）
+        RefundResult rest = tradeAppService.refund(
+                new RefundRequest(lock.usageNo(), "RF-SPLIT-2", null));
+        assertThat(rest.discountAmt()).as("L1 剩 600 + L2 整行 800").isEqualTo(1400L);
+        List<CouponRefundDetailPO> all = refundDetailMapper.selectByUsageNo(lock.usageNo());
+        assertThat(all).hasSize(3);
+        assertThat(all.stream().mapToLong(CouponRefundDetailPO::getRefundPlatformAmt).sum())
+                .as("平台累计冲回 == 平台总出资 600").isEqualTo(600L);
+        assertThat(all.stream().mapToLong(CouponRefundDetailPO::getRefundMerchantAmt).sum())
+                .as("商家累计冲回 == 商家总出资 1400").isEqualTo(1400L);
+    }
+
+    @Test
     @DisplayName("R10: 并发同号退款 → 一次成功一次重放，不能 500")
     void r10_concurrentSameRefundNo() throws Exception {
         Confirmed c = confirmTwoLines("R10");
@@ -455,5 +524,134 @@ class RefundIntegrationTest extends ShardedIntegrationTestSupport {
 
         assertThat(success).as("只能有一个占用单成功使用这个退款单号").isEqualTo(1);
         assertThat(conflict).as("另一个应报退款单号已被使用").contains("其他占用单");
+    }
+
+    // ------------------------------------------------------------------
+    // 多租户并发：两个 appId 各自的退款在同一瞬间进行
+    // ------------------------------------------------------------------
+
+    /** 在指定 appId 的"开放面身份"下执行——归属校验读的是 ThreadLocal 的 RequestContext */
+    private <T> T asApp(String appId, java.util.function.Supplier<T> action) {
+        RequestContext.set(new RequestContext(appId, "refund-r15", Long.MAX_VALUE, false));
+        try {
+            return action.get();
+        } finally {
+            RequestContext.clear();
+        }
+    }
+
+    /** 与 confirmTwoLines 同款两张行，但模板/券/占用单都登记在指定 appId 名下 */
+    private Confirmed confirmTwoLinesAs(String appId, String suffix) {
+        LocalDateTime start = LocalDateTime.now().minusDays(1);
+        LocalDateTime end = LocalDateTime.now().plusDays(30);
+        TemplateAppService.CreatedTemplate created = asApp(appId, () -> templateAppService.create(
+                new TemplateCreateRequest(
+                        "退款多租户-" + suffix, 3100L, 1, 2000L, null, 10000L,
+                        10L, 1, 1, start, end, null, null, null)));
+        asApp(appId, () -> {
+            templateAppService.publish(created.id());
+            return null;
+        });
+
+        long userId = System.nanoTime();
+        ReceiveResult rcv = asApp(appId, () -> receiveAppService.receive(
+                new ReceiveRequest("refund-" + suffix, userId, created.id())));
+        LockResult lock = asApp(appId, () -> tradeAppService.lock(
+                new LockRequest("ORD-REFUND-" + suffix, userId, rcv.couponId())));
+        asApp(appId, () -> {
+            tradeAppService.confirm(new ConfirmRequest(lock.usageNo(), null, List.of(
+                    new CalculateRequest.OrderItem("SKU_A", "CAT1", 6000L, 2, "L1"),
+                    new CalculateRequest.OrderItem("SKU_B", "CAT1", 4000L, 2, "L2"))));
+            return null;
+        });
+        return new Confirmed(created.id(), lock.usageNo(), rcv.couponId());
+    }
+
+    @Test
+    @DisplayName("R15: 两个 appId 并发各退各的占用单——金额正确、互不串扰、同号重放各自幂等")
+    void r15_concurrentRefundsAcrossTwoApps() throws Exception {
+        // 现有并发组 r10-r13 全是内部面单租户；这里建两个真实接入方，归属校验
+        // （AppOwnership）全程参与：线程身份与资源归属必须一一对应，乙退不到甲的账上。
+        String suffix = Long.toHexString(System.nanoTime());
+        String appIdA = "t-rf-a-" + suffix;
+        String appIdB = "t-rf-b-" + suffix;
+        openAppService.create(new CreateAppRequest(appIdA, "退款并发甲应用", null, null, null));
+        openAppService.create(new CreateAppRequest(appIdB, "退款并发乙应用", null, null, null));
+
+        Confirmed a = confirmTwoLinesAs(appIdA, "R15a");
+        Confirmed b = confirmTwoLinesAs(appIdB, "R15b");
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch go = new CountDownLatch(1);
+
+        Future<List<RefundResult>> f1 = pool.submit(() -> {
+            ready.countDown();
+            go.await();
+            try {
+                RequestContext.set(new RequestContext(appIdA, "refund-r15", Long.MAX_VALUE, false));
+                RefundResult first = tradeAppService.refund(new RefundRequest(
+                        a.usageNo(), "RF-R15-A", List.of(new RefundItem("L1", 1))));
+                RefundResult replay = tradeAppService.refund(new RefundRequest(
+                        a.usageNo(), "RF-R15-A", List.of(new RefundItem("L1", 1))));
+                return List.of(first, replay);
+            } finally {
+                RequestContext.clear();
+            }
+        });
+        Future<List<RefundResult>> f2 = pool.submit(() -> {
+            ready.countDown();
+            go.await();
+            try {
+                RequestContext.set(new RequestContext(appIdB, "refund-r15", Long.MAX_VALUE, false));
+                RefundResult first = tradeAppService.refund(new RefundRequest(
+                        b.usageNo(), "RF-R15-B", List.of(new RefundItem("L1", 1))));
+                RefundResult replay = tradeAppService.refund(new RefundRequest(
+                        b.usageNo(), "RF-R15-B", List.of(new RefundItem("L1", 1))));
+                return List.of(first, replay);
+            } finally {
+                RequestContext.clear();
+            }
+        });
+
+        assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+        go.countDown();
+        List<RefundResult> asA = f1.get(30, TimeUnit.SECONDS);
+        List<RefundResult> asB = f2.get(30, TimeUnit.SECONDS);
+        pool.shutdownNow();
+
+        // 各自成功且金额正确（L1 一件 = 1200/2）
+        assertThat(asA.get(0).discountAmt()).as("甲的首退金额").isEqualTo(600L);
+        assertThat(asA.get(0).duplicated()).isFalse();
+        assertThat(asB.get(0).discountAmt()).as("乙的首退金额").isEqualTo(600L);
+        assertThat(asB.get(0).duplicated()).isFalse();
+        // 同号重放各自幂等：返回首次结果，不再产生第二条明细
+        assertThat(asA.get(1).duplicated()).as("甲重放幂等").isTrue();
+        assertThat(asA.get(1).discountAmt()).isEqualTo(600L);
+        assertThat(asB.get(1).duplicated()).as("乙重放幂等").isTrue();
+        assertThat(asB.get(1).discountAmt()).isEqualTo(600L);
+
+        // 互不串扰：退款单落回各自的 usageNo 与 appId，明细行按 usageNo 各归各
+        var orderA = refundOrderMapper.selectByRefundNo("RF-R15-A");
+        assertThat(orderA.getUsageNo()).isEqualTo(a.usageNo());
+        assertThat(orderA.getAppId()).as("甲的退款单必须记在甲名下").isEqualTo(appIdA);
+        var orderB = refundOrderMapper.selectByRefundNo("RF-R15-B");
+        assertThat(orderB.getUsageNo()).isEqualTo(b.usageNo());
+        assertThat(orderB.getAppId()).isEqualTo(appIdB);
+
+        List<CouponRefundDetailPO> detailsA = refundDetailMapper.selectByUsageNo(a.usageNo());
+        assertThat(detailsA).as("甲重放不产生第二条明细").hasSize(1);
+        assertThat(detailsA.get(0).getAppId()).isEqualTo(appIdA);
+        assertThat(detailsA.get(0).getRefundDiscountAmt()).isEqualTo(600L);
+        List<CouponRefundDetailPO> detailsB = refundDetailMapper.selectByUsageNo(b.usageNo());
+        assertThat(detailsB).as("乙重放不产生第二条明细").hasSize(1);
+        assertThat(detailsB.get(0).getAppId()).isEqualTo(appIdB);
+        assertThat(detailsB.get(0).getRefundDiscountAmt()).isEqualTo(600L);
+
+        // 两边的占用单都停在"部分退款"：各退了 1/2 件，互不影响对方的终态
+        assertThat(couponUsageRepository.findByUsageNo(a.usageNo()).orElseThrow().getStatus())
+                .isEqualTo(UsageStatus.PARTIALLY_REFUNDED);
+        assertThat(couponUsageRepository.findByUsageNo(b.usageNo()).orElseThrow().getStatus())
+                .isEqualTo(UsageStatus.PARTIALLY_REFUNDED);
     }
 }
