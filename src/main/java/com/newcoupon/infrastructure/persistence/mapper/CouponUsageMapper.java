@@ -18,6 +18,11 @@ public interface CouponUsageMapper extends BaseMapper<CouponUsagePO> {
     @Select("SELECT * FROM coupon_usage WHERE usage_no = #{usageNo}")
     CouponUsagePO selectByUsageNo(@Param("usageNo") String usageNo);
 
+    /** 已拿到 userId 的调用方走这里：单分片命中，不再广播 64 张表。 */
+    @Select("SELECT * FROM coupon_usage WHERE usage_no = #{usageNo} AND user_id = #{userId}")
+    CouponUsagePO selectByUsageNoForUser(@Param("usageNo") String usageNo,
+                                         @Param("userId") long userId);
+
     /** 退款事务的行锁：带 user_id 单分片命中，锁住占用单后再算累计退款 */
     @Select("SELECT * FROM coupon_usage WHERE usage_no = #{usageNo} AND user_id = #{userId} FOR UPDATE")
     CouponUsagePO selectByUsageNoForUpdate(@Param("usageNo") String usageNo,
@@ -29,54 +34,65 @@ public interface CouponUsageMapper extends BaseMapper<CouponUsagePO> {
                                                   @Param("orderNo") String orderNo);
 
     @Update("UPDATE coupon_usage SET status = 1, discount_amt = #{discountAmt}, use_time = #{useTime} "
-            + "WHERE usage_no = #{usageNo} AND status = 0")
+            + "WHERE usage_no = #{usageNo} AND user_id = #{userId} AND status = 0")
     int casConfirm(@Param("usageNo") String usageNo,
+                   @Param("userId") long userId,
                    @Param("discountAmt") long discountAmt,
                    @Param("useTime") LocalDateTime useTime);
 
     /** 行级退款状态迁移（CAS）：已核销/部分退款 → 部分退款(6) 或 已退款(5) */
-    @Update("UPDATE coupon_usage SET status = #{target} WHERE usage_no = #{usageNo} AND status IN (1, 6)")
-    int casRefundState(@Param("usageNo") String usageNo, @Param("target") int target);
+    @Update("UPDATE coupon_usage SET status = #{target} "
+            + "WHERE usage_no = #{usageNo} AND user_id = #{userId} AND status IN (1, 6)")
+    int casRefundState(@Param("usageNo") String usageNo,
+                       @Param("userId") long userId,
+                       @Param("target") int target);
 
     @Update("UPDATE coupon_usage SET status = 2, release_time = #{releaseTime} "
-            + "WHERE usage_no = #{usageNo} AND status = 0")
+            + "WHERE usage_no = #{usageNo} AND user_id = #{userId} AND status = 0")
     int casRelease(@Param("usageNo") String usageNo,
+                   @Param("userId") long userId,
                    @Param("releaseTime") LocalDateTime releaseTime);
 
     // ---------- 环 2：支付后核销异常（CONFIRM_EXCEPTION=7） ----------
 
     /** 占用中 → 核销异常（CAS）：暂停 30 分钟超时释放，等人工处理 */
-    @Update("UPDATE coupon_usage SET status = 7 WHERE usage_no = #{usageNo} AND status = 0")
-    int casConfirmException(@Param("usageNo") String usageNo);
+    @Update("UPDATE coupon_usage SET status = 7 "
+            + "WHERE usage_no = #{usageNo} AND user_id = #{userId} AND status = 0")
+    int casConfirmException(@Param("usageNo") String usageNo, @Param("userId") long userId);
 
     /** 核销异常 → 已核销（人工按快照原价核销） */
     @Update("UPDATE coupon_usage SET status = 1, discount_amt = #{discountAmt}, use_time = #{useTime} "
-            + "WHERE usage_no = #{usageNo} AND status = 7")
+            + "WHERE usage_no = #{usageNo} AND user_id = #{userId} AND status = 7")
     int casConfirmFromException(@Param("usageNo") String usageNo,
+                                @Param("userId") long userId,
                                 @Param("discountAmt") long discountAmt,
                                 @Param("useTime") LocalDateTime useTime);
 
     /** 核销异常 → 已释放（人工确认订单已退款后释放；券状态由调用方按 LOCKED/EXPIRED 处理） */
     @Update("UPDATE coupon_usage SET status = 2, release_time = #{releaseTime} "
-            + "WHERE usage_no = #{usageNo} AND status = 7")
+            + "WHERE usage_no = #{usageNo} AND user_id = #{userId} AND status = 7")
     int casReleaseFromException(@Param("usageNo") String usageNo,
+                                @Param("userId") long userId,
                                 @Param("releaseTime") LocalDateTime releaseTime);
 
     // ---------- L2 过期关闭（2026-09-12）：占用单的第三种终结方式 ----------
 
     /** 按占用单号过期关闭（CAS）：占用中→过期关闭（核销被拒的收场路径） */
-    @Update("UPDATE coupon_usage SET status = 3 WHERE usage_no = #{usageNo} AND status = 0")
-    int casExpireByUsageNo(@Param("usageNo") String usageNo);
+    @Update("UPDATE coupon_usage SET status = 3 "
+            + "WHERE usage_no = #{usageNo} AND user_id = #{userId} AND status = 0")
+    int casExpireByUsageNo(@Param("usageNo") String usageNo, @Param("userId") long userId);
 
     /** 按券id过期关闭（CAS）：扫描器路径——券锁定中过期，占用单同步收尾 */
-    @Update("UPDATE coupon_usage SET status = 3 WHERE user_coupon_id = #{couponId} AND status = 0")
-    int casExpireByCouponId(@Param("couponId") long couponId);
+    @Update("UPDATE coupon_usage SET status = 3 "
+            + "WHERE user_coupon_id = #{couponId} AND user_id = #{userId} AND status = 0")
+    int casExpireByCouponId(@Param("couponId") long couponId, @Param("userId") long userId);
 
     // ---------- L5 锁定超时收场（2026-09-15） ----------
 
     /** 按占用单号超时关闭（CAS）：占用中→超时关闭（第四种终结：订单沉默，系统收场） */
-    @Update("UPDATE coupon_usage SET status = 4 WHERE usage_no = #{usageNo} AND status = 0")
-    int casTimeoutByUsageNo(@Param("usageNo") String usageNo);
+    @Update("UPDATE coupon_usage SET status = 4 "
+            + "WHERE usage_no = #{usageNo} AND user_id = #{userId} AND status = 0")
+    int casTimeoutByUsageNo(@Param("usageNo") String usageNo, @Param("userId") long userId);
 
     /** T+1 锁龄审计：仍占用中且锁龄超阈值的合同（漏注册任务的兜底，V7 idx_occupy 精确命中） */
     @Select("SELECT * FROM coupon_usage WHERE status = 0 AND occupy_time < #{threshold} LIMIT #{limit}")

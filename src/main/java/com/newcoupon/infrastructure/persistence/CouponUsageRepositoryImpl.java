@@ -29,6 +29,12 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
     }
 
     @Override
+    public Optional<CouponUsage> findByUsageNo(String usageNo, long userId) {
+        return Optional.ofNullable(mapper.selectByUsageNoForUser(usageNo, userId))
+                .map(CouponUsagePOConverter::toDomain);
+    }
+
+    @Override
     public java.util.List<CouponUsage> findByOrderNo(long userId, String orderNo) {
         return mapper.selectByOrderNo(userId, orderNo).stream()
                 .map(CouponUsagePOConverter::toDomain)
@@ -50,32 +56,32 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
     }
 
     @Override
-    public boolean casConfirm(String usageNo, long discountAmt, LocalDateTime useTime) {
-        return mapper.casConfirm(usageNo, discountAmt, useTime) == 1;
+    public boolean casConfirm(String usageNo, long userId, long discountAmt, LocalDateTime useTime) {
+        return mapper.casConfirm(usageNo, userId, discountAmt, useTime) == 1;
     }
 
     @Override
-    public boolean casRelease(String usageNo, LocalDateTime releaseTime) {
-        return mapper.casRelease(usageNo, releaseTime) == 1;
+    public boolean casRelease(String usageNo, long userId, LocalDateTime releaseTime) {
+        return mapper.casRelease(usageNo, userId, releaseTime) == 1;
     }
 
     // ---------- L2 过期关闭（2026-09-12） ----------
 
     @Override
-    public boolean casExpireByUsageNo(String usageNo) {
-        return mapper.casExpireByUsageNo(usageNo) == 1;
+    public boolean casExpireByUsageNo(String usageNo, long userId) {
+        return mapper.casExpireByUsageNo(usageNo, userId) == 1;
     }
 
     @Override
-    public boolean casExpireByCouponId(long userCouponId) {
-        return mapper.casExpireByCouponId(userCouponId) == 1;
+    public boolean casExpireByCouponId(long userCouponId, long userId) {
+        return mapper.casExpireByCouponId(userCouponId, userId) == 1;
     }
 
     // ---------- L5 锁定超时收场（2026-09-15） ----------
 
     @Override
-    public boolean casTimeoutByUsageNo(String usageNo) {
-        return mapper.casTimeoutByUsageNo(usageNo) == 1;
+    public boolean casTimeoutByUsageNo(String usageNo, long userId) {
+        return mapper.casTimeoutByUsageNo(usageNo, userId) == 1;
     }
 
     @Override
@@ -99,24 +105,26 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
     }
 
     @Override
-    public boolean casRefundState(String usageNo, com.newcoupon.domain.coupon.UsageStatus target) {
-        return mapper.casRefundState(usageNo, target.getCode()) == 1;
+    public boolean casRefundState(String usageNo, long userId,
+                                  com.newcoupon.domain.coupon.UsageStatus target) {
+        return mapper.casRefundState(usageNo, userId, target.getCode()) == 1;
     }
 
     // ---------- 环 2：支付后核销异常 ----------
 
     @Override
-    public boolean casConfirmException(String usageNo) {
-        return mapper.casConfirmException(usageNo) == 1;
+    public boolean casConfirmException(String usageNo, long userId) {
+        return mapper.casConfirmException(usageNo, userId) == 1;
     }
 
     @Override
-    public boolean casConfirmFromException(String usageNo, long discountAmt, LocalDateTime useTime) {
-        return mapper.casConfirmFromException(usageNo, discountAmt, useTime) == 1;
+    public boolean casConfirmFromException(String usageNo, long userId,
+                                           long discountAmt, LocalDateTime useTime) {
+        return mapper.casConfirmFromException(usageNo, userId, discountAmt, useTime) == 1;
     }
 
     @Override
-    public boolean casReleaseFromException(String usageNo, LocalDateTime releaseTime) {
-        return mapper.casReleaseFromException(usageNo, releaseTime) == 1;
+    public boolean casReleaseFromException(String usageNo, long userId, LocalDateTime releaseTime) {
+        return mapper.casReleaseFromException(usageNo, userId, releaseTime) == 1;
     }
 }

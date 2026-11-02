@@ -2,7 +2,6 @@ package com.newcoupon.infrastructure.id;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -51,9 +50,17 @@ public class SnowflakeIdGenerator {
     private long lastTimestamp = -1L;
     private long sequence = 0L;
 
+    /**
+     * 时钟回拨告警限流：WSL/NTP 大回拨时每个 ID 都打一行 ERROR，压测中 759 行日志
+     * 本身会变成发号热路径的 I/O 瓶颈（2026-10-23 实测）。用单调时钟按秒限流，
+     * 保留“发生过回拨”的可观测性，同时把日志量压到 1 行/秒。
+     */
+    private long lastRollbackLogNanos = 0L;
+    private long suppressedRollbackLogs = 0L;
+
     @org.springframework.beans.factory.annotation.Autowired   // 双构造器（另一个是测试用），指明主构造
-    public SnowflakeIdGenerator(@Value("${coupon.id.worker-id:1}") long workerId) {
-        this(workerId, 5L, System::currentTimeMillis);
+    public SnowflakeIdGenerator(WorkerIdLease lease) {
+        this(lease.workerId(), 5L, System::currentTimeMillis);
     }
 
     SnowflakeIdGenerator(long workerId, long maxBackoffMs, java.util.function.LongSupplier clock) {
@@ -75,8 +82,18 @@ public class SnowflakeIdGenerator {
             } else {
                 // 大回拨：借用未来毫秒（lastTimestamp+1 起继续）——保唯一/单调/可用，
                 // 牺牲的是 ID 内时间领先真实时钟（幅度=回拨量，罕见且有界）。ERROR 留痕供追查。
-                log.error("SNOWFLAKE CLOCK ROLLED BACK {}ms (>{}ms) — borrowing future timestamp "
-                        + "to keep ids unique; check NTP/host clock (WSL2 known issue)", backoff, maxBackoffMs);
+                long nowNanos = System.nanoTime();
+                if (lastRollbackLogNanos == 0L
+                        || nowNanos - lastRollbackLogNanos >= 1_000_000_000L) {
+                    log.error("SNOWFLAKE CLOCK ROLLED BACK {}ms (>{}ms) — borrowing future timestamp "
+                                    + "to keep ids unique; check NTP/host clock (WSL2 known issue); "
+                                    + "suppressed {} similar messages in last window",
+                            backoff, maxBackoffMs, suppressedRollbackLogs);
+                    lastRollbackLogNanos = nowNanos;
+                    suppressedRollbackLogs = 0L;
+                } else {
+                    suppressedRollbackLogs++;
+                }
                 now = lastTimestamp + 1;
             }
         }

@@ -26,4 +26,9 @@ public class CouponEventRepositoryImpl implements CouponEventRepository {
         po.setId(idGenerator.next());   // 雪花ID（批次二）
         mapper.insert(po);
     }
+
+    @Override
+    public long countIssuedByTemplateSince(long templateId, java.time.LocalDateTime since) {
+        return mapper.countIssuedByTemplateSince(templateId, since);
+    }
 }

@@ -16,9 +16,11 @@ import org.apache.ibatis.annotations.Update;
 @Mapper
 public interface UserCouponMapper extends BaseMapper<UserCouponPO> {
 
-    /** 幂等键查询（唯一索引 uk_idem 覆盖，等值双条件） */
-    @Select("SELECT * FROM user_coupon WHERE user_id = #{userId} AND idempotent_key = #{idempotentKey}")
+    /** 幂等键查询（唯一索引 uk_idem 覆盖，等值三条件；app_id 是多租户隔离维度） */
+    @Select("SELECT * FROM user_coupon WHERE user_id = #{userId} AND app_id = #{appId} "
+            + "AND idempotent_key = #{idempotentKey}")
     UserCouponPO selectByIdempotentKey(@Param("userId") long userId,
+                                       @Param("appId") String appId,
                                        @Param("idempotentKey") String idempotentKey);
 
     /** 券包列表（status 为 null 查全部），走 idx_user_status 覆盖。
@@ -53,6 +55,17 @@ public interface UserCouponMapper extends BaseMapper<UserCouponPO> {
 
     @Select("SELECT COALESCE(MAX(seq), 0) FROM user_coupon WHERE user_id = #{userId} AND template_id = #{templateId}")
     long maxSeqByUserAndTemplate(@Param("userId") long userId, @Param("templateId") long templateId);
+
+    /**
+     * 冷路径：已占用的 seq 列表，用于 MAX(seq)+1 超限时寻找空洞。
+     *
+     * <p>只在该用户已经到“最大序号加一超过限领”时调用；正常领取仍只读 MAX(seq)。
+     * 按 seq 升序返回，调用方用 {@code firstFree} 找最小空洞。
+     */
+    @Select("SELECT seq FROM user_coupon WHERE user_id = #{userId} AND template_id = #{templateId} "
+            + "ORDER BY seq")
+    java.util.List<Integer> selectSeqsByUserAndTemplate(@Param("userId") long userId,
+                                                        @Param("templateId") long templateId);
 
     /** L4 交叉核对：全部锁定中的券（idx_expire 的 status 等值前缀；在途锁定=小集合） */
     @Select("SELECT * FROM user_coupon WHERE status = 1 LIMIT #{limit}")

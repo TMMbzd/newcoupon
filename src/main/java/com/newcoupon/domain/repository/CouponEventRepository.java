@@ -11,4 +11,13 @@ public interface CouponEventRepository {
 
     /** 追加一条事件（与业务写入同事务，见 CouponIssueTxService） */
     void append(CouponEvent event);
+
+    /**
+     * 某模板从某时刻起已发放的事件数（对账/历史统计用）。
+     *
+     * <p><b>不在领取热路径</b>：热路径用 V27 {@code coupon_daily_counter} 条件自增。
+     * 选事件表而不是 user_coupon 是历史原因：事件表是单表且已有
+     * {@code (template_id, occur_time)} 索引，按 template_id 统计不会广播 64 张用户分表。
+     */
+    long countIssuedByTemplateSince(long templateId, java.time.LocalDateTime since);
 }

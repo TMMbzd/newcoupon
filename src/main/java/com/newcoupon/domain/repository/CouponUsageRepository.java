@@ -11,8 +11,11 @@ import java.util.Optional;
  */
 public interface CouponUsageRepository {
 
-    /** 按占用单号查询（uk_usage_no 覆盖）：幂等判断与回退裁判的第一步 */
+    /** 按占用单号查询（uk_usage_no 覆盖）：外部请求没有 userId 时的首次查询，允许广播。 */
     Optional<CouponUsage> findByUsageNo(String usageNo);
+
+    /** 已拿到 userId 的调用方：按 usageNo+userId 单分片查询，不广播 64 张表。 */
+    Optional<CouponUsage> findByUsageNo(String usageNo, long userId);
 
     /** 退款事务：带 user_id 单分片命中并锁住占用单（SELECT ... FOR UPDATE） */
     Optional<CouponUsage> findByUsageNoForUpdate(String usageNo, long userId);
@@ -28,35 +31,35 @@ public interface CouponUsageRepository {
     CouponUsage save(CouponUsage usage);
 
     /** 占用单核销（CAS）：占用中→已核销，同时写入实际抵扣金额与核销时间。返回是否成功 */
-    boolean casConfirm(String usageNo, long discountAmt, LocalDateTime useTime);
+    boolean casConfirm(String usageNo, long userId, long discountAmt, LocalDateTime useTime);
 
     /** 占用单释放（CAS）：占用中→已释放。返回是否成功 */
-    boolean casRelease(String usageNo, LocalDateTime releaseTime);
+    boolean casRelease(String usageNo, long userId, LocalDateTime releaseTime);
 
     /** 行级退款状态迁移（CAS）：已核销/部分退款 → 部分退款 或 已退款 */
-    boolean casRefundState(String usageNo, com.newcoupon.domain.coupon.UsageStatus target);
+    boolean casRefundState(String usageNo, long userId, com.newcoupon.domain.coupon.UsageStatus target);
 
     // ---------- 环 2：支付后核销异常 ----------
 
     /** 占用中 → 核销异常（CAS）：暂停超时释放，等人工处理 */
-    boolean casConfirmException(String usageNo);
+    boolean casConfirmException(String usageNo, long userId);
 
     /** 核销异常 → 已核销（人工按快照原价核销） */
-    boolean casConfirmFromException(String usageNo, long discountAmt, LocalDateTime useTime);
+    boolean casConfirmFromException(String usageNo, long userId, long discountAmt, LocalDateTime useTime);
 
     /** 核销异常 → 已释放（人工确认订单已退款后释放） */
-    boolean casReleaseFromException(String usageNo, LocalDateTime releaseTime);
+    boolean casReleaseFromException(String usageNo, long userId, LocalDateTime releaseTime);
 
     /** L2 过期关闭（CAS）：占用中→过期关闭（第三种终结：非核销非释放）。按占用单号 */
-    boolean casExpireByUsageNo(String usageNo);
+    boolean casExpireByUsageNo(String usageNo, long userId);
 
     /** L2 过期关闭（CAS）：按券id——扫描器路径（券锁定中过期，占用单同步收尾） */
-    boolean casExpireByCouponId(long userCouponId);
+    boolean casExpireByCouponId(long userCouponId, long userId);
 
     // ---------- L5 锁定超时收场（2026-09-15） ----------
 
     /** 超时关闭（CAS）：占用中→超时关闭（第四种终结：订单沉默，系统收场）。按占用单号 */
-    boolean casTimeoutByUsageNo(String usageNo);
+    boolean casTimeoutByUsageNo(String usageNo, long userId);
 
     /** T+1 锁龄审计：仍占用中且锁龄早于阈值的合同（漏注册任务兜底，走 idx_occupy） */
     java.util.List<CouponUsage> selectOverdueOccupying(LocalDateTime threshold, int limit);

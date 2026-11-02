@@ -99,6 +99,9 @@ public class TradeAppService {
         RequestContext.current().user(req.userId());   // S1 治理插槽：内部面自动 no-op
         // S1 越权防线：先确认这张券属于调用方。查不到券时不在这里报错——交给下面的原有逻辑报 4001，
         // 免得把"券不存在"和"券不属于你"变成两条不同的早期分支
+        // 这里不能用请求自报的 userId 做路由：userId 来自开放面 body，签名只认证 appId。
+        // 若用 findByIdForUser，非券主会路由落空并跳过归属校验，紧接着的占用单快查会广播到
+        // 别的租户的行。锁券预检故意保留一次广播：先拿到券做 appId 校验，再决定是否继续。
         userCouponRepository.findById(req.couponId())
                 .ifPresent(c -> AppOwnership.assertAccessible(c.getAppId(), "coupon:" + c.getId()));
         // 幂等快查（与领券同构）：锁券的幂等证据在占用单（usageNo 唯一），不在券状态上——
@@ -141,7 +144,7 @@ public class TradeAppService {
             throw new BizException(ErrorCode.SYSTEM_ERROR, "锁券冲突分类失败");
         } catch (TradeCasRejectedException e) {
             // 券状态 CAS 失败：新快照读券的真实状态分类
-            UserCoupon fresh = userCouponRepository.findById(req.couponId())
+            UserCoupon fresh = userCouponRepository.findByIdForUser(req.couponId(), req.userId())
                     .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
             if (fresh.getStatus() == CouponStatus.LOCKED) {
                 LockResult existing = idempotentLock(req);
@@ -186,7 +189,8 @@ public class TradeAppService {
     }
 
     private ConfirmResult doConfirm(ConfirmRequest req) {
-        assertUsageAccessible(req.usageNo());   // S1 越权防线（占用单只带 usageNo，需经券取归属）
+        // S1 越权防线（占用单只带 usageNo，需经券取归属）；返回的 usage 复用，避免二次广播。
+        CouponUsage accessibleUsage = assertUsageAccessible(req.usageNo());
 
         // 环 2：锁券带快照时，占用单上有唯一绑定。核销漏传 pricingId 也按绑定解析，
         // 防止调用方漏传后退回“按当前模板重算”——价格保证不能依赖调用方记性。
@@ -213,8 +217,10 @@ public class TradeAppService {
         List<LineShare> lineShares = List.of();
         ConfirmRequest txReq = req;   // 不重赋值参数 req（lambda 要求 effectively final）
         if (pricingRequested || itemsPresent) {
-            CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo())
-                    .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
+            CouponUsage usage = accessibleUsage;
+            if (usage == null) {
+                throw new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo());
+            }
 
             // 幂等优先：已核销的重复回调直接返回首次金额，不再进入整栈复算
             // （否则兄弟券退款后重放一次核销，会被“订单已进入售后”误伤）。
@@ -230,12 +236,14 @@ public class TradeAppService {
             // 锁券没带快照的占用单，不接受核销时临时塞一个 ID（否则可换价）。
             if (requestedPricingId != null && boundPricingId == null) {
                 String message = "该占用单未绑定价格快照，不能只凭核销请求携带 pricingId";
-                markConfirmExceptionQuietly(req.usageNo(), requestedPricingId, message);
+                markConfirmExceptionQuietly(req.usageNo(), usage.getUserId(),
+                        requestedPricingId, message);
                 throw new BizException(ErrorCode.PRICING_SNAPSHOT_INVALID, message);
             }
             if (requestedPricingId != null && !requestedPricingId.equals(boundPricingId)) {
                 String message = "核销 pricingId 与锁券时绑定的价格快照不一致";
-                markConfirmExceptionQuietly(req.usageNo(), requestedPricingId, message);
+                markConfirmExceptionQuietly(req.usageNo(), usage.getUserId(),
+                        requestedPricingId, message);
                 throw new BizException(ErrorCode.PRICING_SNAPSHOT_INVALID, message);
             }
 
@@ -259,7 +267,8 @@ public class TradeAppService {
                     // 用户已支付但快照无法核销：先把占用单钉在 CONFIRM_EXCEPTION，
                     // 不让 30 分钟超时任务把券放回可用（双重优惠）。标记失败不掩盖原错误。
                     if (e.getErrorCode() == ErrorCode.PRICING_SNAPSHOT_INVALID) {
-                        markConfirmExceptionQuietly(req.usageNo(), effectivePricingId, e.getMessage());
+                        markConfirmExceptionQuietly(req.usageNo(), usage.getUserId(),
+                                effectivePricingId, e.getMessage());
                     }
                     throw e;
                 }
@@ -284,7 +293,7 @@ public class TradeAppService {
                 txReq = new ConfirmRequest(req.usageNo(), snapshot.discountAmt(), null,
                         effectivePricingId);
             } else {
-                UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+                UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
                         .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
 
                 // 只让“当前生效”的合同参与优惠栈：占用中 + 已核销；已释放/过期/超时的合同不属于本单
@@ -331,19 +340,28 @@ public class TradeAppService {
         }
 
         try {
-            return tradeTxService.confirm(txReq, LocalDateTime.now(), split, lineShares);
+            // 入口已经广播查到 usage；把这一行的 userId 传给事务层，
+            // 事务层按 (usageNo,userId) 单分片读，不再第二次广播 64 张表。
+            return accessibleUsage == null
+                    ? tradeTxService.confirm(txReq, LocalDateTime.now(), split, lineShares)
+                    : tradeTxService.confirm(txReq, accessibleUsage.getUserId(),
+                            LocalDateTime.now(), split, lineShares);
         } catch (TradeCasRejectedException e) {
             // L2（2026-09-12）：券状态 CAS 拒绝且原因是"锁定期间过期"——
             // 先做收场（占用单过期关闭+券转已过期+事件），再按明确错误码拒绝。
             // 核销的守卫在 SQL 谓词里（valid_end > NOW()），这里的分类只是给准确的错误信息。
             if ("coupon-confirm".equals(e.getAction())) {
-                CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo()).orElse(null);
+                // 入口已经查到 usage 时直接复用；只有入口也未命中（老式路径）才广播兜底。
+                CouponUsage usage = accessibleUsage != null
+                        ? accessibleUsage
+                        : couponUsageRepository.findByUsageNo(req.usageNo()).orElse(null);
                 if (usage != null) {
-                    UserCoupon fresh = userCouponRepository.findById(usage.getUserCouponId()).orElse(null);
+                    UserCoupon fresh = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId()).orElse(null);
                     if (fresh != null && fresh.getStatus() == CouponStatus.LOCKED
                             && fresh.getValidEnd() != null && !fresh.getValidEnd().isAfter(LocalDateTime.now())) {
                         try {
-                            tradeTxService.expireOnLock(req.usageNo(), fresh.getId(), LocalDateTime.now());
+                            tradeTxService.expireOnLock(req.usageNo(), fresh.getId(),
+                                    usage.getUserId(), LocalDateTime.now());
                         } catch (TradeCasRejectedException | BizException race) {
                             // 收场竞态（2026-10-15 二轮补）：另一请求已抢先收场（或占用单已非占用中）——
                             // 对外语义不变（券已过期、单已收场）；不把内部 CAS 信号漏出去
@@ -360,9 +378,12 @@ public class TradeAppService {
     }
 
     public ReleaseResult release(ReleaseRequest req) {
-        assertUsageAccessible(req.usageNo());   // S1 越权防线
+        CouponUsage accessibleUsage = assertUsageAccessible(req.usageNo());   // S1 越权防线
         try {
-            return tradeTxService.release(req, LocalDateTime.now());
+            // 复用入口查到的 userId，事务层不再广播第二次。
+            return accessibleUsage == null
+                    ? tradeTxService.release(req, LocalDateTime.now())
+                    : tradeTxService.release(req, accessibleUsage.getUserId(), LocalDateTime.now());
         } catch (TradeCasRejectedException e) {
             // 释放 CAS 失败（占用单或券状态竞争失败）——事务已整体回滚，按状态冲突报告
             throw freshStateConflict("释放", e);
@@ -377,10 +398,14 @@ public class TradeAppService {
      *
      * <p>占用单不存在时不在这里报错——交给原有逻辑报 4003，保持错误语义不变。
      */
-    private void assertUsageAccessible(String usageNo) {
-        couponUsageRepository.findByUsageNo(usageNo).ifPresent(usage ->
-                userCouponRepository.findById(usage.getUserCouponId()).ifPresent(coupon ->
-                        AppOwnership.assertAccessible(coupon.getAppId(), "usage:" + usageNo)));
+    private CouponUsage assertUsageAccessible(String usageNo) {
+        CouponUsage usage = couponUsageRepository.findByUsageNo(usageNo).orElse(null);
+        if (usage != null) {
+            userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
+                    .ifPresent(coupon ->
+                            AppOwnership.assertAccessible(coupon.getAppId(), "usage:" + usageNo));
+        }
+        return usage;
     }
 
     /** 券包列表（status 可选过滤） */
@@ -465,9 +490,11 @@ public class TradeAppService {
         }
     }
 
-    private void markConfirmExceptionQuietly(String usageNo, String pricingId, String reason) {
+    private void markConfirmExceptionQuietly(String usageNo, long userId, String pricingId,
+                                             String reason) {
         try {
-            tradeTxService.markConfirmException(usageNo, pricingId, reason, LocalDateTime.now());
+            tradeTxService.markConfirmException(usageNo, userId, pricingId, reason,
+                    LocalDateTime.now());
         } catch (RuntimeException e) {
             log.error("mark confirm exception failed: usageNo={} pricingId={}", usageNo, pricingId, e);
         }
@@ -572,11 +599,13 @@ public class TradeAppService {
     }
 
     private RefundResult doRefund(RefundRequest req) {
-        assertUsageAccessible(req.usageNo());
+        // 越权校验已经查过 usage，直接复用，避免同一请求第二次广播 64 张表。
+        CouponUsage usage = assertUsageAccessible(req.usageNo());
+        if (usage == null) {
+            throw new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo());
+        }
         // 政策按“券的 appId”解析：内部面没有请求上下文，但券一定属于某个租户。
-        CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo())
-                .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
-        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
         RefundPolicy policy = refundPolicyService.resolve(coupon.getAppId());
 
@@ -588,7 +617,9 @@ public class TradeAppService {
         }
         RefundRequest normalized = new RefundRequest(req.usageNo(), refundNo, req.items());
         try {
-            return tradeTxService.refundConfirm(normalized, LocalDateTime.now(), policy);
+            // usage 已由入口广播查到；事务层首读按 userId 单分片，锁行仍用快照 userId。
+            return tradeTxService.refundConfirm(normalized, usage.getUserId(),
+                    LocalDateTime.now(), policy);
         } catch (TradeCasRejectedException e) {
             throw freshStateConflict("退款", e);
         }

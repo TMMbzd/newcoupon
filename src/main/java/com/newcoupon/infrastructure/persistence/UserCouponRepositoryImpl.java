@@ -24,8 +24,8 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     }
 
     @Override
-    public Optional<UserCoupon> findByIdempotentKey(long userId, String idempotentKey) {
-        return Optional.ofNullable(mapper.selectByIdempotentKey(userId, idempotentKey))
+    public Optional<UserCoupon> findByIdempotentKey(long userId, String appId, String idempotentKey) {
+        return Optional.ofNullable(mapper.selectByIdempotentKey(userId, appId, idempotentKey))
                 .map(UserCouponPOConverter::toDomain);
     }
 
@@ -49,6 +49,11 @@ public class UserCouponRepositoryImpl implements UserCouponRepository {
     @Override
     public long maxSeqByUserAndTemplate(long userId, long templateId) {
         return mapper.maxSeqByUserAndTemplate(userId, templateId);
+    }
+
+    @Override
+    public List<Integer> findSeqsByUserAndTemplate(long userId, long templateId) {
+        return mapper.selectSeqsByUserAndTemplate(userId, templateId);
     }
 
     @Override

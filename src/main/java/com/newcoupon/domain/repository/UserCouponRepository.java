@@ -11,20 +11,44 @@ import java.util.Optional;
  */
 public interface UserCouponRepository {
 
-    /** 按幂等键查询（唯一索引 uk_idem 覆盖）：幂等快查与 DuplicateKey 冲突分类用 */
-    Optional<UserCoupon> findByIdempotentKey(long userId, String idempotentKey);
+    /** 按幂等键查询（唯一索引 uk_idem 覆盖）：幂等快查与 DuplicateKey 冲突分类用。
+     *  appId 是多租户隔离维度；同一 user+requestId 在不同租户下是不同请求。 */
+    Optional<UserCoupon> findByIdempotentKey(long userId, String appId, String idempotentKey);
 
     /** 按模板数券（ADR-0008 第二不变式）：对账修复前的守卫互证 issued_count ↔ COUNT(user_coupon) */
     long countByTemplate(long templateId);
 
-    /** L3 计数自愈：用户对模板的实际领取行数（DB 权威值，撞 uk_user_seq 时取） */
+    /**
+     * L3 计数自愈/对账：用户对模板的实际领取行数。
+     *
+     * <p><b>不在领取热路径</b>：热路径每人总限用 {@link #maxSeqByUserAndTemplate}。
+     * 本方法会对 user_coupon 做 COUNT，只用于低频自愈、对账和测试。
+     */
     long countByUserAndTemplate(long userId, long templateId);
 
-    /** L42①（2026-09-30）：当日已领行数（数据库权威值）——日限计数虚高时复核用 */
+    /**
+     * L42① 当日已领行数：日限计数虚高时复核用。
+     *
+     * <p><b>不在领取热路径</b>：热路径用 V27 {@code coupon_user_daily_counter} 条件自增。
+     */
     long countTodayByUserAndTemplate(long userId, long templateId, java.time.LocalDateTime dayStart);
 
-    /** L3 自愈的序号来源：最大 seq（空洞免疫——下一序号必须大于全部现有） */
+    /**
+     * 领取热路径的每人总限来源：最大 seq。
+     *
+     * <p>seq 由 {@code uk_user_seq} 保证唯一；正常路径用 max(seq)+1 分配下一个序号。
+     * 最大序号加一超过每人限领时不直接判达限——异步预分配的 seq 可能因任务拒绝留下空洞；
+     * 调用方走冷路径 {@link #findSeqsByUserAndTemplate} 找最小空闲序号。
+     */
     long maxSeqByUserAndTemplate(long userId, long templateId);
+
+    /**
+     * 冷路径：用户在该模板上已占用的 seq（升序）。
+     *
+     * <p>只在 max(seq)+1 超过限领时调用，用来区分“真的领满”和“序号空洞”；
+     * 不进入正常领取热路径。列表最多 {@code perUserLimit} 个元素（上限 99）。
+     */
+    List<Integer> findSeqsByUserAndTemplate(long userId, long templateId);
 
     /** L4 交叉核对：全部锁定中的券（在途锁定=小集合） */
     List<UserCoupon> selectLocked(int limit);

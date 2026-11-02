@@ -22,9 +22,15 @@ public interface CouponOutboxMapper extends BaseMapper<CouponOutboxPO> {
     List<CouponOutboxPO> selectDispatchable(@Param("now") LocalDateTime now,
                                             @Param("limit") int limit);
 
-    /** 投递成功：CAS 置已投递（带 status=0 条件——多实例/重复扫并发安全） */
-    @Update("UPDATE coupon_outbox SET status = 1 WHERE id = #{id} AND status = 0")
-    int markDispatched(@Param("id") long id);
+    /**
+     * 一批投递成功后一次提交。逐行 markDispatched 是 autocommit，100 行 = 100 次 fsync；
+     * 与 worker 的领券事务抢磁盘时，投递器会把 worker 吞吐压到几十 TPS（2026-10-23 压测实测）。
+     * 单条 IN 更新既保持 CAS（status=0），又把 100 次提交摊成 1 次。
+     */
+    @Update("<script>UPDATE coupon_outbox SET status = 1 WHERE status = 0 AND id IN "
+            + "<foreach item='id' collection='ids' open='(' separator=',' close=')'>#{id}</foreach>"
+            + "</script>")
+    int markDispatchedBatch(@Param("ids") java.util.List<Long> ids);
 
     /** 投递失败：退避重试（2^retry 秒）——幂等重入，每次失败 retry+1、顺延下次 */
     @Update("UPDATE coupon_outbox SET retry_count = retry_count + 1, "

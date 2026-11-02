@@ -40,16 +40,18 @@ public final class CouponEvent {
     /**
      * 发放事件。
      *
-     * <p>event_no 生成规则（ADR-0004 增补3）：{@code "RCV:" + userId + ":" + requestId}——
-     * 作用域与领券幂等键 (user_id, idempotent_key) 对齐：同一用户重放同一请求生成同一编号，
-     * 被 uk_event_no 唯一索引撞掉（事件不可被重放污染）；不同用户撞了相同 requestId 也不会误撞编号。
+     * <p>event_no 生成规则（ADR-0004 增补3 + V28）：{@code "RCV:" + appId + ":" + userId + ":" + requestId}——
+     * 作用域与 V28 的领券幂等键 (user_id, app_id, idempotent_key) 对齐：同一租户内重放同一请求
+     * 生成同一编号，被 uk_event_no 唯一索引撞掉；同一 user+requestId 在两个租户下是不同请求，
+     * 必须生成不同编号，否则第二家的发放事务会撞事件唯一键并整体回滚。
      *
      * <p>amount 口径：发放事件不填（NULL）——面额不是实际抵扣额，核销事件才记真实抵扣金额（docs/01 4.2 第5表注释）。
      * 发放事件的 amount 若填 face_value，对账时"优惠总成本"会被未核销的券虚增。
      */
     public static CouponEvent issued(UserCoupon coupon, LocalDateTime now) {
         return new CouponEvent(null,
-                BoundedKey.of("RCV:", coupon.getUserId() + ":" + coupon.getIdempotentKey()),
+                BoundedKey.of("RCV:", coupon.getAppId() + ":" + coupon.getUserId()
+                        + ":" + coupon.getIdempotentKey()),
                 EventType.ISSUED, coupon.getTemplateId(), coupon.getId(), coupon.getUserId(),
                 null, null, now);
     }

@@ -5,9 +5,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import javax.sql.DataSource;
+import com.zaxxer.hikari.HikariDataSource;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -119,6 +121,10 @@ public class ShardingDataSourceConfig {
     @Value("${coupon.sharding.pool.connection-timeout-ms:3000}")
     private long poolConnectionTimeoutMs;
 
+    /** 异步 worker 物理表批量写专用连接池；默认小池，避免与业务池争连接。 */
+    @Value("${coupon.issue.worker.raw-bulk-pool-size:4}")
+    private int rawBulkPoolSize;
+
     @Bean
     @Primary
     public DataSource shardingDataSource() throws IOException {
@@ -149,6 +155,34 @@ public class ShardingDataSourceConfig {
 
         DriverManagerDataSource ds = new DriverManagerDataSource("jdbc:shardingsphere:absolutepath:" + tmp.toAbsolutePath());
         ds.setDriverClassName("org.apache.shardingsphere.driver.ShardingSphereDriver");
+        return ds;
+    }
+
+    /**
+     * 裸库连接池：只给异步 worker 的“物理表批量写”使用。
+     *
+     * <p>为什么不走 ShardingSphere：同一份 8000 行写入，裸 MySQL 约 0.76 s，经 ShardingSphere
+     * 解析/改写后约 4–5 s（2026-10-23 本机实测）。worker 已经算好 user_id%64 与库存分片，
+     * 物理表名是确定的，没必要让中间件再逐行解析；单任务路径仍走 ShardingSphere，批量路径
+     * 失败也回退到它，所以它不是唯一写入通道。
+     *
+     * <p>独立小池 + @Lazy：worker 关闭或未走批量写时不建立连接。这里必须用无参构造再 set，
+     * 不能用 {@code new HikariDataSource(config)}：后者会在构造函数里立刻启动连接池，
+     * 即使 @Lazy 也挡不住 actuator 把 {@code Map<String, DataSource>} 注入健康检查。
+     * 无参对象的池在第一次 {@code getConnection()} 时才创建。
+     */
+    @Bean(name = "rawBulkDataSource", destroyMethod = "close")
+    @Lazy
+    public HikariDataSource rawBulkDataSource() {
+        // 无参构造不会启动池；set 完后由第一次 getConnection() 初始化 HikariPool。
+        HikariDataSource ds = new HikariDataSource();
+        ds.setJdbcUrl(url);
+        ds.setUsername(username);
+        ds.setPassword(password);
+        ds.setMaximumPoolSize(Math.max(1, rawBulkPoolSize));
+        ds.setMinimumIdle(0);
+        ds.setConnectionTimeout(Math.max(1000, poolConnectionTimeoutMs));
+        ds.setPoolName("raw-bulk");
         return ds;
     }
 }

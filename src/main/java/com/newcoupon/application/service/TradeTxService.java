@@ -165,7 +165,7 @@ public class TradeTxService {
 
     @Transactional
     public ConfirmResult confirm(ConfirmRequest req, LocalDateTime now, FundingSplit split) {
-        return confirm(req, now, split, java.util.List.of());
+        return doConfirm(req, null, now, split, java.util.List.of());
     }
 
     /**
@@ -178,7 +178,23 @@ public class TradeTxService {
     @Transactional
     public ConfirmResult confirm(ConfirmRequest req, LocalDateTime now, FundingSplit split,
                                  java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares) {
-        CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo())
+        return doConfirm(req, null, now, split, lineShares);
+    }
+
+    /**
+     * 编排层已经通过入口查询拿到了占用单的 userId：按 (usageNo, userId) 单分片读，
+     * 不再让事务层重复广播 64 张物理表。userId 必须是数据库里那一行的值，
+     * 不能直接使用外部请求自报的 userId（签名只认证 appId）。
+     */
+    @Transactional
+    public ConfirmResult confirm(ConfirmRequest req, long userId, LocalDateTime now, FundingSplit split,
+                                 java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares) {
+        return doConfirm(req, userId, now, split, lineShares);
+    }
+
+    private ConfirmResult doConfirm(ConfirmRequest req, Long userId, LocalDateTime now, FundingSplit split,
+                                    java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares) {
+        CouponUsage usage = readUsage(req.usageNo(), userId)
                 .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
         if (usage.getStatus() == UsageStatus.CONFIRMED) {
             // 幂等：支付回调重复推送，第一次已核销——直接当成功返回
@@ -186,10 +202,10 @@ public class TradeTxService {
                     usage.getDiscountAmt(), true);
         }
         usage.checkConfirmable();   // RELEASED → 拒绝
-        if (!couponUsageRepository.casConfirm(req.usageNo(), req.discountAmt(), now)) {
+        if (!couponUsageRepository.casConfirm(req.usageNo(), usage.getUserId(), req.discountAmt(), now)) {
             throw new TradeCasRejectedException("usage-confirm", req.usageNo());
         }
-        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
         if (!userCouponRepository.casConfirm(usage.getUserCouponId(), usage.getUserId())) {
             throw new TradeCasRejectedException("coupon-confirm", usage.getUserCouponId());
@@ -281,14 +297,26 @@ public class TradeTxService {
     @Transactional
     public boolean markConfirmException(String usageNo, String pricingId, String reason,
                                         LocalDateTime now) {
-        CouponUsage usage = couponUsageRepository.findByUsageNo(usageNo).orElse(null);
+        return doMarkConfirmException(usageNo, null, pricingId, reason, now);
+    }
+
+    /** 编排层已持有 usage.userId：单分片读；参数语义同上面的兼容入口。 */
+    @Transactional
+    public boolean markConfirmException(String usageNo, long userId, String pricingId, String reason,
+                                        LocalDateTime now) {
+        return doMarkConfirmException(usageNo, userId, pricingId, reason, now);
+    }
+
+    private boolean doMarkConfirmException(String usageNo, Long userId, String pricingId,
+                                           String reason, LocalDateTime now) {
+        CouponUsage usage = readUsage(usageNo, userId).orElse(null);
         if (usage == null || usage.getStatus() != UsageStatus.OCCUPYING) {
             return false;
         }
-        if (!couponUsageRepository.casConfirmException(usageNo)) {
+        if (!couponUsageRepository.casConfirmException(usageNo, usage.getUserId())) {
             return false;
         }
-        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId()).orElse(null);
+        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId()).orElse(null);
         if (coupon != null) {
             couponEventRepository.append(CouponEvent.confirmException(coupon, usage, now));
         }
@@ -332,10 +360,10 @@ public class TradeTxService {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
                     "占用单状态=" + usage.getStatus().getDesc() + "，仅核销异常可人工核销");
         }
-        if (!couponUsageRepository.casConfirmFromException(usageNo, discountAmt, now)) {
+        if (!couponUsageRepository.casConfirmFromException(usageNo, usage.getUserId(), discountAmt, now)) {
             throw new TradeCasRejectedException("usage-confirm-exception", usageNo);
         }
-        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
         if (coupon.getStatus() != CouponStatus.LOCKED) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
@@ -372,10 +400,10 @@ public class TradeTxService {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
                     "占用单状态=" + usage.getStatus().getDesc() + "，仅核销异常可人工释放");
         }
-        if (!couponUsageRepository.casReleaseFromException(usageNo, now)) {
+        if (!couponUsageRepository.casReleaseFromException(usageNo, usage.getUserId(), now)) {
             throw new TradeCasRejectedException("usage-release-exception", usageNo);
         }
-        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
         if (coupon.getStatus() == CouponStatus.LOCKED) {
             CouponStateMachine.transit(coupon.getStatus(), CouponTransition.RELEASE);
@@ -390,8 +418,19 @@ public class TradeTxService {
         couponEventRepository.append(CouponEvent.released(coupon, usage, now));
         couponConfirmExceptionMapper.markResolved(usageNo, "RELEASED",
                 truncate(resolveReason, 512), now);
-        UserCoupon fresh = userCouponRepository.findById(usage.getUserCouponId()).orElse(coupon);
+        UserCoupon fresh = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId()).orElse(coupon);
         return new ReleaseResult(usageNo, fresh.getStatus().getDesc(), false);
+    }
+
+    /**
+     * 占用单读取的唯一分派点：有可信 userId 走单分片，没有才保留一次广播。
+     * 外部入口只有 usageNo，第一次广播不可避免；拿到 userId 后，
+     * 事务层、错误收场和重放都不应再广播。
+     */
+    private java.util.Optional<CouponUsage> readUsage(String usageNo, Long userId) {
+        return userId == null
+                ? couponUsageRepository.findByUsageNo(usageNo)
+                : couponUsageRepository.findByUsageNo(usageNo, userId);
     }
 
     private static String truncate(String value, int max) {
@@ -409,16 +448,26 @@ public class TradeTxService {
      */
     @Transactional
     public void expireOnLock(String usageNo, long couponId, LocalDateTime now) {
-        CouponUsage usage = couponUsageRepository.findByUsageNo(usageNo)
+        doExpireOnLock(usageNo, couponId, null, now);
+    }
+
+    /** 编排层已持有 usage.userId：单分片读；参数语义同兼容入口。 */
+    @Transactional
+    public void expireOnLock(String usageNo, long couponId, long userId, LocalDateTime now) {
+        doExpireOnLock(usageNo, couponId, userId, now);
+    }
+
+    private void doExpireOnLock(String usageNo, long couponId, Long userId, LocalDateTime now) {
+        CouponUsage usage = readUsage(usageNo, userId)
                 .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, usageNo));
         if (usage.getStatus() != UsageStatus.OCCUPYING) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
                     "占用单状态=" + usage.getStatus().getDesc() + "，仅占用中可过期关闭");
         }
-        UserCoupon coupon = userCouponRepository.findById(couponId)
+        UserCoupon coupon = userCouponRepository.findByIdForUser(couponId, usage.getUserId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND, "id=" + couponId));
         CouponStateMachine.transit(coupon.getStatus(), CouponTransition.EXPIRE_ON_LOCK);  // 快检：LOCKED→EXPIRED
-        if (!couponUsageRepository.casExpireByUsageNo(usageNo)) {
+        if (!couponUsageRepository.casExpireByUsageNo(usageNo, usage.getUserId())) {
             throw new TradeCasRejectedException("usage-expire", usageNo);
         }
         if (!userCouponRepository.casExpireOnLock(couponId, usage.getUserId())) {
@@ -436,11 +485,23 @@ public class TradeTxService {
      */
     @Transactional
     public boolean timeoutClose(String usageNo, LocalDateTime now) {
-        CouponUsage usage = couponUsageRepository.findByUsageNo(usageNo).orElse(null);
+        return doTimeoutClose(usageNo, null, now);
+    }
+
+    /** 扫描器已持有 task.userId：按 usageNo+userId 单分片读，不再广播 64 张表。 */
+    @Transactional
+    public boolean timeoutClose(String usageNo, long userId, LocalDateTime now) {
+        return doTimeoutClose(usageNo, userId, now);
+    }
+
+    private boolean doTimeoutClose(String usageNo, Long userId, LocalDateTime now) {
+        CouponUsage usage = (userId == null
+                ? couponUsageRepository.findByUsageNo(usageNo)
+                : couponUsageRepository.findByUsageNo(usageNo, userId)).orElse(null);
         if (usage == null || usage.getStatus() != UsageStatus.OCCUPYING) {
             return false;   // 已核销/已释放/已过期关闭/已超时关闭——窗口内订单说过话，或已收场过
         }
-        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId()).orElse(null);
+        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId()).orElse(null);
         if (coupon == null || coupon.getStatus() != CouponStatus.LOCKED) {
             return false;   // 券已不在锁定态（异常残留）——不动，交由审计/人工
         }
@@ -450,7 +511,7 @@ public class TradeTxService {
         // 同时进行时形成 AB-BA 死锁（数据库会终止其中一方；核销侧被终止时调用方收 500）。
         // 第一刀占用单当裁决：砍空 = 有并发者抢先收场（核销/释放/过期收场恰在同瞬间完成）——
         // 什么都没改，安全返回 false（订单其实说过话，无需收场）。
-        if (!couponUsageRepository.casTimeoutByUsageNo(usageNo)) {
+        if (!couponUsageRepository.casTimeoutByUsageNo(usageNo, usage.getUserId())) {
             return false;
         }
         // 第二刀券砍空 = 异常残留（持有占用单锁之后，其余链路都被挡在占用单外，理论上无人能再动券）——
@@ -465,28 +526,38 @@ public class TradeTxService {
 
     @Transactional
     public ReleaseResult release(ReleaseRequest req, LocalDateTime now) {
-        CouponUsage usage = couponUsageRepository.findByUsageNo(req.usageNo())
+        return doRelease(req, null, now);
+    }
+
+    /** 编排层已持有 usage.userId：单分片读；参数语义同兼容入口。 */
+    @Transactional
+    public ReleaseResult release(ReleaseRequest req, long userId, LocalDateTime now) {
+        return doRelease(req, userId, now);
+    }
+
+    private ReleaseResult doRelease(ReleaseRequest req, Long userId, LocalDateTime now) {
+        CouponUsage usage = readUsage(req.usageNo(), userId)
                 .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
         usage.checkReleasable();   // CONFIRMED → 拒绝（资损红线：一张券花两次）
         if (usage.getStatus() != UsageStatus.OCCUPYING) {
             // L15（2026-09-15 随 L5 清偿）：合同已终结（已释放/过期关闭/超时关闭）=取消意图已达成，
             // 当幂等成功返回券**真实状态**——旧实现硬编码"待使用"，释放时已过期/已被收场的券
             // 重放会显示错状态；迟到取消报错反而制造工单
-            UserCoupon fresh = userCouponRepository.findById(usage.getUserCouponId()).orElse(null);
+            UserCoupon fresh = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId()).orElse(null);
             return new ReleaseResult(req.usageNo(),
                     fresh != null ? fresh.getStatus().getDesc() : CouponStatus.USABLE.getDesc(), true);
         }
-        if (!couponUsageRepository.casRelease(req.usageNo(), now)) {
+        if (!couponUsageRepository.casRelease(req.usageNo(), usage.getUserId(), now)) {
             throw new TradeCasRejectedException("usage-release", req.usageNo());
         }
-        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
         if (!userCouponRepository.casRelease(usage.getUserCouponId(), usage.getUserId())) {
             throw new TradeCasRejectedException("coupon-release", usage.getUserCouponId());
         }
         couponEventRepository.append(CouponEvent.released(coupon, usage, now));
         // 释放后券的实际状态：未过期=待使用；已过期=已过期（不退回可用态）
-        UserCoupon fresh = userCouponRepository.findById(usage.getUserCouponId()).orElseThrow();
+        UserCoupon fresh = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId()).orElseThrow();
         return new ReleaseResult(req.usageNo(), fresh.getStatus().getDesc(), false);
     }
     /**
@@ -506,7 +577,8 @@ public class TradeTxService {
     @Transactional
     public RefundResult refundConfirm(RefundRequest req, LocalDateTime now,
                                       int maxRefundTimes, int maxReturnTimes) {
-        return refundConfirm(req, now, new RefundPolicy(maxRefundTimes, maxReturnTimes, true));
+        return doRefundConfirm(req, null, now,
+                new RefundPolicy(maxRefundTimes, maxReturnTimes, true));
     }
 
     /**
@@ -515,6 +587,18 @@ public class TradeTxService {
      */
     @Transactional
     public RefundResult refundConfirm(RefundRequest req, LocalDateTime now, RefundPolicy policy) {
+        return doRefundConfirm(req, null, now, policy);
+    }
+
+    /** 编排层已持有 usage.userId：首读单分片；锁行仍用快照里的 userId。 */
+    @Transactional
+    public RefundResult refundConfirm(RefundRequest req, long userId, LocalDateTime now,
+                                      RefundPolicy policy) {
+        return doRefundConfirm(req, userId, now, policy);
+    }
+
+    private RefundResult doRefundConfirm(RefundRequest req, Long userId, LocalDateTime now,
+                                         RefundPolicy policy) {
         if (req.refundNo() == null || req.refundNo().isBlank()) {
             throw new BizException(ErrorCode.PARAM_ERROR, "退款单号不能为空");
         }
@@ -538,7 +622,7 @@ public class TradeTxService {
             return replayRefund(existing, req, digest);
         }
 
-        CouponUsage snapshot = couponUsageRepository.findByUsageNo(req.usageNo())
+        CouponUsage snapshot = readUsage(req.usageNo(), userId)
                 .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
         // 行锁：同一占用单的退款串行化——累计退款数量/金额的校验必须在锁内
         CouponUsage usage = couponUsageRepository.findByUsageNoForUpdate(
@@ -559,7 +643,7 @@ public class TradeTxService {
                     "该占用单退款次数已达上限 " + policy.maxRefundTimes() + " 次");
         }
 
-        UserCoupon coupon = userCouponRepository.findById(usage.getUserCouponId())
+        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
 
         List<CouponShareDetailPO> shares = couponShareDetailMapper.selectPositiveByUsageNo(req.usageNo());
@@ -708,7 +792,7 @@ public class TradeTxService {
             returned = returnCouponIfAllowed(coupon, usage, req.refundNo(), maxReturnTimes,
                     fullRefundReturnCoupon);
         }
-        UserCoupon freshCoupon = userCouponRepository.findById(coupon.getId()).orElse(coupon);
+        UserCoupon freshCoupon = userCouponRepository.findByIdForUser(coupon.getId(), coupon.getUserId()).orElse(coupon);
         order.setCouponReturned(returned ? 1 : 0);
         order.setCouponStatus(freshCoupon.getStatus().name());
         couponRefundOrderMapper.updateById(order);
@@ -730,7 +814,7 @@ public class TradeTxService {
             couponRefundDetailMapper.insert(detail);
         }
 
-        if (!couponUsageRepository.casRefundState(req.usageNo(), target)) {
+        if (!couponUsageRepository.casRefundState(req.usageNo(), usage.getUserId(), target)) {
             throw new TradeCasRejectedException("usage-refund", req.usageNo());
         }
         couponEventRepository.append(CouponEvent.refund(coupon, usage, req.refundNo(), totalDiscount, now));
@@ -765,12 +849,12 @@ public class TradeTxService {
 
         boolean returned = returnCouponIfAllowed(coupon, usage, req.refundNo(), maxReturnTimes,
                 fullRefundReturnCoupon);
-        UserCoupon freshCoupon = userCouponRepository.findById(coupon.getId()).orElse(coupon);
+        UserCoupon freshCoupon = userCouponRepository.findByIdForUser(coupon.getId(), coupon.getUserId()).orElse(coupon);
         order.setCouponReturned(returned ? 1 : 0);
         order.setCouponStatus(freshCoupon.getStatus().name());
         couponRefundOrderMapper.updateById(order);
 
-        if (!couponUsageRepository.casRefundState(req.usageNo(), UsageStatus.REFUNDED)) {
+        if (!couponUsageRepository.casRefundState(req.usageNo(), usage.getUserId(), UsageStatus.REFUNDED)) {
             throw new TradeCasRejectedException("usage-refund", req.usageNo());
         }
         couponEventRepository.append(CouponEvent.refund(coupon, usage, req.refundNo(), amount, now));
@@ -841,12 +925,17 @@ public class TradeTxService {
         }
         String couponStatusName = order.getCouponStatus();
         if (couponStatusName == null) {
-            couponStatusName = userCouponRepository.findById(order.getUserCouponId())
+            // 历史退款单可能没有 user_id（V24 之前）；有则单表命中，没有才退回冷路径广播。
+            couponStatusName = (order.getUserId() == null
+                    ? userCouponRepository.findById(order.getUserCouponId())
+                    : userCouponRepository.findByIdForUser(order.getUserCouponId(), order.getUserId()))
                     .map(c -> c.getStatus().name()).orElse(null);
         }
         String usageStatusName = order.getUsageStatus();
         if (usageStatusName == null) {
-            usageStatusName = couponUsageRepository.findByUsageNo(order.getUsageNo())
+            usageStatusName = (order.getUserId() == null
+                    ? couponUsageRepository.findByUsageNo(order.getUsageNo())
+                    : couponUsageRepository.findByUsageNo(order.getUsageNo(), order.getUserId()))
                     .map(u -> u.getStatus().name()).orElse(null);
         }
         String couponDesc = couponStatusName == null ? null

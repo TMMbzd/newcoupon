@@ -24,6 +24,7 @@ import com.newcoupon.domain.repository.CouponUsageRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.infrastructure.persistence.CouponReleaseTaskGateway;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -110,6 +111,19 @@ class TradeTxServiceTest {
     }
 
     @Test
+    @DisplayName("核销：编排层已给 userId 时按单分片读，事务层不再广播")
+    void confirmWithUserIdReadsSingleShard() {
+        when(couponUsageRepository.findByUsageNo("ORD-1:5", 42L))
+                .thenReturn(Optional.of(usage(UsageStatus.CONFIRMED, 1000L)));
+
+        var r = service.confirm(new ConfirmRequest("ORD-1:5", null), 42L, NOW, null, List.of());
+
+        assertThat(r.duplicated()).isTrue();
+        verify(couponUsageRepository).findByUsageNo("ORD-1:5", 42L);
+        verify(couponUsageRepository, never()).findByUsageNo("ORD-1:5");
+    }
+
+    @Test
     @DisplayName("释放幂等：占用单已释放 → 当成功返回（取消消息重放安全）")
     void releaseIdempotent() {
         when(couponUsageRepository.findByUsageNo("ORD-1:5"))
@@ -119,6 +133,46 @@ class TradeTxServiceTest {
 
         assertThat(r.duplicated()).isTrue();
         verify(couponEventRepository, never()).append(any());
+    }
+
+    @Test
+    @DisplayName("释放：编排层已给 userId 时按单分片读，事务层不再广播")
+    void releaseWithUserIdReadsSingleShard() {
+        when(couponUsageRepository.findByUsageNo("ORD-1:5", 42L))
+                .thenReturn(Optional.of(usage(UsageStatus.RELEASED, null)));
+
+        var r = service.release(new ReleaseRequest("ORD-1:5", "取消"), 42L, NOW);
+
+        assertThat(r.duplicated()).isTrue();
+        verify(couponUsageRepository).findByUsageNo("ORD-1:5", 42L);
+        verify(couponUsageRepository, never()).findByUsageNo("ORD-1:5");
+    }
+
+    @Test
+    @DisplayName("核销异常：有 userId 时单分片读，已终态直接 no-op")
+    void markConfirmExceptionWithUserIdReadsSingleShard() {
+        when(couponUsageRepository.findByUsageNo("ORD-1:5", 42L))
+                .thenReturn(Optional.of(usage(UsageStatus.CONFIRMED, 1000L)));
+
+        assertThat(service.markConfirmException("ORD-1:5", 42L, null, "test", NOW)).isFalse();
+        verify(couponUsageRepository).findByUsageNo("ORD-1:5", 42L);
+        verify(couponUsageRepository, never()).findByUsageNo("ORD-1:5");
+    }
+
+    @Test
+    @DisplayName("锁定过期收场：有 userId 时按单分片读，不再广播")
+    void expireOnLockWithUserIdReadsSingleShard() {
+        when(couponUsageRepository.findByUsageNo("ORD-1:5", 42L))
+                .thenReturn(Optional.of(usage(UsageStatus.OCCUPYING, null)));
+        when(userCouponRepository.findByIdForUser(5L, 42L))
+                .thenReturn(Optional.of(coupon(CouponStatus.LOCKED)));
+        when(couponUsageRepository.casExpireByUsageNo("ORD-1:5", 42L)).thenReturn(true);
+        when(userCouponRepository.casExpireOnLock(5L, 42L)).thenReturn(true);
+
+        service.expireOnLock("ORD-1:5", 5L, 42L, NOW);
+
+        verify(couponUsageRepository).findByUsageNo("ORD-1:5", 42L);
+        verify(couponUsageRepository, never()).findByUsageNo("ORD-1:5");
     }
 
     @Test
@@ -155,15 +209,15 @@ class TradeTxServiceTest {
     void timeoutCloseLocksUsageBeforeCoupon() {
         when(couponUsageRepository.findByUsageNo("ORD-1:5"))
                 .thenReturn(Optional.of(usage(UsageStatus.OCCUPYING, null)));
-        when(userCouponRepository.findById(5L)).thenReturn(Optional.of(coupon(CouponStatus.LOCKED)));
-        when(couponUsageRepository.casTimeoutByUsageNo("ORD-1:5")).thenReturn(true);
+        when(userCouponRepository.findByIdForUser(5L, 42L)).thenReturn(Optional.of(coupon(CouponStatus.LOCKED)));
+        when(couponUsageRepository.casTimeoutByUsageNo("ORD-1:5", 42L)).thenReturn(true);
         when(userCouponRepository.casTimeoutClose(5L, 42L)).thenReturn(true);
 
         assertThat(service.timeoutClose("ORD-1:5", NOW)).isTrue();
 
         // 顺序钉死：先占用单、后券——与核销/释放/过期收场一致。顺序反了就是 AB-BA 死锁对
         InOrder inOrder = inOrder(couponUsageRepository, userCouponRepository);
-        inOrder.verify(couponUsageRepository).casTimeoutByUsageNo("ORD-1:5");
+        inOrder.verify(couponUsageRepository).casTimeoutByUsageNo("ORD-1:5", 42L);
         inOrder.verify(userCouponRepository).casTimeoutClose(5L, 42L);
     }
 
@@ -172,8 +226,8 @@ class TradeTxServiceTest {
     void timeoutCloseCouponCasMissMustRollback() {
         when(couponUsageRepository.findByUsageNo("ORD-1:5"))
                 .thenReturn(Optional.of(usage(UsageStatus.OCCUPYING, null)));
-        when(userCouponRepository.findById(5L)).thenReturn(Optional.of(coupon(CouponStatus.LOCKED)));
-        when(couponUsageRepository.casTimeoutByUsageNo("ORD-1:5")).thenReturn(true);
+        when(userCouponRepository.findByIdForUser(5L, 42L)).thenReturn(Optional.of(coupon(CouponStatus.LOCKED)));
+        when(couponUsageRepository.casTimeoutByUsageNo("ORD-1:5", 42L)).thenReturn(true);
         when(userCouponRepository.casTimeoutClose(5L, 42L)).thenReturn(false);
 
         assertThatThrownBy(() -> service.timeoutClose("ORD-1:5", NOW))
@@ -190,6 +244,6 @@ class TradeTxServiceTest {
         assertThatThrownBy(() -> service.confirm(new ConfirmRequest("ORD-1:5", 1000L), NOW, null))
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("已退款");
-        verify(couponUsageRepository, never()).casConfirm(any(), anyLong(), any());
+        verify(couponUsageRepository, never()).casConfirm(any(), anyLong(), anyLong(), any());
     }
 }

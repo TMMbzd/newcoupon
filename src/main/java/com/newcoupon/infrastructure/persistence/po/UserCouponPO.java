@@ -7,7 +7,7 @@ import java.time.LocalDateTime;
 
 /**
  * 用户券 PO，对应表 user_coupon（V1 建表 + V2 增列 seq/日限，当前单表、M4 分库分表）。
- * 唯一索引两个：uk_idem(user_id, idempotent_key) 幂等终审；
+ * 唯一索引两个：uk_idem(user_id, app_id, idempotent_key) 幂等终审（V28/L73 补 app_id）；
  * uk_user_seq(user_id, template_id, seq) 限领 N 张强制（V2，seq=Redis 用户计数 1..N）。
  */
 @TableName("user_coupon")
