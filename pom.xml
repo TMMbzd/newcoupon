@@ -283,6 +283,14 @@
             <!-- dev profile 默认打开异步/worker；测试默认关闭，异步专项测试用 @SpringBootTest properties 覆盖 -->
             <ISSUE_ASYNC_ENABLED>false</ISSUE_ASYNC_ENABLED>
             <ISSUE_ASYNC_WORKER_ENABLED>false</ISSUE_ASYNC_WORKER_ENABLED>
+            <!-- 后台调度全局默认推迟 1 小时：套件里缓存的 Spring 上下文各自带着真实调度器，
+                 不关会在别的测试读共享表时"偷走"到期行（2026-11-02 全量中死信用例被外来
+                 gate-repair 调度器抢行实测）。系统属性优先于 yml、低于测试类 properties，
+                 需要真实调度的测试在自己的 @SpringBootTest properties 里覆盖即可。 -->
+            <coupon.issue.gate-repair.fixed-delay-ms>3600000</coupon.issue.gate-repair.fixed-delay-ms>
+            <coupon.issue.gate-repair.initial-delay-ms>3600000</coupon.issue.gate-repair.initial-delay-ms>
+            <coupon.issue.gate-compensation.fixed-delay-ms>3600000</coupon.issue.gate-compensation.fixed-delay-ms>
+            <coupon.issue.gate-compensation.initial-delay-ms>3600000</coupon.issue.gate-compensation.initial-delay-ms>
           </systemPropertyVariables>
         </configuration>
       </plugin>
