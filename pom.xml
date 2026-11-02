@@ -275,6 +275,17 @@
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
       </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <systemPropertyVariables>
+            <!-- dev profile 默认打开异步/worker；测试默认关闭，异步专项测试用 @SpringBootTest properties 覆盖 -->
+            <ISSUE_ASYNC_ENABLED>false</ISSUE_ASYNC_ENABLED>
+            <ISSUE_ASYNC_WORKER_ENABLED>false</ISSUE_ASYNC_WORKER_ENABLED>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
     </plugins>
   </build>
 </project>
