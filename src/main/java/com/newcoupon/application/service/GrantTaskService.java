@@ -3,6 +3,7 @@ package com.newcoupon.application.service;
 import com.newcoupon.application.dto.GrantTaskCancelResult;
 import com.newcoupon.application.dto.GrantTaskCreateRequest;
 import com.newcoupon.application.dto.GrantTaskCreateResult;
+import com.newcoupon.application.dto.GrantTaskRetryResult;
 import com.newcoupon.application.dto.GrantTaskStatus;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
@@ -155,6 +156,96 @@ public class GrantTaskService {
         Integer current = taskMapper.selectStatus(task.getId());
         return new GrantTaskCancelResult(taskNo,
                 current == null ? task.getStatus() : current, false);
+    }
+
+    /**
+     * 失败项重发受理：对**终态完成**（SUCCESS；FAILED 若未来启用同理）的任务把全部
+     * FAIL item 重置回 PENDING，worker 下一轮自然领取重开后的 chunk 继续发放。
+     *
+     * <p>幂等键不变（grant-{taskNo}-{seq}）：SUCCESS item 不参与重置；FAIL 路径
+     * 从未实际发过券（发券成功只会走 SUCCESS 记账），重发不会重复发放。补库存后
+     * 售罄转成功、取消的任务明确拒绝——"完成态才可重试"与 cancel 的终态闸门对称。
+     */
+    public GrantTaskRetryResult retryFailed(String taskNo) {
+        CouponGrantTaskPO task = loadAccessibleTask(taskNo);
+        if (task.getStatus() != CouponGrantTaskPO.STATUS_SUCCESS
+                && task.getStatus() != CouponGrantTaskPO.STATUS_FAILED) {
+            // 0/1 进行中没到结算点、4/5 取消族不可复活：都打回状态冲突，
+            // 消息里带当前 status，调用方能区分"取消过"和"还在跑"
+            throw new BizException(ErrorCode.STATE_CONFLICT,
+                    "仅已完成任务可重试失败项，当前 status=" + task.getStatus());
+        }
+        int retried = txService.retryFailedInTx(task.getId());
+        if (retried == 0) {
+            // 没有 FAIL item 可重置：上一受理已重开（任务在 RUNNING 重跑）或本就零失败。
+            // 回当前实时状态而不是方法开头的快照——重开后的任务此刻多半已是 RUNNING
+            Integer current = taskMapper.selectStatus(task.getId());
+            return new GrantTaskRetryResult(taskNo,
+                    current == null ? task.getStatus() : current, false, 0);
+        }
+        log.info("grant task retry-failed accepted: taskNo={}, retried={}, appId={}",
+                taskNo, retried, task.getAppId());
+        return new GrantTaskRetryResult(taskNo, CouponGrantTaskPO.STATUS_RUNNING, true, retried);
+    }
+
+    /**
+     * 失败明细 CSV 导出：任意状态可查（进行中也能导出已失败的部分，运营不必等终态）。
+     * 输出 = UTF-8 BOM + 表头 + 每个 FAIL item 一行（按 seq 升序）。
+     *
+     * <p>BOM 是给 Excel 的：不带它双击打开中文必乱码（Excel 靠 BOM 才认 UTF-8）。
+     * 单元格逐个做公式注入防护与 RFC 4180 转义——导出的 CSV 会被人在表格软件里
+     * 打开，恶意 fail_msg（如 {@code =HYPERLINK(...)}）不防护就是 XSS 的表格版。
+     */
+    public byte[] exportFailuresCsv(String taskNo) {
+        CouponGrantTaskPO task = loadAccessibleTask(taskNo);
+        // CSV 走 ResponseEntity<byte[]> 不经过 Result 工厂，resultCode 没人写——
+        // 不补这句，审计表 code 列为 NULL、治理指标把成功导出记成 rejected
+        com.newcoupon.common.context.RequestContext.current()
+                .resultCode(com.newcoupon.common.ErrorCode.SUCCESS.getCode());
+        List<CouponGrantItemPO> failed = itemMapper.selectFailedByTask(task.getId());
+        StringBuilder csv = new StringBuilder(64 * (failed.size() + 1));
+        csv.append("userId,seq,failCode,failMsg,attempt");
+        for (CouponGrantItemPO item : failed) {
+            csv.append("\r\n")
+                    .append(csvCell(String.valueOf(item.getUserId()))).append(',')
+                    .append(csvCell(String.valueOf(item.getSeq()))).append(',')
+                    .append(csvCell(item.getFailCode() == null
+                            ? "" : String.valueOf(item.getFailCode()))).append(',')
+                    .append(csvCell(item.getFailMsg() == null ? "" : item.getFailMsg())).append(',')
+                    .append(csvCell(item.getAttempt() == null
+                            ? "0" : String.valueOf(item.getAttempt())));
+        }
+        // BOM 必须在字节层面前置（它是三个字节 EF BB BF，不是字符拼接）：
+        // new String(BOM) 再 getBytes 虽可往返，但直接拼字节让"BOM 恰在文件头"不言自明
+        byte[] body = csv.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] out = new byte[UTF8_BOM.length + body.length];
+        System.arraycopy(UTF8_BOM, 0, out, 0, UTF8_BOM.length);
+        System.arraycopy(body, 0, out, UTF8_BOM.length, body.length);
+        return out;
+    }
+
+    /** UTF-8 BOM 三字节：Excel 识别 UTF-8 的开关（有它中文不乱码）。 */
+    private static final byte[] UTF8_BOM = {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF};
+
+    /** CSV 里会被表格软件当公式前缀的字符：= + - @ 与制表符。 */
+    private static final String FORMULA_PREFIXES = "=+-@\t";
+
+    /**
+     * 单元格加工：先做公式注入防护（值以 = + - @ 或制表符开头时前置单引号），
+     * 再做 RFC 4180 转义（含逗号/引号/换行时整格引号包裹、内部引号翻倍）。
+     * 顺序固定"先防注入后转义"：注入防护加的引号本身不需要再转义，反过来则
+     * 防护判断看到的是已被转义的值，判断依据就失真了。
+     */
+    private static String csvCell(String raw) {
+        String guarded = raw;
+        if (!guarded.isEmpty() && FORMULA_PREFIXES.indexOf(guarded.charAt(0)) >= 0) {
+            guarded = "'" + guarded;
+        }
+        if (guarded.indexOf(',') >= 0 || guarded.indexOf('"') >= 0
+                || guarded.indexOf('\r') >= 0 || guarded.indexOf('\n') >= 0) {
+            return '"' + guarded.replace("\"", "\"\"") + '"';
+        }
+        return guarded;
     }
 
     // ------------------------------------------------------------------

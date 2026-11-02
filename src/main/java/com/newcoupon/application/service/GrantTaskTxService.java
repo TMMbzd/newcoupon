@@ -1,5 +1,7 @@
 package com.newcoupon.application.service;
 
+import com.newcoupon.common.BizException;
+import com.newcoupon.common.ErrorCode;
 import com.newcoupon.infrastructure.persistence.mapper.CouponGrantChunkMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponGrantItemMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponGrantTaskMapper;
@@ -166,6 +168,35 @@ public class GrantTaskTxService {
     @Transactional
     public void releaseChunk(long chunkId, String owner) {
         chunkMapper.releaseLease(chunkId, owner, LocalDateTime.now().minusSeconds(1));
+    }
+
+    /**
+     * retry-failed 单事务：FAIL item 批量重置（行数 n）→ 重开含 PENDING item 的
+     * DONE chunk → 任务计数迁移（fail-n、pending+n）并把状态打回 RUNNING。
+     * 三步必须同事务：任何一步失败整体回滚，否则会出现"item 已重置但任务仍
+     * SUCCESS"的裂缝——pending&gt;0 的完成态任务会让守恒不变量与状态机同时失真。
+     *
+     * @return 重置的 item 数 n；0=当前没有 FAIL item（幂等返回，不抛错）
+     * @throws BizException STATE_CONFLICT 任务状态 CAS 未打中（并发 retry 输家，
+     *                       本事务连同 item 重置一起回滚）
+     */
+    @Transactional
+    public int retryFailedInTx(long taskId) {
+        int n = itemMapper.resetFailedToPending(taskId);
+        if (n == 0) {
+            return 0;
+        }
+        // next_retry_at 用应用时钟传入：领取判据（selectClaimable/markRunning）比的是应用时间，
+        // 混用 DB NOW(3) 在两钟失步的部署下会让重开的 chunk 短暂"未到期"领不走
+        chunkMapper.reopenDoneWithPendingItems(taskId, LocalDateTime.now());
+        if (taskMapper.reopenFailed(taskId, n) != 1) {
+            // CAS 输家=另一个 retry-failed 先一步把任务重开成 RUNNING：抛业务冲突
+            // 让整笔回滚——若只回滚计数不回滚 item 重置，n 张 item 会凭空消失在账外
+            throw new BizException(ErrorCode.STATE_CONFLICT,
+                    "任务已被并发重试，请查看进度；重试请携带新的 X-Client-Token（接入层幂等会快照同令牌的本次响应）");
+        }
+        log.info("grant retry-failed reset {} item(s): taskId={}", n, taskId);
+        return n;
     }
 
     /**

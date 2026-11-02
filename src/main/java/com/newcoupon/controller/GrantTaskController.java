@@ -3,11 +3,14 @@ package com.newcoupon.controller;
 import com.newcoupon.application.dto.GrantTaskCancelResult;
 import com.newcoupon.application.dto.GrantTaskCreateRequest;
 import com.newcoupon.application.dto.GrantTaskCreateResult;
+import com.newcoupon.application.dto.GrantTaskRetryResult;
 import com.newcoupon.application.dto.GrantTaskStatus;
 import com.newcoupon.application.service.GrantTaskService;
 import com.newcoupon.common.Result;
 import com.newcoupon.common.context.OpenResource;
 import jakarta.validation.Valid;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -50,5 +53,32 @@ public class GrantTaskController {
     @OpenResource("grant/task/cancel")
     public Result<GrantTaskCancelResult> cancel(@PathVariable String taskNo) {
         return Result.success(grantTaskService.cancel(taskNo));
+    }
+
+    /**
+     * 失败项重发：仅终态完成（SUCCESS）的任务可调用，全部 FAIL item 重置回 PENDING
+     * 由 worker 续发；accepted=false 表示无可重试项（幂等，不是错误）。
+     */
+    @PostMapping("/{taskNo}/retry-failed")
+    @OpenResource("grant/task/retry-failed")
+    public Result<GrantTaskRetryResult> retryFailed(@PathVariable String taskNo) {
+        return Result.success(grantTaskService.retryFailed(taskNo));
+    }
+
+    /**
+     * 失败明细 CSV 导出：任意状态可查。这是全站第一个非 {@link Result} 响应——
+     * CSV 是给表格软件/程序直接消费的文件载荷，再包一层 code/message/data 三段
+     * 结构反而让调用方必须先解 JSON 再抠 base64，与"统一 Result"要解决的问题背道而驰。
+     * BOM/转义/注入防护都在服务层做好，这里只补文件下载协议头。
+     */
+    @GetMapping("/{taskNo}/failures")
+    @OpenResource("grant/task/failures")
+    public ResponseEntity<byte[]> failures(@PathVariable String taskNo) {
+        byte[] csv = grantTaskService.exportFailuresCsv(taskNo);
+        return ResponseEntity.ok()
+                .header("Content-Disposition",
+                        "attachment; filename=grant-failures-" + taskNo + ".csv")
+                .contentType(new MediaType("text", "csv", java.nio.charset.StandardCharsets.UTF_8))
+                .body(csv);
     }
 }

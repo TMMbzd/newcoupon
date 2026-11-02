@@ -12,12 +12,15 @@ import com.newcoupon.application.service.GrantTaskTxService;
 import com.newcoupon.application.service.GrantTaskWorker;
 import com.newcoupon.application.service.OpenAppService;
 import com.newcoupon.application.service.ReceiveAppService;
+import com.newcoupon.application.service.StockShardAdjustService;
 import com.newcoupon.application.service.TemplateAppService;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.application.dto.GrantTaskCancelResult;
 import com.newcoupon.application.dto.GrantTaskCreateRequest;
 import com.newcoupon.application.dto.GrantTaskCreateResult;
+import com.newcoupon.application.dto.GrantTaskRetryResult;
+import com.newcoupon.application.dto.StockAdjustRequest;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
@@ -63,6 +66,9 @@ import org.springframework.beans.factory.annotation.Value;
  *       item 级幂等键保证"发过券但没记账"的 item 重放不重复发放；</li>
  *   <li>越权：乙应用用甲模板建任务 → 403 + 6011。</li>
  * </ol>
+ *
+ * <p>1A 收尾补三例（retry-failed / failures CSV 两个端点）：售罄后补库存重发全部到齐
+ * 且二次受理幂等；失败明细导出的 BOM/转义/公式注入防护；新端点的越权与状态守卫。
  *
  * <p>worker 的 @Scheduled 初始延迟拉长到 1 小时（沿用 AsyncIssueWorkerIntegrationTest 的
  * 手法），测试手动调用 runOnce()/runChunks()，避免后台轮次抢走用例想精确控制的 chunk。
@@ -116,6 +122,8 @@ class GrantTaskIntegrationTest extends ShardedIntegrationTestSupport {
     private ReceiveAppService receiveAppService;
     @Autowired
     private C1ReceiveAppService c1ReceiveAppService;
+    @Autowired
+    private StockShardAdjustService adjustService;
     @Autowired
     private UserCouponRepository userCouponRepository;
     @Autowired
@@ -513,7 +521,7 @@ class GrantTaskIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     // ------------------------------------------------------------------
-    // ⑤ 越权（开放面 HTTP）
+    // ⑤ 越权与守卫（开放面 HTTP）
     // ------------------------------------------------------------------
 
     private static final String APP_A = "t-grant-a";
@@ -568,6 +576,180 @@ class GrantTaskIntegrationTest extends ShardedIntegrationTestSupport {
         // 收尾：取消并跑空，避免这个 PENDING 任务遗留可领 chunk 干扰前序用例的 claimChunk
         grantTaskService.cancel(taskNo);
         drainUntilTerminal(taskNo, 60_000);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑥ retry-failed：补库存后失败项重发（V6 阶段 1A 收尾）
+    // ------------------------------------------------------------------
+
+    @Test
+    @Timeout(120)
+    @DisplayName("retry-failed：售罄失败 2 项补库存后重发全部到齐；再次受理幂等（accepted=false）")
+    void retryFailed_reissuesAfterRestock() throws Exception {
+        // 库存 3 张、5 个用户：第一轮恰好 3 成 2 败（败因 3001 售罄，FAIL 路径从未发券）
+        long templateId = createPublishedTemplate(3, 1);
+        List<Long> users = newUsers(5);
+        GrantTaskCreateResult created = grantTaskService.createTask(
+                new GrantTaskCreateRequest("gt-retry-" + templateId, templateId, users, "tester"));
+
+        CouponGrantTaskPO soldOut = drainUntilTerminal(created.taskNo(), 60_000);
+        assertThat(soldOut.getStatus()).isEqualTo(2);
+        assertThat(soldOut.getSuccessCount()).isEqualTo(3);
+        assertThat(soldOut.getFailCount()).isEqualTo(2);
+        assertConservation(soldOut);
+
+        // 内部面直调补库存 3 → 10（expected=当前总量 3；售罄提示清了，重发才可能成功）
+        adjustService.adjust(templateId, new StockAdjustRequest(
+                "gt-retry-adj-" + templateId, 3L, 10L, "retry-failed 验证补库存", "tester"));
+
+        GrantTaskRetryResult retry = grantTaskService.retryFailed(created.taskNo());
+        assertThat(retry.accepted()).isTrue();
+        assertThat(retry.retried()).isEqualTo(2);
+        assertThat(retry.status()).isEqualTo(1);      // 任务已重开为 RUNNING
+
+        // worker 下一轮自然领取重开 chunk：幂等键不变（grant-{taskNo}-{seq}），
+        // 上轮失败未落幂等记录，这一轮对同键真实发券
+        CouponGrantTaskPO done = drainUntilTerminal(created.taskNo(), 60_000);
+        assertThat(done.getStatus()).isEqualTo(2);
+        assertThat(done.getSuccessCount()).isEqualTo(5);
+        assertThat(done.getFailCount()).isZero();
+        assertThat(done.getPendingCount()).isZero();
+        assertConservation(done);
+        assertThat(userCouponRepository.countByTemplate(templateId))
+                .as("3 张首发 + 2 张重发 = 5").isEqualTo(5);
+        assertThat(usersOverLimit(templateId, users)).isZero();
+
+        // 幂等：全部成功后再受理——没有 FAIL item，accepted=false 且不再发券
+        GrantTaskRetryResult replay = grantTaskService.retryFailed(created.taskNo());
+        assertThat(replay.accepted()).isFalse();
+        assertThat(replay.retried()).isZero();
+        assertThat(userCouponRepository.countByTemplate(templateId)).isEqualTo(5);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑦ failures CSV：BOM / 转义 / 公式注入防护（开放面 HTTP）
+    // ------------------------------------------------------------------
+
+    @Test
+    @Timeout(120)
+    @DisplayName("failures CSV：BOM 开头+表头正确；=公式注入前置单引号；逗号/引号 RFC4180 转义；0 失败只回 BOM+表头")
+    void failuresCsv_bomEscapingAndInjectionGuard() throws Exception {
+        provisionOnce();
+        // 甲应用经开放面建模板+任务（failures 按任务归属校验 app，任务必须真的属于 APP_A）
+        long tpl = readLong(client.post("/open/v1/templates", """
+                {"name":"CSV导出验证券","activityId":1001,"couponType":1,"faceValue":1000,
+                 "threshold":10000,"totalCount":10,"perUserLimit":1,
+                 "validType":2,"validDays":7}""", APP_A, secretA, "gt-csv-tpl-1").body(), "/data/id");
+        client.post("/open/v1/templates/" + tpl + "/publish", "", APP_A, secretA, "gt-csv-pub-1");
+        List<Long> users = newUsers(2);
+        OpenApiTestClient.Response created = client.post("/open/v1/grant/tasks",
+                "{\"requestId\":\"gt-csv-task-1\",\"templateId\":" + tpl
+                        + ",\"userIds\":[" + users.get(0) + "," + users.get(1) + "]}",
+                APP_A, secretA, "gt-csv-task-tok");
+        assertThat(created.status()).as(created.body()).isEqualTo(200);
+        String taskNo = objectMapper.readTree(created.body()).at("/data/taskNo").asText();
+        drainUntilTerminal(taskNo, 60_000);
+        long taskId = taskMapper.selectByTaskNo(taskNo).getId();
+
+        // 阶段一（0 失败）：响应恰为 BOM + 表头，无数据行、无结尾换行
+        OpenApiTestClient.Response empty = client.get(
+                "/open/v1/grant/tasks/" + taskNo + "/failures", null, APP_A, secretA);
+        assertThat(empty.status()).as(empty.body()).isEqualTo(200);
+        assertThat(empty.header("Content-Type")).contains("text/csv");
+        assertThat(empty.header("Content-Disposition")).contains("attachment");
+        assertThat(empty.body().getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                .as("CSV 必须以 UTF-8 BOM (EF BB BF) 开头").startsWith(
+                        (byte) 0xEF, (byte) 0xBB, (byte) 0xBF);
+        assertThat(empty.body()).isEqualTo("\uFEFFuserId,seq,failCode,failMsg,attempt");
+
+        // 阶段二：直改 DB 造失败明细。真实路径的 fail_msg 是"已售罄"这类固定文案，
+        // 逗号/引号/公式载荷只能直改（这里验的是 CSV 转义器，不是失败路径本身）
+        jdbcTpl.update(
+                "UPDATE coupon_grant_item SET status = 2, fail_code = 3001, attempt = 1, "
+                        + "fail_msg = ? WHERE task_id = ? AND seq = 0",
+                "=SUM(A1)", taskId);
+        jdbcTpl.update(
+                "UPDATE coupon_grant_item SET status = 2, fail_code = 3001, attempt = 1, "
+                        + "fail_msg = ? WHERE task_id = ? AND seq = 1",
+                "补发失败,原因:\"库存\"不足", taskId);
+
+        OpenApiTestClient.Response csv = client.get(
+                "/open/v1/grant/tasks/" + taskNo + "/failures", null, APP_A, secretA);
+        assertThat(csv.status()).as(csv.body()).isEqualTo(200);
+        assertThat(csv.body().getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                .startsWith((byte) 0xEF, (byte) 0xBB, (byte) 0xBF);
+        String[] lines = csv.body().substring(1).split("\r\n");
+        assertThat(lines).hasSize(3);
+        assertThat(lines[0]).isEqualTo("userId,seq,failCode,failMsg,attempt");
+        // seq=0 行：注入载荷被前置单引号，Excel 打开是文本不是公式
+        assertThat(lines[1]).isEqualTo(users.get(0) + ",0,3001,'=SUM(A1),1");
+        // seq=1 行：含逗号/引号 → 整格引号包裹 + 内部引号翻倍（RFC 4180）
+        assertThat(lines[2]).isEqualTo(
+                users.get(1) + ",1,3001,\"补发失败,原因:\"\"库存\"\"不足\",1");
+    }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("retry/failures 守卫：乙应用碰甲任务 → 403+6011；RUNNING/CANCELED 任务 retry → 4002")
+    void retryAndFailures_ownershipAndStateGuards() throws Exception {
+        provisionOnce();
+        // 甲应用经开放面建模板+任务（归属校验要拦"乙碰甲"，任务得先属于甲）
+        long tpl = readLong(client.post("/open/v1/templates", """
+                {"name":"守卫验证券","activityId":1001,"couponType":1,"faceValue":1000,
+                 "threshold":10000,"totalCount":20,"perUserLimit":1,
+                 "validType":2,"validDays":7}""", APP_A, secretA, "gt-guard-tpl-1").body(), "/data/id");
+        client.post("/open/v1/templates/" + tpl + "/publish", "", APP_A, secretA, "gt-guard-pub-1");
+        List<Long> users = newUsers(3);
+        OpenApiTestClient.Response created = client.post("/open/v1/grant/tasks",
+                "{\"requestId\":\"gt-guard-task-1\",\"templateId\":" + tpl
+                        + ",\"userIds\":[" + users.get(0) + "," + users.get(1) + "," + users.get(2) + "]}",
+                APP_A, secretA, "gt-guard-task-tok");
+        assertThat(created.status()).as(created.body()).isEqualTo(200);
+        String taskNo = objectMapper.readTree(created.body()).at("/data/taskNo").asText();
+        CouponGrantTaskPO task = taskMapper.selectByTaskNo(taskNo);
+
+        // 越权：乙应用对甲任务调 retry-failed / failures → 403 + 6011
+        OpenApiTestClient.Response retryAsB = client.post(
+                "/open/v1/grant/tasks/" + taskNo + "/retry-failed", "", APP_B, secretB, "gt-guard-b-tok");
+        assertThat(retryAsB.status()).as(retryAsB.body()).isEqualTo(403);
+        assertThat(retryAsB.body()).contains("6011");
+        OpenApiTestClient.Response csvAsB = client.get(
+                "/open/v1/grant/tasks/" + taskNo + "/failures", null, APP_B, secretB);
+        assertThat(csvAsB.status()).as(csvAsB.body()).isEqualTo(403);
+        assertThat(csvAsB.body()).contains("6011");
+
+        // RUNNING：用领取事务拿走一个 chunk（任务 PENDING→RUNNING），不执行不释放
+        CouponGrantChunkPO claimed = grantTaskTxService.claimChunk("guard-runner", Duration.ofMinutes(5));
+        assertThat(claimed).as("库里不应有其它可领 chunk（前序用例都已终态）").isNotNull();
+        assertThat(claimed.getTaskId()).isEqualTo(task.getId());
+        assertThat(statusOf(taskNo)).isEqualTo(1);
+        OpenApiTestClient.Response retryRunning = client.post(
+                "/open/v1/grant/tasks/" + taskNo + "/retry-failed", "", APP_A, secretA, "gt-guard-run-tok");
+        // 4xxx 业务冲突走"HTTP 200 + 业务码"的全站既有约定（只有 6xxx 映射真实 HTTP 状态）
+        assertThat(retryRunning.status()).as(retryRunning.body()).isEqualTo(200);
+        assertThat(retryRunning.body()).contains("4002");
+        assertThat(retryRunning.body()).as("消息带当前状态，调用方能区分'还在跑'与'已取消'")
+                .contains("status=1");
+
+        // 过期租约后取消跑空：否则 5 分钟内 worker 领不回该 chunk，任务到不了终态
+        jdbcTpl.update(
+                "UPDATE coupon_grant_chunk SET lease_until = '2000-01-01 00:00:00.000' WHERE id = ?",
+                claimed.getId());
+        grantTaskService.cancel(taskNo);
+        CouponGrantTaskPO canceled = drainUntilTerminal(taskNo, 60_000);
+        assertThat(canceled.getStatus()).isEqualTo(5);
+
+        // CANCELED：retry 明确拒绝（4002）
+        OpenApiTestClient.Response retryCanceled = client.post(
+                "/open/v1/grant/tasks/" + taskNo + "/retry-failed", "", APP_A, secretA, "gt-guard-cxl-tok");
+        assertThat(retryCanceled.status()).as(retryCanceled.body()).isEqualTo(200);
+        assertThat(retryCanceled.body()).contains("4002");
+
+        // failures 任意状态可查：CANCELED 任务也能导出（0 失败 = BOM+表头）
+        OpenApiTestClient.Response csvCanceled = client.get(
+                "/open/v1/grant/tasks/" + taskNo + "/failures", null, APP_A, secretA);
+        assertThat(csvCanceled.status()).as(csvCanceled.body()).isEqualTo(200);
+        assertThat(csvCanceled.body()).isEqualTo("\uFEFFuserId,seq,failCode,failMsg,attempt");
     }
 
     private long readLong(String json, String pointer) {

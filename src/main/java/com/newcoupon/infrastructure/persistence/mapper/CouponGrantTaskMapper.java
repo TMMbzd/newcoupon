@@ -64,6 +64,17 @@ public interface CouponGrantTaskMapper extends BaseMapper<CouponGrantTaskPO> {
     int addSkip(@Param("id") long id, @Param("n") int n);
 
     /**
+     * retry-failed 记账：fail-n、pending+n，状态 SUCCESS/FAILED → RUNNING。
+     * WHERE 限定终态（2/3）是并发闸门：两个 retry-failed 同击一个任务时只有一个
+     * CAS 打得中，输家拿到 0 行回滚整笔（item 重置与计数迁移必须同进退，否则守恒破裂）。
+     */
+    @Update("UPDATE coupon_grant_task SET fail_count = fail_count - #{n}, "
+            + "pending_count = pending_count + #{n}, status = 1, "
+            + "version = version + 1, update_time = NOW(3) "
+            + "WHERE id = #{id} AND status IN (2, 3)")
+    int reopenFailed(@Param("id") long id, @Param("n") int n);
+
+    /**
      * 收尾兜底扫描：任务还开着（PENDING/RUNNING/CANCELING）但已没有任何
      * 非终态 chunk——收尾竞态里双双让路的任务由它捞回（worker 每轮先扫一遍）。
      */

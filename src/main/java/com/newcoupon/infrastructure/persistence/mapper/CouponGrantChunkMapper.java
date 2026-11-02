@@ -80,6 +80,20 @@ public interface CouponGrantChunkMapper extends BaseMapper<CouponGrantChunkPO> {
     @Select("SELECT COUNT(*) FROM coupon_grant_chunk WHERE task_id = #{taskId} AND status IN (0, 1)")
     long countNonTerminalByTask(@Param("taskId") long taskId);
 
+    /**
+     * retry-failed 重开 chunk：任务内已 DONE 且**现在又有 PENDING item** 的 chunk
+     * 置回 PENDING、清掉租约、next_retry_at=当前时刻（下一轮立即可领）。EXISTS
+     * 子查询按 (task_id, chunk_no) 关联刚被重置的 item——全部成功的 chunk 不含
+     * PENDING item，不会被无谓重开（重开它只是空跑一轮领取+收尾）。
+     */
+    @Update("UPDATE coupon_grant_chunk SET status = 0, lease_owner = NULL, lease_until = NULL, "
+            + "next_retry_at = #{now}, update_time = NOW(3) "
+            + "WHERE task_id = #{taskId} AND status = 2 "
+            + "AND EXISTS (SELECT 1 FROM coupon_grant_item "
+            + "WHERE task_id = coupon_grant_chunk.task_id "
+            + "AND chunk_no = coupon_grant_chunk.chunk_no AND status = 0)")
+    int reopenDoneWithPendingItems(@Param("taskId") long taskId, @Param("now") java.time.LocalDateTime now);
+
     @Select("SELECT * FROM coupon_grant_chunk WHERE task_id = #{taskId} AND chunk_no = #{chunkNo}")
     CouponGrantChunkPO selectByTaskAndChunk(@Param("taskId") long taskId,
                                             @Param("chunkNo") int chunkNo);

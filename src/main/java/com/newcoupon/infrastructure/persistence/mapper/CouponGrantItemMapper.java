@@ -65,6 +65,21 @@ public interface CouponGrantItemMapper extends BaseMapper<CouponGrantItemPO> {
     @Select("SELECT * FROM coupon_grant_item WHERE task_id = #{taskId} ORDER BY chunk_no, seq")
     List<CouponGrantItemPO> selectByTask(@Param("taskId") long taskId);
 
+    /** 失败明细导出：取任务内全部终态 FAIL item，按 seq 升序（与受理顺序一致，导出行序稳定）。 */
+    @Select("SELECT * FROM coupon_grant_item "
+            + "WHERE task_id = #{taskId} AND status = 2 ORDER BY seq")
+    List<CouponGrantItemPO> selectFailedByTask(@Param("taskId") long taskId);
+
+    /**
+     * retry-failed 重置：把任务内全部 FAIL item 批量置回 PENDING，attempt 归零、
+     * 失败原因清空。返回重置行数 n——n 是调用方迁移任务计数（fail-n、pending+n）的
+     * 唯一依据；WHERE 限定 status=2 保证只重置终态失败项，SUCCESS/SKIP/CANCELED 不被动。
+     */
+    @Update("UPDATE coupon_grant_item SET status = 0, attempt = 0, "
+            + "fail_code = NULL, fail_msg = NULL, update_time = NOW(3) "
+            + "WHERE task_id = #{taskId} AND status = 2")
+    int resetFailedToPending(@Param("taskId") long taskId);
+
     /** 建任务时批量插入明细（分片内切片批量，避免一条万行 VALUES 的巨型 SQL）。 */
     @Insert("<script>INSERT INTO coupon_grant_item "
             + "(task_id, chunk_no, user_id, seq, status, attempt, create_time, update_time) VALUES "
