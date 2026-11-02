@@ -45,6 +45,14 @@ public enum ErrorCode {
     ISSUE_TASK_NOT_FOUND(3005, "发放任务不存在"),
     /** 批量发放任务查询/取消：taskNo 不存在或不属于当前应用（V6 阶段 1A） */
     GRANT_TASK_NOT_FOUND(3006, "批量发放任务不存在"),
+    /**
+     * 兑换码无效或已使用（V6 阶段 1B）。**统一文案防枚举**：码不存在/批停用/码停用/
+     * 已兑换/兑换中/限流拦截全部用这一个码这一句文案——区分开哪一种失败，
+     * 就等于告诉探测者"这个码是存在的"。真实区分只进 coupon_code_redeem_log。
+     */
+    CODE_INVALID(3007, "兑换失败：码无效或已使用"),
+    /** 兑换码批次查询/导出：batchNo 不存在或不属于当前应用（V6 阶段 1B） */
+    CODE_BATCH_NOT_FOUND(3008, "兑换码批次不存在"),
 
     // ---- 4xxx 用券域 ----
     USER_COUPON_NOT_FOUND(4001, "用户券不存在"),

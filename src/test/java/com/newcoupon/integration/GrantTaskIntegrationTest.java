@@ -762,4 +762,76 @@ class GrantTaskIntegrationTest extends ShardedIntegrationTestSupport {
             throw new AssertionError("响应无法解析: " + json, e);
         }
     }
+
+    // ------------------------------------------------------------------
+    // ⑧ 定时发放（V6 阶段 1B）：到期门在 chunk 领取 SQL，不是任务状态机——
+    //     未到期任务照常建出 PENDING chunk，只是领不走；到点自然开跑
+    // ------------------------------------------------------------------
+
+    @Test
+    @Timeout(120)
+    @DisplayName("定时门：未来任务 runOnce 跑了也不发（全 PENDING、券 0、状态响应带 scheduleTime）；改到过去后补跑发完")
+    void scheduledTask_gatedUntilDue_thenCatchUp() throws Exception {
+        long templateId = createPublishedTemplate(20, 1);
+        List<Long> users = newUsers(3);
+        // 截到秒：DATETIME(3) 存毫秒，纳秒往返比较会假失败；整秒值存储无损
+        LocalDateTime scheduled = LocalDateTime.now()
+                .plusSeconds(30).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+
+        GrantTaskCreateResult created = grantTaskService.createTask(
+                new GrantTaskCreateRequest("gt-sched-" + templateId, templateId,
+                        users, "tester", scheduled));
+        assertThat(created.idempotent()).isFalse();
+
+        // schedule_time 原样落库；GET 状态响应带 scheduleTime（1B 契约）
+        CouponGrantTaskPO task = taskMapper.selectByTaskNo(created.taskNo());
+        assertThat(task.getScheduleTime()).isEqualTo(scheduled);
+        assertThat(grantTaskService.getStatus(created.taskNo()).scheduleTime())
+                .isEqualTo(scheduled);
+
+        // 到期前：worker 全速跑一轮也不领这个任务的 chunk——item 全 PENDING、零发放
+        int processed = worker.runOnce();
+        assertThat(processed).as("库里不应有可领 chunk（未到期 + 前序用例都已终态）").isZero();
+        assertThat(statusOf(created.taskNo())).as("未到期任务保持 PENDING").isEqualTo(0);
+        assertThat(itemMapper.selectByTask(task.getId()))
+                .as("未到期任务的 item 必须全部 PENDING")
+                .allMatch(i -> i.getStatus() == CouponGrantItemPO.STATUS_PENDING);
+        assertThat(userCouponRepository.countByTemplate(templateId))
+                .as("未到期任务不得发出任何券").isZero();
+
+        // schedule_time 改到过去（等价"过去时间受理=立即执行"的补跑语义）→ 下一轮发完
+        jdbcTpl.update(
+                "UPDATE coupon_grant_task SET schedule_time = '2000-01-01 00:00:00.000' WHERE id = ?",
+                task.getId());
+        CouponGrantTaskPO done = drainUntilTerminal(created.taskNo(), 60_000);
+        assertThat(done.getStatus()).isEqualTo(2);
+        assertThat(done.getSuccessCount()).isEqualTo(3);
+        assertThat(done.getPendingCount()).isZero();
+        assertConservation(done);
+        assertThat(userCouponRepository.countByTemplate(templateId)).isEqualTo(3);
+    }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("定时任务未到期也可取消：取消的 chunk 立即可领做取消收尾，不必等到定时点")
+    void scheduledTask_cancelBeforeDue_immediatelyCanceled() throws Exception {
+        long templateId = createPublishedTemplate(20, 1);
+        List<Long> users = newUsers(3);
+        GrantTaskCreateResult created = grantTaskService.createTask(
+                new GrantTaskCreateRequest("gt-sched-cxl-" + templateId, templateId, users,
+                        "tester", LocalDateTime.now()
+                        .plusSeconds(30).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)));
+
+        GrantTaskCancelResult cancel = grantTaskService.cancel(created.taskNo());
+        assertThat(cancel.accepted()).isTrue();
+
+        // 到期门对 CANCELING 任务有豁免（领取 SQL 的 OR t.status=4）：被领的 chunk 只做
+        // 取消收尾不发放。没有这条豁免本用例会卡在 CANCELING 直到 30 秒后定时点
+        CouponGrantTaskPO done = drainUntilTerminal(created.taskNo(), 10_000);
+        assertThat(done.getStatus()).isEqualTo(5);
+        assertThat(done.getSuccessCount()).as("未到期任务取消不得发券").isZero();
+        assertThat(done.getSkipCount()).isEqualTo(3);
+        assertThat(userCouponRepository.countByTemplate(templateId)).isZero();
+        assertConservation(done);
+    }
 }

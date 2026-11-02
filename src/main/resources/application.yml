@@ -114,6 +114,14 @@ coupon:
       enabled: ${GRANT_WORKER_ENABLED:false}
       fixed-delay-ms: ${GRANT_WORKER_FIXED_DELAY_MS:5000}
       initial-delay-ms: ${GRANT_WORKER_INITIAL_DELAY_MS:10000}
+  # 兑换码域（V6 阶段 1B）。
+  code:
+    # 码哈希的 HMAC pepper：生产必须用环境变量 CODE_PEPPER 注入（dev 默认值会打启动告警）。
+    # **换了 pepper = 全部存量码作废**（哈希对不上），只能在新库/清库后更换。
+    pepper: ${CODE_PEPPER:dev-only-coupon-code-pepper-2026}
+    # LOCKED 残留独立回收调度（默认关）：grant worker 开着的环境由 worker 每轮顺带回收，
+    # 只有"没开 grant worker 但用兑换码"的部署需要单独打开，否则崩窗残留码无人回收。
+    reap-enabled: ${CODE_REAP_ENABLED:false}
   id:
     # 空=启动时在 Redis 抢一个 0-1023 的 workerId 租约；显式 WORKER_ID 仍优先，但必须唯一。
     worker-id: ${WORKER_ID:}

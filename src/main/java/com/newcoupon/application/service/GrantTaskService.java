@@ -129,7 +129,7 @@ public class GrantTaskService {
                 users.size(), false);
     }
 
-    /** 进度查询：计数 + percent=(total-pending)*100/total。 */
+    /** 进度查询：计数 + percent=(total-pending)*100/total；scheduleTime 原样回显（1B）。 */
     public GrantTaskStatus getStatus(String taskNo) {
         CouponGrantTaskPO task = loadAccessibleTask(taskNo);
         long total = task.getTotalCount();
@@ -137,7 +137,7 @@ public class GrantTaskService {
         long percent = total == 0 ? 100 : settled * 100 / total;
         return new GrantTaskStatus(task.getTaskNo(), task.getStatus(), total,
                 task.getSuccessCount(), task.getFailCount(), task.getSkipCount(),
-                task.getPendingCount(), percent);
+                task.getPendingCount(), percent, task.getScheduleTime());
     }
 
     /**
@@ -192,9 +192,8 @@ public class GrantTaskService {
      * 失败明细 CSV 导出：任意状态可查（进行中也能导出已失败的部分，运营不必等终态）。
      * 输出 = UTF-8 BOM + 表头 + 每个 FAIL item 一行（按 seq 升序）。
      *
-     * <p>BOM 是给 Excel 的：不带它双击打开中文必乱码（Excel 靠 BOM 才认 UTF-8）。
-     * 单元格逐个做公式注入防护与 RFC 4180 转义——导出的 CSV 会被人在表格软件里
-     * 打开，恶意 fail_msg（如 {@code =HYPERLINK(...)}）不防护就是 XSS 的表格版。
+     * <p>BOM 与单元格转义（公式注入防护 + RFC 4180）抽到了 {@link CsvExportSupport}，
+     * 与兑换码明文导出共用——两处各留一份副本迟早漂移。
      */
     public byte[] exportFailuresCsv(String taskNo) {
         CouponGrantTaskPO task = loadAccessibleTask(taskNo);
@@ -207,45 +206,16 @@ public class GrantTaskService {
         csv.append("userId,seq,failCode,failMsg,attempt");
         for (CouponGrantItemPO item : failed) {
             csv.append("\r\n")
-                    .append(csvCell(String.valueOf(item.getUserId()))).append(',')
-                    .append(csvCell(String.valueOf(item.getSeq()))).append(',')
-                    .append(csvCell(item.getFailCode() == null
+                    .append(CsvExportSupport.csvCell(String.valueOf(item.getUserId()))).append(',')
+                    .append(CsvExportSupport.csvCell(String.valueOf(item.getSeq()))).append(',')
+                    .append(CsvExportSupport.csvCell(item.getFailCode() == null
                             ? "" : String.valueOf(item.getFailCode()))).append(',')
-                    .append(csvCell(item.getFailMsg() == null ? "" : item.getFailMsg())).append(',')
-                    .append(csvCell(item.getAttempt() == null
+                    .append(CsvExportSupport.csvCell(item.getFailMsg() == null
+                            ? "" : item.getFailMsg())).append(',')
+                    .append(CsvExportSupport.csvCell(item.getAttempt() == null
                             ? "0" : String.valueOf(item.getAttempt())));
         }
-        // BOM 必须在字节层面前置（它是三个字节 EF BB BF，不是字符拼接）：
-        // new String(BOM) 再 getBytes 虽可往返，但直接拼字节让"BOM 恰在文件头"不言自明
-        byte[] body = csv.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] out = new byte[UTF8_BOM.length + body.length];
-        System.arraycopy(UTF8_BOM, 0, out, 0, UTF8_BOM.length);
-        System.arraycopy(body, 0, out, UTF8_BOM.length, body.length);
-        return out;
-    }
-
-    /** UTF-8 BOM 三字节：Excel 识别 UTF-8 的开关（有它中文不乱码）。 */
-    private static final byte[] UTF8_BOM = {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF};
-
-    /** CSV 里会被表格软件当公式前缀的字符：= + - @ 与制表符。 */
-    private static final String FORMULA_PREFIXES = "=+-@\t";
-
-    /**
-     * 单元格加工：先做公式注入防护（值以 = + - @ 或制表符开头时前置单引号），
-     * 再做 RFC 4180 转义（含逗号/引号/换行时整格引号包裹、内部引号翻倍）。
-     * 顺序固定"先防注入后转义"：注入防护加的引号本身不需要再转义，反过来则
-     * 防护判断看到的是已被转义的值，判断依据就失真了。
-     */
-    private static String csvCell(String raw) {
-        String guarded = raw;
-        if (!guarded.isEmpty() && FORMULA_PREFIXES.indexOf(guarded.charAt(0)) >= 0) {
-            guarded = "'" + guarded;
-        }
-        if (guarded.indexOf(',') >= 0 || guarded.indexOf('"') >= 0
-                || guarded.indexOf('\r') >= 0 || guarded.indexOf('\n') >= 0) {
-            return '"' + guarded.replace("\"", "\"\"") + '"';
-        }
-        return guarded;
+        return CsvExportSupport.withBom(csv.toString());
     }
 
     // ------------------------------------------------------------------
@@ -319,6 +289,9 @@ public class GrantTaskService {
         // 守恒起点：pending=total，此后每次 item 迁移都是"pending-1、对应桶+1"
         task.setPendingCount((long) users.size());
         task.setStatus(CouponGrantTaskPO.STATUS_PENDING);
+        // 定时开始时间原样落库（过去时间=补跑，到期门在 chunk 领取 SQL 里判——见
+        // CouponGrantChunkMapper.selectClaimable）；null=立即执行，行为与 1A 完全一致
+        task.setScheduleTime(req.scheduleTime());
         task.setRateLimit(0);
         task.setMaxConcurrency(1);
         task.setOperator(req.operator());

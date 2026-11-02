@@ -19,19 +19,34 @@ public interface CouponGrantChunkMapper extends BaseMapper<CouponGrantChunkPO> {
 
     /**
      * 领取一条到期 chunk：PENDING，或 RUNNING 但租约已过期（worker 崩溃回收）；
-     * 且退避时间已到（可重试 item 留下的 next_retry_at）。
+     * 且退避时间已到（可重试 item 留下的 next_retry_at）；且所属任务已到定时开始时间
+     * （V6 阶段 1B 到期门：schedule_time 为空=立即任务不受影响；未到期任务的 chunk
+     * 领不走，到期后自然开跑=补跑语义。任务已进入 CANCELING 的除外——取消的 chunk
+     * 被领取后只做取消收尾不发券，让它立即可领，取消语义不必等到定时点才生效）。
      * LIMIT 1：本刀单 worker 串行逐 chunk 执行（max_concurrency=1）。
+     *
+     * <p>JOIN 的两侧时钟必须同源：schedule_time 由应用写入（MyBatis 插入 PO 字段），
+     * 比较基准 #{now} 也是应用钟（claimChunk 传入 LocalDateTime.now()）——
+     * 混用 DB NOW(3) 会在两钟失步时让任务凭空提前/推迟开跑（M3 教训，同钟原则）。
      */
-    @Select("SELECT * FROM coupon_grant_chunk "
-            + "WHERE (status = 0 OR (status = 1 AND lease_until < #{now})) "
-            + "AND (next_retry_at IS NULL OR next_retry_at <= #{now}) "
-            + "ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED")
+    @Select("SELECT c.* FROM coupon_grant_chunk c "
+            + "JOIN coupon_grant_task t ON t.id = c.task_id "
+            + "WHERE (c.status = 0 OR (c.status = 1 AND c.lease_until < #{now})) "
+            + "AND (c.next_retry_at IS NULL OR c.next_retry_at <= #{now}) "
+            + "AND (t.schedule_time IS NULL OR t.schedule_time <= #{now} OR t.status = 4) "
+            + "ORDER BY c.id LIMIT 1 FOR UPDATE SKIP LOCKED")
     CouponGrantChunkPO selectClaimable(@Param("now") LocalDateTime now);
 
-    /** 领取后打 lease：条件里再判一次领取资格，防其它 worker 抢先。 */
-    @Update("UPDATE coupon_grant_chunk SET status = 1, lease_owner = #{owner}, "
-            + "lease_until = #{leaseUntil}, update_time = NOW(3) "
-            + "WHERE id = #{id} AND (status = 0 OR (status = 1 AND lease_until < #{now}))")
+    /**
+     * 领取后打 lease：条件里再判一次领取资格（含到期门），防其它 worker 抢先——
+     * SELECT FOR UPDATE 已锁 chunk 行，这里是防御性复核，条件与 selectClaimable 保持一致。
+     */
+    @Update("UPDATE coupon_grant_chunk c "
+            + "JOIN coupon_grant_task t ON t.id = c.task_id "
+            + "SET c.status = 1, c.lease_owner = #{owner}, "
+            + "c.lease_until = #{leaseUntil}, c.update_time = NOW(3) "
+            + "WHERE c.id = #{id} AND (c.status = 0 OR (c.status = 1 AND c.lease_until < #{now})) "
+            + "AND (t.schedule_time IS NULL OR t.schedule_time <= #{now} OR t.status = 4)")
     int markRunning(@Param("id") long id,
                     @Param("owner") String owner,
                     @Param("leaseUntil") LocalDateTime leaseUntil,

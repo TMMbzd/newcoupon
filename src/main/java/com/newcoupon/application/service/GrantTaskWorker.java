@@ -60,6 +60,7 @@ public class GrantTaskWorker {
     private final TemplateRepository templateRepository;
     private final CouponGrantTaskMapper taskMapper;
     private final CouponGrantItemMapper itemMapper;
+    private final CouponCodeService couponCodeService;
     private final RedisScanLock scanLock;
     private final String workerId;
     private final long budgetMs;
@@ -74,6 +75,7 @@ public class GrantTaskWorker {
                            TemplateRepository templateRepository,
                            CouponGrantTaskMapper taskMapper,
                            CouponGrantItemMapper itemMapper,
+                           CouponCodeService couponCodeService,
                            RedisScanLock scanLock,
                            @Value("${coupon.grant.worker.budget-ms:60000}") long budgetMs,
                            @Value("${coupon.grant.worker.retry-backoff-base-ms:1000}") long backoffBaseMs,
@@ -85,6 +87,7 @@ public class GrantTaskWorker {
         this.templateRepository = templateRepository;
         this.taskMapper = taskMapper;
         this.itemMapper = itemMapper;
+        this.couponCodeService = couponCodeService;
         this.scanLock = scanLock;
         this.budgetMs = budgetMs;
         this.backoffBaseMs = backoffBaseMs;
@@ -129,6 +132,17 @@ public class GrantTaskWorker {
             }
         } catch (RuntimeException e) {
             log.warn("grant task reap failed (continue claiming)", e);
+        }
+        // 兑换码 LOCKED 残留顺带回收（V6 阶段 1B）：两域同属低频后台作业，
+        // 开了 grant worker 的部署不再需要单独打开 coupon.code.reap-enabled。
+        // 失败不阻塞本轮发放——残留码只是延后到下一轮再回收
+        try {
+            int codesReaped = couponCodeService.reapStaleLockedCodes();
+            if (codesReaped > 0) {
+                log.warn("code reap: {} stale LOCKED code(s) restored to ACTIVE", codesReaped);
+            }
+        } catch (RuntimeException e) {
+            log.warn("code reap failed (continue claiming)", e);
         }
         if (!running.compareAndSet(false, true)) {
             return 0;
