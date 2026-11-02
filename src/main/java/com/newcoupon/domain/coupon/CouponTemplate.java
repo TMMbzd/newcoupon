@@ -58,6 +58,11 @@ public final class CouponTemplate {
     private final Integer budgetRatio;
     /** 结算主体（可选）：商家/共担券必填，平台券可空（租户级，按订单行主体解析） */
     private final String settlePartyId;
+    // ---- C1 库存布局（ADR-0018）----
+    /** C1 配置分片数；实际分片数 N_eff=min(stockShardCount,totalCount) */
+    private final int stockShardCount;
+    /** C1 布局版本；改 N 时走离线布局迁移 */
+    private final int stockLayoutVersion;
 
     private CouponTemplate(Creation c, ApproveStatus approveStatus, PublishStatus publishStatus) {
         this.id = null;
@@ -87,6 +92,8 @@ public final class CouponTemplate {
         this.budgetOwner = c.budgetOwner();
         this.budgetRatio = c.budgetRatio();
         this.settlePartyId = c.settlePartyId();
+        this.stockShardCount = c.stockShardCount();
+        this.stockLayoutVersion = c.stockLayoutVersion();
     }
 
     private CouponTemplate(CouponTemplate src, Long id) {
@@ -121,6 +128,8 @@ public final class CouponTemplate {
         this.budgetOwner = src.budgetOwner;
         this.budgetRatio = src.budgetRatio;
         this.settlePartyId = src.settlePartyId;
+        this.stockShardCount = src.stockShardCount;
+        this.stockLayoutVersion = src.stockLayoutVersion;
     }
 
     /**
@@ -183,6 +192,10 @@ public final class CouponTemplate {
             require(!c.settlePartyId().isBlank(), "结算主体不能为空白");
             require(c.settlePartyId().length() <= 64, "结算主体最长 64 字符（= 存储列宽）");
         }
+
+        // ---- C1 库存布局（ADR-0018）----
+        require(c.stockShardCount() >= 1, "C1 分片数必须 ≥1");
+        require(c.stockLayoutVersion() >= 1, "C1 布局版本必须 ≥1");
 
         // —— 有效期不变量 ——
         switch (c.validType()) {
@@ -326,6 +339,8 @@ public final class CouponTemplate {
     public BudgetOwner getBudgetOwner() { return budgetOwner; }
     public Integer getBudgetRatio() { return budgetRatio; }
     public String getSettlePartyId() { return settlePartyId; }
+    public int getStockShardCount() { return stockShardCount; }
+    public int getStockLayoutVersion() { return stockLayoutVersion; }
 
     public int getPerUserLimit() {
         return perUserLimit;
@@ -393,7 +408,11 @@ public final class CouponTemplate {
             BudgetOwner budgetOwner,
             Integer budgetRatio,
             /** 结算主体（可选）：商家/共担券必填，平台券可空 */
-            String settlePartyId) {
+            String settlePartyId,
+            /** C1 配置分片数；实际 N_eff=min(stockShardCount,totalCount) */
+            int stockShardCount,
+            /** C1 布局版本 */
+            int stockLayoutVersion) {
 
         /** 手写 Builder：15 个字段的长构造器可读性极差（"第 7 个参数是啥"），测试里只改一个字段的写法依赖它 */
         public static CreationBuilder builder() {
@@ -426,6 +445,8 @@ public final class CouponTemplate {
             private BudgetOwner budgetOwner = BudgetOwner.PLATFORM;
             private Integer budgetRatio = null;
             private String settlePartyId = null;
+            private int stockShardCount = 16;
+            private int stockLayoutVersion = 1;
 
             private CreationBuilder() {
             }
@@ -454,13 +475,15 @@ public final class CouponTemplate {
             public CreationBuilder budgetOwner(BudgetOwner v) { this.budgetOwner = v; return this; }
             public CreationBuilder budgetRatio(Integer v) { this.budgetRatio = v; return this; }
             public CreationBuilder settlePartyId(String v) { this.settlePartyId = v; return this; }
+            public CreationBuilder stockShardCount(int v) { this.stockShardCount = v; return this; }
+            public CreationBuilder stockLayoutVersion(int v) { this.stockLayoutVersion = v; return this; }
 
             public Creation build() {
                 return new Creation(templateCode, activityId, name, couponType, faceValue,
                         discountCap, threshold, totalCount, perUserLimit, dailyLimit,
                         perUserDailyLimit, validType, validStart, validEnd, validDays, appId,
                         applicableScope, scopeIds, stackingLayer, exclusionGroup, budgetOwner,
-                        budgetRatio, settlePartyId);
+                        budgetRatio, settlePartyId, stockShardCount, stockLayoutVersion);
             }
         }
     }

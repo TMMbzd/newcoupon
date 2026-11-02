@@ -51,6 +51,8 @@ public final class TemplatePOConverter {
         p.setFunderType(d.getBudgetOwner().getCode());
         p.setBudgetRatio(d.getBudgetRatio());
         p.setSettlePartyId(d.getSettlePartyId());
+        p.setStockShardCount(d.getStockShardCount());
+        p.setStockLayoutVersion(d.getStockLayoutVersion());
         p.setVersion(0);
         return p;
     }
@@ -90,6 +92,8 @@ public final class TemplatePOConverter {
                                 ? BudgetOwner.of(p.getFunderType()) : BudgetOwner.PLATFORM)
                         .budgetRatio(p.getBudgetRatio())
                         .settlePartyId(p.getSettlePartyId())
+                        .stockShardCount(p.getStockShardCount() == null ? 16 : p.getStockShardCount())
+                        .stockLayoutVersion(p.getStockLayoutVersion() == null ? 1 : p.getStockLayoutVersion())
                         .build(),
                 p.getIssuedCount(),
                 ApproveStatus.of(p.getApproveStatus()),

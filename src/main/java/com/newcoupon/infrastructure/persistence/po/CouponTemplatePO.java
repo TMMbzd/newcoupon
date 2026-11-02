@@ -63,6 +63,9 @@ public class CouponTemplatePO {
     private Integer funderType;        // 1=PLATFORM(平台) 2=MERCHANT(商家) 3=SPLIT(共担) — V9 列 funder_type
     private Integer budgetRatio;       // 平台百分比 1~99；仅SPLIT时必填
     private String settlePartyId;      // V22：结算主体（可空=平台券租户级；商家/共担必填）
+    // ---- C1 库存模型（V25，ADR-0018）----
+    private Integer stockShardCount;   // C1 配置分片数 N
+    private Integer stockLayoutVersion;// C1 布局版本
 
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
@@ -126,6 +129,10 @@ public class CouponTemplatePO {
     public void setBudgetRatio(Integer budgetRatio) { this.budgetRatio = budgetRatio; }
     public String getSettlePartyId() { return settlePartyId; }
     public void setSettlePartyId(String settlePartyId) { this.settlePartyId = settlePartyId; }
+    public Integer getStockShardCount() { return stockShardCount; }
+    public void setStockShardCount(Integer stockShardCount) { this.stockShardCount = stockShardCount; }
+    public Integer getStockLayoutVersion() { return stockLayoutVersion; }
+    public void setStockLayoutVersion(Integer stockLayoutVersion) { this.stockLayoutVersion = stockLayoutVersion; }
     public LocalDateTime getCreateTime() { return createTime; }
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }
     public LocalDateTime getUpdateTime() { return updateTime; }

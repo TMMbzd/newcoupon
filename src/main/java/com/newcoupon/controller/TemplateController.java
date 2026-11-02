@@ -1,8 +1,12 @@
 package com.newcoupon.controller;
 
+import com.newcoupon.application.dto.StockAdjustRequest;
+import com.newcoupon.application.dto.StockAdjustResult;
 import com.newcoupon.application.dto.TemplateCreateRequest;
 import com.newcoupon.application.dto.TemplateResponse;
+import com.newcoupon.application.service.StockShardAdjustService;
 import com.newcoupon.application.service.TemplateAppService;
+import com.newcoupon.application.service.TemplateLifecycleService;
 import com.newcoupon.common.Result;
 import com.newcoupon.common.context.OpenResource;
 import com.newcoupon.common.context.SwitchGuard;
@@ -28,9 +32,15 @@ import org.springframework.web.bind.annotation.RestController;
 public class TemplateController {
 
     private final TemplateAppService templateAppService;
+    private final StockShardAdjustService stockShardAdjustService;
+    private final TemplateLifecycleService templateLifecycleService;
 
-    public TemplateController(TemplateAppService templateAppService) {
+    public TemplateController(TemplateAppService templateAppService,
+                              StockShardAdjustService stockShardAdjustService,
+                              TemplateLifecycleService templateLifecycleService) {
         this.templateAppService = templateAppService;
+        this.stockShardAdjustService = stockShardAdjustService;
+        this.templateLifecycleService = templateLifecycleService;
     }
 
     /** 建券。@Valid 触发 JSR-303 校验，失败由全局异常处理器统一转 Result */
@@ -46,6 +56,49 @@ public class TemplateController {
     @SwitchGuard(SwitchKey.TEMPLATE_PUBLISH)
     public Result<Void> publish(@PathVariable long id) {
         templateAppService.publish(id);
+        return Result.success();
+    }
+
+    /**
+     * C1 库存调整（ADR-0018 §3.6）：只改分片 quota，不重建布局、不建世代。
+     * 目标总量不得低于已发放量；expectedTotalCount 是乐观并发条件。
+     */
+    @PostMapping("/{id}/stock-adjust")
+    @OpenResource("templates/stock-adjust")
+    public Result<StockAdjustResult> adjustStock(@PathVariable long id,
+                                                 @Valid @RequestBody StockAdjustRequest req) {
+        return Result.success(stockShardAdjustService.adjust(id, req));
+    }
+
+    /** 冻结：停发，不改变已发布状态/已发券 */
+    @PostMapping("/{id}/freeze")
+    @OpenResource("templates/freeze")
+    public Result<Void> freeze(@PathVariable long id) {
+        templateLifecycleService.freeze(id);
+        return Result.success();
+    }
+
+    /** 解冻：恢复分片发券，不重置 used */
+    @PostMapping("/{id}/unfreeze")
+    @OpenResource("templates/unfreeze")
+    public Result<Void> unfreeze(@PathVariable long id) {
+        templateLifecycleService.unfreeze(id);
+        return Result.success();
+    }
+
+    /** 下线：publish_status=2 + 分片停发；已发券不受影响 */
+    @PostMapping("/{id}/offline")
+    @OpenResource("templates/offline")
+    public Result<Void> offline(@PathVariable long id) {
+        templateLifecycleService.offline(id);
+        return Result.success();
+    }
+
+    /** 重上线：publish_status=1 + 分片恢复；不重置 used */
+    @PostMapping("/{id}/reonline")
+    @OpenResource("templates/reonline")
+    public Result<Void> reonline(@PathVariable long id) {
+        templateLifecycleService.reonline(id);
         return Result.success();
     }
 

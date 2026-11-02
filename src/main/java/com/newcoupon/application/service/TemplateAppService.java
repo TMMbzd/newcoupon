@@ -10,15 +10,13 @@ import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.BudgetOwner;
 import com.newcoupon.domain.coupon.StackingLayer;
 import com.newcoupon.domain.coupon.ApplicableScope;
-import com.newcoupon.domain.coupon.PublishStatus;
 import com.newcoupon.domain.repository.TemplateRepository;
-import com.newcoupon.infrastructure.persistence.StockDriftLogGateway;
-import com.newcoupon.infrastructure.redis.RedisStockGateway;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.ThreadLocalRandom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 /**
@@ -41,25 +39,23 @@ public class TemplateAppService {
     private static final DateTimeFormatter CODE_DATE = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
 
     private final TemplateRepository templateRepository;
-    private final RedisStockGateway redisStockGateway;
-    private final com.newcoupon.infrastructure.persistence.StockDriftLogGateway driftLog;
-    private final StockBucketRouter stockBucketRouter;
     private final CachedTemplateReader cachedTemplateReader;
     private final SettlePartyPolicy settlePartyPolicy;
+    private final TemplatePublishTxService templatePublishTxService;
+
+    /** C1 默认分片数；实际 N_eff=min(N,total_count)。字段初始化同时服务无 Spring 的单测。 */
+    @Value("${coupon.stock.shard-count:16}")
+    private int c1ShardCount = 16;
 
     // 构造器注入（而非字段 @Autowired）：依赖显式、不可变、单测可直接 new——企业规范
     public TemplateAppService(TemplateRepository templateRepository,
-                              RedisStockGateway redisStockGateway,
-                              StockDriftLogGateway driftLog,
-                              StockBucketRouter stockBucketRouter,
                               CachedTemplateReader cachedTemplateReader,
-                              SettlePartyPolicy settlePartyPolicy) {
+                              SettlePartyPolicy settlePartyPolicy,
+                              TemplatePublishTxService templatePublishTxService) {
         this.templateRepository = templateRepository;
-        this.redisStockGateway = redisStockGateway;
-        this.driftLog = driftLog;
-        this.stockBucketRouter = stockBucketRouter;
         this.cachedTemplateReader = cachedTemplateReader;
         this.settlePartyPolicy = settlePartyPolicy;
+        this.templatePublishTxService = templatePublishTxService;
     }
 
     /** 建券：生成业务编码 → 聚合工厂校验 → 落库（通用限领 1~99 自 ADR-0006 开放） */
@@ -101,6 +97,9 @@ public class TemplateAppService {
                 .budgetOwner(owner)
                 .budgetRatio(req.budgetRatio())
                 .settlePartyId(req.settlePartyId())
+                // 唯一库存模型：C1。
+                .stockShardCount(c1ShardCount)
+                .stockLayoutVersion(1)
                 .build());
         CouponTemplate saved = templateRepository.save(template);
         log.info("template created: id={}, code={}, name={}, totalCount={}",
@@ -118,28 +117,10 @@ public class TemplateAppService {
                 .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND, "id=" + id));
         AppOwnership.assertAccessible(template.getAppId(), "template:" + id);   // S1 越权防线
         template.checkPublishable();
-        boolean updated = templateRepository.casUpdatePublishStatus(
-                id, PublishStatus.UNPUBLISHED, PublishStatus.PUBLISHED);
-        if (!updated) {
-            throw new BizException(ErrorCode.STATE_CONFLICT,
-                    "发布失败：模板状态已被并发变更，请刷新后重试");
-        }
-        // P2c：发布后主动失效本地缓存——大促 0 点发布必须立刻可见，不能等 TTL
+        // C1：发布与建分片必须在同一个事务里——否则会出现“已发布但没有库存分片”的
+        // 中间态，领券只能报降级。旧 Redis 开桶链路已废弃。
+        templatePublishTxService.publishC1(id);
         cachedTemplateReader.invalidate(id);
-        // 发布=开桶协议（P2b v2 §7）：casAllocate 逐桶分配（allocated 单调不减）+ 建桶行 + Redis 开桶 Lua。
-        // 取代 ADR-0009 的 resetAll 整本重置——发布是状态机一次性迁移（UNPUBLISHED→PUBLISHED CAS 在上），
-        // 重发布对账协议（v2 §9）属 P7 appendStock/重新上线链路，届时配 COUNT 对账后开新代桶。
-        CouponTemplate published = templateRepository.findById(id).orElseThrow();
-        // 评审#5 精神保留：开桶前读旧读数落审计行（能整本改写桶键的路径不得在对账黑匣子里）
-        var before = redisStockGateway.conservation(id, 180_000);
-        stockBucketRouter.openInitialBuckets(id);
-        driftLog.record(new StockDriftLogGateway.DriftEvent(id, 0, before.dbi(), before.pend(),
-                published.getTotalCount(), published.getIssuedCount(), null,
-                before.stk(), before.sum() - published.getTotalCount(),
-                "OPEN_BUCKETS", "发布开桶（前读数留档；旧形态 RESET 已退役）", before.voidRetired(), null));
-        log.info("template published (openBuckets): id={}, total={}, 前读数 stk={} pend={} dbi={} void={}",
-                id, published.getTotalCount(),
-                before.stk(), before.pend(), before.dbi(), before.voidRetired());
     }
 
     /** 查询模板详情 */

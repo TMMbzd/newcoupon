@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -35,13 +36,12 @@ class TemplateAppServiceTest {
     @Mock
     private TemplateRepository repository;
     @Mock
-    private com.newcoupon.infrastructure.redis.RedisStockGateway stockGateway;
-
-    @Mock
     private CachedTemplateReader cachedTemplateReader;
 
     @Mock
     private SettlePartyPolicy settlePartyPolicy;   // 环 1 新增依赖；默认 false = 旧行为
+    @Mock
+    private TemplatePublishTxService publishTxService;
 
     @InjectMocks
     private TemplateAppService service;
@@ -108,8 +108,8 @@ class TemplateAppServiceTest {
                         0L,
                         com.newcoupon.domain.coupon.ApproveStatus.APPROVED,
                         PublishStatus.UNPUBLISHED)));
-        when(repository.casUpdatePublishStatus(1L, PublishStatus.UNPUBLISHED, PublishStatus.PUBLISHED))
-                .thenReturn(false);   // ← 模拟并发：条件更新影响 0 行
+        doThrow(new BizException(ErrorCode.STATE_CONFLICT, "并发发布"))
+                .when(publishTxService).publishC1(1L);
 
         assertThatThrownBy(() -> service.publish(1L))
                 .isInstanceOf(BizException.class)

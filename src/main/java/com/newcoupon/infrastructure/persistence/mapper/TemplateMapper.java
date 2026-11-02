@@ -43,12 +43,41 @@ public interface TemplateMapper extends BaseMapper<CouponTemplatePO> {
     java.util.List<CouponTemplatePO> selectPublished();
 
     /**
-     * 开桶 CAS（P2b v2 §5，D 簇）：把 N 张额度从"未分配"划给一个新桶。
-     * N=min(BUCKET_SIZE, total-allocated)（尾量语义——严格 BUCKET_SIZE 会在尾量时永远失败）。
-     * allocated 单调不减（v2 §9 生命周期不变量）：本 CAS 是唯一合法递增点。
-     * affected=0 且 allocated>=total → 真售罄（走 cancel sold_out 路径）。
+     * 行锁读：reshard/rollback 事务先锁模板行，再锁分片行——与库存调整的
+     * “模板 CAS → 分片 UPDATE”保持同一加锁顺序，避免 AB-BA 死锁。
      */
-    @Update("UPDATE coupon_template SET allocated = allocated + #{n} "
-            + "WHERE id = #{id} AND allocated + #{n} <= total_count AND #{n} > 0")
-    int casAllocate(@Param("id") long id, @Param("n") long n);
+    @Select("SELECT * FROM coupon_template WHERE id = #{id} FOR UPDATE")
+    CouponTemplatePO selectByIdForUpdate(@Param("id") long id);
+
+    /**
+     * C1 库存调整：按“预期总量”做乐观并发更新。
+     * 影响 0 行 = 总量已被并发调整；调用方按状态冲突处理。
+     */
+    @Update("UPDATE coupon_template SET total_count = #{target}, version = version + 1 "
+            + "WHERE id = #{id} AND total_count = #{expected}")
+    int casUpdateTotalCount(@Param("id") long id,
+                            @Param("expected") long expected,
+                            @Param("target") long target);
+
+    /** 发布建布局后把配置片数改写成实际 N_eff，领券路由直接用它（避免 total 很小时探测空片）。 */
+    @Update("UPDATE coupon_template SET stock_shard_count = #{n} "
+            + "WHERE id = #{id}")
+    int updateActualShardCount(@Param("id") long id, @Param("n") int n);
+
+    /**
+     * 布局版本与片数的原子切换（reshard 正向 / rollback 反向共用）。
+     *
+     * <p>{@code WHERE stock_layout_version=from AND total_count=expectedTotal} 是并发闸门：
+     * 并发的 reshard 或库存调整只要先提交，本语句就 0 行，调用方整体回滚。
+     * 0 行 = 状态已被并发变更，不盲写。
+     */
+    @Update("UPDATE coupon_template SET stock_layout_version = #{toVersion}, "
+            + "stock_shard_count = #{shardCount}, version = version + 1 "
+            + "WHERE id = #{id} AND stock_layout_version = #{fromVersion} "
+            + "AND total_count = #{expectedTotal}")
+    int casBumpLayoutVersion(@Param("id") long id,
+                             @Param("fromVersion") int fromVersion,
+                             @Param("toVersion") int toVersion,
+                             @Param("shardCount") int shardCount,
+                             @Param("expectedTotal") long expectedTotal);
 }
