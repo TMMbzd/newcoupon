@@ -107,6 +107,13 @@ coupon:
     retention-days: ${ISSUE_TASK_RETENTION_DAYS:7}
     counter-retention-days: ${ISSUE_COUNTER_RETENTION_DAYS:90}
     cleanup-cron: ${ISSUE_TASK_CLEANUP_CRON:0 17 4 * * ?}
+  # 批量发放任务域（V6 阶段 1A）。worker 默认关：受理端点常开，执行端按环境显式打开——
+  # 没有这个条目时 @ConditionalOnProperty 静默不装配，任务受理后永远 PENDING 且无任何提示。
+  grant:
+    worker:
+      enabled: ${GRANT_WORKER_ENABLED:false}
+      fixed-delay-ms: ${GRANT_WORKER_FIXED_DELAY_MS:5000}
+      initial-delay-ms: ${GRANT_WORKER_INITIAL_DELAY_MS:10000}
   id:
     # 空=启动时在 Redis 抢一个 0-1023 的 workerId 租约；显式 WORKER_ID 仍优先，但必须唯一。
     worker-id: ${WORKER_ID:}

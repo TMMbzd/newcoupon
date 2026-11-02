@@ -43,6 +43,8 @@ public enum ErrorCode {
     COUPON_NOT_USABLE(3004, "优惠券当前不可用"),
     /** 异步发放任务查询：requestId 不存在或不属于当前租户/用户 */
     ISSUE_TASK_NOT_FOUND(3005, "发放任务不存在"),
+    /** 批量发放任务查询/取消：taskNo 不存在或不属于当前应用（V6 阶段 1A） */
+    GRANT_TASK_NOT_FOUND(3006, "批量发放任务不存在"),
 
     // ---- 4xxx 用券域 ----
     USER_COUPON_NOT_FOUND(4001, "用户券不存在"),
