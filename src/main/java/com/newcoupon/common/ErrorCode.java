@@ -15,7 +15,7 @@ package com.newcoupon.common;
  *   4xxx   用券域（用：锁券/核销/回退）
  *   5xxx   系统与依赖（计/控）
  *   6xxx   接入域（S1 新增：签名/配额/幂等/版本/越权——"还没进业务就被拦下"）
- *   7xxx   安全域（风控频控 7001 / 管理令牌 7002）
+ *   7xxx   安全域（风控频控 7001 / 管理令牌 7002 / 管理面会话认证 7010-7012）
  * </pre>
  *
  * <p><b>为什么 6xxx 要单独一段</b>：它表示"请求连业务逻辑都没跑到就被接入层拒了"——
@@ -112,7 +112,13 @@ public enum ErrorCode {
     CLIENT_TOKEN_PROCESSING(6009, "相同 clientToken 的请求正在处理中，请稍后重试"),
     API_VERSION_UNSUPPORTED(6010, "不支持的接口版本"),
     RESOURCE_FORBIDDEN(6011, "无权访问该资源"),
-    CLIENT_TOKEN_MISSING(6012, "缺少 clientToken（写接口必须携带 X-Client-Token 头）");
+    CLIENT_TOKEN_MISSING(6012, "缺少 clientToken（写接口必须携带 X-Client-Token 头）"),
+
+    // ---- 7xxx 安全域（V6 2A：管理面会话认证族；HTTP 状态由安全链/控制器直接设置）----
+    // 文案纪律：登录失败族（7011）不区分"用户不存在/密码错/锁定"——区分即用户名枚举。
+    ADMIN_SESSION_REQUIRED(7010, "未登录或会话已过期"),
+    ADMIN_LOGIN_FAILED(7011, "用户名或密码错误"),
+    ADMIN_FORBIDDEN(7012, "无操作权限");
 
     private final int code;
     private final String message;

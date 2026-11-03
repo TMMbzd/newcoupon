@@ -18,10 +18,10 @@ import org.springframework.web.bind.annotation.RestController;
  * 三级预案的管理面（S2 第 10 步）。
  *
  * <p><b>路径为什么挂在 {@code /api/apps/{appId}/plans} 而不是新开一个前缀</b>：
- * 管理面鉴权（{@code AdminTokenFilter}）保护的是**显式列举的路径前缀**，
- * 新前缀若不在清单里，就等于在网上开了一个<b>无鉴权的"一键关闭全站"按钮</b>——
+ * 设计时管理面鉴权还靠"显式列举路径前缀"（今 {@code LegacyAdminTokenAuthenticationFilter}，
+ * 已反转为默认拒绝）——新前缀若漏登记，就等于在网上开了一个<b>无鉴权的"一键关闭全站"按钮</b>，
  * 任何能访问管理端口的人都能把核心领券/核销全量打成 5001。
- * 挂在 {@code /api/apps} 下天然落入受保护范围，不需要改鉴权清单。
+ * 挂在 {@code /api/apps} 下天然落入受保护范围，这条历史理由到今天依然成立（少一个要想的清单）。
  *
  * <p>三个入口：<b>套用</b>、<b>恢复</b>、<b>查看当前与历史</b>。
  * 只读的查看不设防（与 {@code GET /api/switches} 一致）。

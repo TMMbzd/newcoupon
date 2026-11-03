@@ -12,6 +12,7 @@ import com.newcoupon.common.context.OpenResource;
 import com.newcoupon.common.context.SwitchGuard;
 import com.newcoupon.application.service.SwitchKey;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -26,6 +27,12 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>两个前缀两种契约（S1 D1）：{@code /api/templates} 走管理令牌（平台运营），
  * {@code /open/v1/templates} 走签名（接入方自助建券）——**同一段业务代码，两套身份体系**。
  * 接入方只能用签名面，因此天然拿不到"管理令牌能做的事"（如查看别人的应用）。
+ *
+ * <p><b>方法安全（V6 2A 第一刀）</b>：写方法加 {@code @PreAuthorize("hasAuthority('template:write')")}。
+ * 三类调用方各自的通过路径——旧令牌（LegacyAdminTokenAuthenticationFilter 认证后持全量权限码）、
+ * 控制台会话（AdminAuthorityRefreshFilter 每请求从 DB 重载的权限码）、开放面签名
+ * （OpenApiSecurityContextAdapterFilter 把 HMAC 验签方翻译成链内 template:write 持有者）。
+ * 匿名请求到不了这里：写路径先被旧令牌过滤器 401（本刀维持的既有语义）。
  */
 @RestController
 @RequestMapping({"/api/templates", "/open/v1/templates"})
@@ -46,6 +53,7 @@ public class TemplateController {
     /** 建券。@Valid 触发 JSR-303 校验，失败由全局异常处理器统一转 Result */
     @PostMapping
     @OpenResource("templates/create")
+    @PreAuthorize("hasAuthority('template:write')")
     public Result<TemplateAppService.CreatedTemplate> create(@Valid @RequestBody TemplateCreateRequest req) {
         return Result.success(templateAppService.create(req));
     }
@@ -54,6 +62,7 @@ public class TemplateController {
     @PostMapping("/{id}/publish")
     @OpenResource("templates/publish")
     @SwitchGuard(SwitchKey.TEMPLATE_PUBLISH)
+    @PreAuthorize("hasAuthority('template:write')")
     public Result<Void> publish(@PathVariable long id) {
         templateAppService.publish(id);
         return Result.success();
@@ -65,6 +74,7 @@ public class TemplateController {
      */
     @PostMapping("/{id}/stock-adjust")
     @OpenResource("templates/stock-adjust")
+    @PreAuthorize("hasAuthority('template:write')")
     public Result<StockAdjustResult> adjustStock(@PathVariable long id,
                                                  @Valid @RequestBody StockAdjustRequest req) {
         return Result.success(stockShardAdjustService.adjust(id, req));

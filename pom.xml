@@ -66,6 +66,19 @@
       <version>${resilience4j.version}</version>
     </dependency>
 
+    <!-- V6 2A：Spring Security 6 过滤器链 + 管理面会话认证（设计见 docs/research-2026-10-21/01 §4 2A）。
+         版本由 Boot BOM 管理（3.3.5 → Security 6.3.x）。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <!-- V6 2A：管理面会话存 Redis（RedisIndexedSessionRepository，支持按用户名索引会话
+         → 强制下线）。与业务键隔离：命名空间 c:session（见 SessionConfig）。 -->
+    <dependency>
+      <groupId>org.springframework.session</groupId>
+      <artifactId>spring-session-data-redis</artifactId>
+    </dependency>
+
     <!-- 健康检查探针：本地是 actuator/health，未来上 K8s 就是 liveness/readiness probe -->
     <dependency>
       <groupId>org.springframework.boot</groupId>

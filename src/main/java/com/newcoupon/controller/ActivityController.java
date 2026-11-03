@@ -14,7 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * 营销活动接口（V6 阶段 1C，仅内部面 {@code /api/activities}）。
- * POST 非白名单路径——AdminTokenFilter 判据反转版自动保护（新增管理写接口
+ * POST 非白名单路径——LegacyAdminTokenAuthenticationFilter 判据反转版自动保护（新增管理写接口
  * 不需要登记即受管）；GET 按全站口径不设防（只读面）。
  * 归属校验在服务层（{@link com.newcoupon.application.service.AppOwnership}）。
  */

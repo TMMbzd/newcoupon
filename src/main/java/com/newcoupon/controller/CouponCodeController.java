@@ -50,7 +50,7 @@ public class CouponCodeController {
     /**
      * 明文一次性 CSV 导出：BOM+表头 code,user,status,redeemTime；二次请求 4002。
      * 用 POST 而非 GET 是**安全判据要求**：此端点非只读（CAS export_state+删暂存）且出口是
-     * 全量明文码——AdminTokenFilter 的判据反转是"非 GET 默认拒绝"，GET 会被匿名拉走
+     * 全量明文码——LegacyAdminTokenAuthenticationFilter 的判据反转是"非 GET 默认拒绝"，GET 会被匿名拉走
      * 全部码明文并烧掉属主的一次性导出资格（对抗审查 critical，batchNo 雪花可推算）。
      */
     @PostMapping("/batches/{batchNo}/codes")

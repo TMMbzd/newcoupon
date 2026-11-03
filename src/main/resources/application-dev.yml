@@ -39,6 +39,10 @@ coupon:
       enabled: ${ISSUE_ASYNC_WORKER_ENABLED:true}
   admin:
     token: dev-admin-token
+  # V6 2A dev 便利：种子管理员初始密码（仅 admin 用户不存在时建号用；启动日志会 WARN 提醒）。
+  # 测试环境（dev profile 激活）同样拿到这个值——SecurityRbacIntegrationTest 依赖它登录。
+  security:
+    seed-admin-password: ${SEED_ADMIN_PASSWORD:dev-seed-admin-123}
   # S1 开放平台：接入方密钥（SK）的加密主密钥（Base64 的 32 字节 = AES-256）。
   # **只在 dev 有默认值**：生产必须用环境变量 OPEN_SECRET_MASTER_KEY 注入——
   # application.yml 里该配置默认为空，SecretCipher 遇到空值直接启动失败（fail-fast）：

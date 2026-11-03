@@ -46,7 +46,7 @@ import org.springframework.http.ResponseEntity;
         // 固定主密钥：测试不依赖 dev 配置，也避免"主密钥未配置→启动失败"的 fail-fast 误伤
         "coupon.open.secret-master-key=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
         "coupon.open.secret-rotation-hours=168",     // 7 天，与默认一致；显式写出便于断言
-        "coupon.admin.token=test-admin-token"        // 管理面接口用例要过 AdminTokenFilter
+        "coupon.admin.token=test-admin-token"        // 管理面接口用例要过 LegacyAdminTokenAuthenticationFilter
 })
 class OpenAppRegistryIntegrationTest extends ShardedIntegrationTestSupport {
 

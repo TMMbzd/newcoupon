@@ -88,6 +88,18 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 方法安全的拒绝（V6 2A）：@PreAuthorize 不通过抛的 AccessDeniedException 必须**原样上抛**，
+     * 让安全链的 ExceptionTranslationFilter 决定 401（匿名）还是 403（权限不足）。
+     *
+     * <p>为什么必须显式兜这一手：下面的兜底 handler 捕 Exception——不重抛的话，
+     * 拒绝会被吞成"HTTP 200 + 5000 系统繁忙"，前端既看不到 403，监控里还多了一批假系统错误。
+     */
+    @ExceptionHandler(org.springframework.security.access.AccessDeniedException.class)
+    public void handleAccessDenied(org.springframework.security.access.AccessDeniedException e) {
+        throw e;   // 交给安全链出正确的 401/403（REST 场景无登录页重定向）
+    }
+
+    /**
      * HTTP 方法不支持：例如对只允许 POST 的财务查询发 GET。
      * 不落到兜底 5000——那是"系统异常"，会误导排障；405 才是准确的。
      */

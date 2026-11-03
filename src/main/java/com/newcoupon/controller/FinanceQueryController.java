@@ -19,7 +19,7 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * 财务/客服查询（环 3，仅内部面）。
  *
- * <p>为什么全部用 POST：`AdminTokenFilter` 只保护非 GET 的 `/api/**`；
+ * <p>为什么全部用 POST：`LegacyAdminTokenAuthenticationFilter`（旧名 AdminTokenFilter）只保护非 GET 的 `/api/**`；
  * 财务数据走 GET 会在现有过滤器下无鉴权。这些路径不在业务写白名单里，
  * 因此自动要求 `X-Admin-Token`（判据反转，新增管理写接口无需登记）。
  *

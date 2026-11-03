@@ -26,7 +26,7 @@ import java.util.List;
 /**
  * 财务/客服查询（环 3，仅内部面）。
  *
- * <p><b>为什么只开 POST</b>：`AdminTokenFilter` 只保护非 GET 的 `/api/**`；
+ * <p><b>为什么只开 POST</b>：`LegacyAdminTokenAuthenticationFilter`（旧名 AdminTokenFilter）只保护非 GET 的 `/api/**`；
  * 财务数据不能走无鉴权的 GET。POST 查询天然落入默认拒绝，不需要登记业务白名单。
  *
  * <p><b>分页</b>：项目没有 MyBatis 分页插件，这里用 `COUNT + LIMIT/OFFSET`；

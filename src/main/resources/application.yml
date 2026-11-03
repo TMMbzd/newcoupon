@@ -194,8 +194,29 @@ coupon:
   # L38 修复（评审 P1-12）：默认值改空——此前默认 dev-admin-token 使 fail-closed 分支不可达，
   # 未设环境变量的部署等于管理面无鉴权（发布=铸造库存额度的入口）。dev 便利值挪 application-dev.yml。
   # 生产必须用环境变量 ADMIN_TOKEN 覆盖；完整 HMAC/防重放/双人复核在 P7
+  # V6 2A 起该令牌由 SecurityConfig 装配进安全链（LegacyAdminTokenAuthenticationFilter），
+  # 对外语义不变；RBAC 全面接管后保留一个发布周期即删除（设计裁定）。
   admin:
     token: ${ADMIN_TOKEN:}
+  # 管理面安全（V6 2A 第一刀）：种子管理员 / actuator Basic / 登录锁定 / 会话时长。
+  # 完整说明见 docs/research-2026-10-21/01 §4 2A 与 SecurityConfig/SessionConfig。
+  security:
+    # 种子管理员 admin 的初始密码：仅**建号时**读取一次（已存在不覆盖——改环境变量重置密码
+    # 比"固定默认密码"更危险）。公共配置留空=不建号（fail-safe）；dev 便利值在 application-dev.yml。
+    seed-admin-password: ${SEED_ADMIN_PASSWORD:}
+    # actuator 链的 Basic 凭据（机器凭据，与 admin_user 人肉账号分治）。
+    # 留空=随机生成（等价于关掉 Basic 入口；/health /info /prometheus 仍匿名可读）。
+    actuator:
+      username: ${ACTUATOR_AUTH_USER:actuator}
+      password: ${ACTUATOR_AUTH_PASSWORD:}
+    # 登录失败锁定：窗口内连续失败 max-attempts 次锁 lock-window（Redis 计数，键 c:admin:auth:fail:*）
+    login:
+      max-attempts: ${ADMIN_LOGIN_MAX_ATTEMPTS:5}
+      lock-window: ${ADMIN_LOGIN_LOCK_WINDOW:15m}
+    # 控制台会话时长：空闲 30 分钟（Spring Session maxInactive）/ 绝对 8 小时（Refresh 过滤器核对）
+    session:
+      idle-timeout: ${CONSOLE_SESSION_IDLE_TIMEOUT:30m}
+      absolute-timeout: ${CONSOLE_SESSION_ABSOLUTE_TIMEOUT:8h}
   # P2d 发件箱传输开关（ADR-0011）：log=日志传输（默认，测试/无MQ环境）；rocketmq=真传输
   # （compose 起 rocketmq-namesrv/broker 后切换——生产用环境变量 OUTBOX_TRANSPORT 覆盖）
   outbox:
@@ -222,7 +243,11 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,prometheus     # 2e-⑤ 加 Prometheus 抓取端点（指标不含敏感信息）
+        # V6 2A 加 metrics（细粒度指标，含标签值——与只读的 prometheus 抓取面不同）：
+        # 暴露面收在安全链上（SecurityConfig actuator 链：health/info/prometheus 匿名，
+        # 其余要 ROLE_ACTUATOR + Basic）。**未配 ACTUATOR_AUTH_PASSWORD 时 Basic 凭据随机**，
+        # 等价于 metrics 不可达——需要的环境再显式开。
+        include: health,info,prometheus,metrics
   endpoint:
     health:
       show-details: never        # 健康详情不对外暴露（含中间件拓扑，属于敏感信息）

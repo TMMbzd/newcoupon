@@ -19,7 +19,7 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * 支付后核销异常管理面（环 2）。
  *
- * <p><b>只在内部面</b>：{@code /api/**} 的非 GET 请求由 {@code AdminTokenFilter}
+ * <p><b>只在内部面</b>：{@code /api/**} 的非 GET 请求由 {@code LegacyAdminTokenAuthenticationFilter}（V6 2A 前叫 AdminTokenFilter）
  * 默认要求 {@code X-Admin-Token}（不在业务写白名单里，无需登记）；开放面没有这个入口。
  *
  * <p>GET 沿用项目现状（管理面只读不设令牌，见 00/07 的信任边界）；真正的 RBAC

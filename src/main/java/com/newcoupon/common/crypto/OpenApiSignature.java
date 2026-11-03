@@ -131,7 +131,7 @@ public final class OpenApiSignature {
 
     /**
      * 验签：<b>恒定时间比较</b>。用 {@code String.equals} 会在第一个不同字符处短路返回，
-     * 攻击者可以靠响应时间逐字节猜签名（时序侧信道）——与 AdminTokenFilter 同款处理。
+     * 攻击者可以靠响应时间逐字节猜签名（时序侧信道）——与旧管理令牌过滤器（今 LegacyAdminTokenAuthenticationFilter）同款处理。
      */
     public static boolean verify(String secret, String canonical, String providedSignature) {
         if (providedSignature == null) {
