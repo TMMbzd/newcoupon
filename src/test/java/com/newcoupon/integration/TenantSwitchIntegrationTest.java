@@ -162,7 +162,12 @@ class TenantSwitchIntegrationTest extends ShardedIntegrationTestSupport {
     // ------------------------------------------------------------------
 
     private JsonNode listSwitches(String appId) throws Exception {
-        var r = rest.getForEntity("/api/switches?appId=" + appId, String.class);
+        // 2A-2 翻面起 /api GET 要管理员令牌（匿名 401）；本类没配 token，用 dev 默认令牌
+        var headers = new org.springframework.http.HttpHeaders();
+        headers.set("X-Admin-Token", "dev-admin-token");   // application-dev.yml 的 dev 便利令牌
+        var r = rest.exchange("/api/switches?appId=" + appId,
+                org.springframework.http.HttpMethod.GET,
+                new org.springframework.http.HttpEntity<>(headers), String.class);
         return objectMapper.readTree(r.getBody()).path("data");
     }
 

@@ -7,6 +7,8 @@
 #   · 专用 schema + 专用 Redis 端口，不碰 dev 库与 dev Redis；
 #   · 断言失败一律 fail()，由主脚本的 EXIT trap 统一清理并打印 FAIL 行；
 #   · 跨进程证据 = 两个实例各自 /actuator/prometheus 上
+# 2A-2 起 prometheus 抓取需要 Basic 凭据
+ACTUATOR_AUTH="${ACTUATOR_AUTH:-actuator:it-actuator-pass}"
 #     issue_gate_result_total{result="repair_gate_*"} 的增量之和。
 #
 # 依赖：调用方先 source scripts/open-api/lib.sh（ok/warn/fail/step/json_get）。
@@ -418,7 +420,7 @@ gr_publish_template() {  # $1=base
 
 # ---------------------------------------------------------------- 指标
 gr_scrape() {
-  curl -sS --max-time 5 "http://127.0.0.1:$1/actuator/prometheus" 2>/dev/null || true
+  curl -sS --max-time 5 -u "$ACTUATOR_AUTH" "http://127.0.0.1:$1/actuator/prometheus" 2>/dev/null || true
 }
 
 gr_counter() {  # $1=端口 $2=result 标签值

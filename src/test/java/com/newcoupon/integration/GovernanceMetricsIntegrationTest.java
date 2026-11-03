@@ -46,7 +46,10 @@ import org.springframework.http.MediaType;
                 "coupon.open.secret-master-key=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
                 // IP 频控收紧到 1 次/窗口：第 2 发必被拒（窗口 60 秒，不受秒边界影响）
                 "coupon.risk.ip-rate.max-per-window=1",
-                "coupon.risk.ip-rate.window-seconds=60"
+                "coupon.risk.ip-rate.window-seconds=60",
+                // 2A-2 起 /actuator/prometheus 要 ROLE_ACTUATOR + Basic——给本上下文配已知凭据
+                "coupon.security.actuator.username=actuator",
+                "coupon.security.actuator.password=it-actuator-pass"
         })
 class GovernanceMetricsIntegrationTest extends ShardedIntegrationTestSupport {
 
@@ -191,7 +194,12 @@ class GovernanceMetricsIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     private String scrape() {
-        var response = rest.getForEntity("/actuator/prometheus", String.class);
+        // 2A-2 起 prometheus 不在匿名面：带上 Basic 凭据（与生产抓取器同款迁移路径，
+        // 见 docs/runbook/管理面认证翻面.md）
+        HttpHeaders basic = new HttpHeaders();
+        basic.setBasicAuth("actuator", "it-actuator-pass");
+        var response = rest.exchange("/actuator/prometheus", org.springframework.http.HttpMethod.GET,
+                new HttpEntity<>(basic), String.class);
         assertThat(response.getStatusCode().value()).as("抓取端点必须可用").isEqualTo(200);
         return response.getBody();
     }

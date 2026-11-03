@@ -5,6 +5,7 @@ import com.newcoupon.application.service.AuditService;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.Result;
 import com.newcoupon.infrastructure.persistence.mapper.AdminRbacMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
@@ -42,17 +43,22 @@ import org.springframework.security.web.util.matcher.RequestMatcher;
  *   ① /open/**      permitAll + stateless + 无 CSRF——HMAC 由前置的 OpenApiAuthFilter（普通
  *                   Servlet 过滤器，@Order 更小，先于安全链执行）自己把关；本链只负责把已验签
  *                   的身份翻译成 Authentication（OpenApiSecurityContextAdapterFilter）。
- *   ② /actuator/**  health/info/prometheus 公开（沿用既有暴露面），其余 hasRole(ACTUATOR)
- *                   + httpBasic。**必须独立成链**：自定义 SecurityFilterChain 存在时 Boot 的
- *                   管理端安全自动配置退让，不单配就是整面裸奔（设计文档点名的坑）。
- *   ③ 其余(兜底)    /api/** 与 /console/api/**。本刀维持现状语义：web 层全放行，认证授权由
- *                   LegacyAdminTokenAuthenticationFilter（写路径要旧令牌，语义原样搬入）+
- *                   AdminAuthorityRefreshFilter（会话四道核对+权限重载）+ 方法安全承担。
+ *   ② /actuator/**  health/info 公开（K8s 探针无凭据），prometheus 2A-2 起要
+ *                   ROLE_ACTUATOR + Basic（抓取器发凭据——metrics 含标签值，不属于匿名面），
+ *                   其余同样 hasRole(ACTUATOR) + httpBasic。**必须独立成链**：自定义
+ *                   SecurityFilterChain 存在时 Boot 的管理端安全自动配置退让，
+ *                   不单配就是整面裸奔（设计文档点名的坑）。
+ *   ③ 其余(兜底)    /api/** 与 /console/api/**。web 层仍全放行，认证判据由
+ *                   LegacyAdminTokenAuthenticationFilter 承担：2A-2 起 /api、/console 的
+ *                   **所有方法**都要"旧令牌或会话"（GET 匿名放行分支已删，破坏性变更——
+ *                   公告 docs/runbook/管理面认证翻面.md，回滚开关
+ *                   coupon.security.api-read-auth-enabled）；AdminAuthorityRefreshFilter
+ *                   （会话四道核对+权限重载）+ 方法安全继续各管一段。
  *                   CSRF 只对 /console/api/** 生效（Cookie + SPA 头）。
  * </pre>
  *
- * <p><b>本刀不做的翻面</b>（留给 2A-2）：/api GET 匿名可读、管理写路径的旧令牌要求——
- * 全部原样保留，全量回归绿是这刀的验收线。
+ * <p><b>本刀（2A-2）不做的</b>：删除旧令牌路径、删 BUSINESS_WRITE_PATHS 白名单——
+ * 都留到令牌用量（admin_legacy_token_usage_total）归零后的下一个发布周期。
  */
 @Configuration
 @EnableWebSecurity
@@ -102,11 +108,13 @@ public class SecurityConfig {
                                       UserDetailsService actuatorUserDetailsService) throws Exception {
         http.securityMatcher("/actuator/**")
                 .authorizeHttpRequests(auth -> auth
-                        // health/info/prometheus 沿用既有"匿名可读"语义（K8s 探针/抓取器无凭据）；
-                        // 锁这三个端点的翻面要先给抓取器发凭据，归 2A-2
+                        // 匿名面只剩 health/info（K8s 探针无凭据，只有这两个是探活语义）。
+                        // prometheus 2A-2 起收进凭据面：抓取文本带标签值（租户/资源名），
+                        // 匿名等于把内部拓扑白送；抓取器按 runbook 配 Basic 凭据
+                        // （coupon.security.actuator.username/password）。
                         .requestMatchers("/actuator/health", "/actuator/health/**",
-                                "/actuator/info", "/actuator/prometheus").permitAll()
-                        // 其余（metrics/env/...）一律要 ROLE_ACTUATOR + Basic 认证
+                                "/actuator/info").permitAll()
+                        // 其余（prometheus/metrics/env/...）一律要 ROLE_ACTUATOR + Basic 认证
                         .anyRequest().hasRole("ACTUATOR"))
                 .userDetailsService(actuatorUserDetailsService)   // 只给本链：控制台用户不走 Basic
                 .httpBasic(basic -> basic.realmName("newcoupon-actuator"))
@@ -124,12 +132,17 @@ public class SecurityConfig {
                                      AdminRbacMapper rbacMapper,
                                      AuditService auditService,
                                      ObjectMapper objectMapper,
+                                     MeterRegistry meterRegistry,
                                      @Value("${coupon.security.session.absolute-timeout:8h}")
                                      java.time.Duration absoluteTimeout,
-                                     @Value("${coupon.admin.token:}") String adminToken) throws Exception {
+                                     @Value("${coupon.admin.token:}") String adminToken,
+                                     @Value("${coupon.security.api-read-auth-enabled:true}")
+                                     boolean apiReadAuthEnabled) throws Exception {
         http
-                // 本刀维持现状：web 层全放行。真正的门是——写路径的旧令牌过滤器（语义未动）、
-                // /console/api/** 的 CSRF、方法安全 @PreAuthorize。2A-2 才把 /api GET 翻成需认证。
+                // web 层仍全放行（不给 /api 配 anyRequest().authenticated）：认证判据集中在
+                // LegacyAdminTokenAuthenticationFilter 一处——它同时认"旧令牌或会话"两种凭证，
+                // 且拒绝形状是业务统一的 7002；web 层再设一道会把拒绝变成安全链的 7010，
+                // 两套 401 形状反而让调用方迁移时多猜一次。授权仍归 @PreAuthorize。
                 .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                 // 会话按需创建：只有控制台登录（显式 getSession）会建立会话；
                 // /api 业务调用全程不碰 session，不会凭空多出 Redis 会话与 Set-Cookie
@@ -151,7 +164,10 @@ public class SecurityConfig {
                 // 不加 @Component 的原因——Boot 会把 Filter 类型的 @Bean 再注册一遍全局 Servlet
                 // 过滤器，等于同一段逻辑在安全链外又跑一次（设计文档明令避免的双注册）
                 .addFilterBefore(
-                        new LegacyAdminTokenAuthenticationFilter(adminToken, rbacMapper),
+                        // meterRegistry 用于旧令牌退役计数（admin_legacy_token_usage_total）；
+                        // apiReadAuthEnabled=false 是 2A-2 翻面的回滚开关（恢复 GET 匿名放行）
+                        new LegacyAdminTokenAuthenticationFilter(adminToken, rbacMapper,
+                                meterRegistry, apiReadAuthEnabled),
                         AuthorizationFilter.class)
                 .addFilterBefore(
                         new AdminAuthorityRefreshFilter(rbacMapper, objectMapper, auditService, absoluteTimeout),

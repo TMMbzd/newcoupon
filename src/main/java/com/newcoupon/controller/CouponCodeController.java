@@ -49,9 +49,11 @@ public class CouponCodeController {
 
     /**
      * 明文一次性 CSV 导出：BOM+表头 code,user,status,redeemTime；二次请求 4002。
-     * 用 POST 而非 GET 是**安全判据要求**：此端点非只读（CAS export_state+删暂存）且出口是
-     * 全量明文码——LegacyAdminTokenAuthenticationFilter 的判据反转是"非 GET 默认拒绝"，GET 会被匿名拉走
-     * 全部码明文并烧掉属主的一次性导出资格（对抗审查 critical，batchNo 雪花可推算）。
+     * 用 POST 而非 GET 是**语义自洽**：此端点非只读（CAS export_state+删暂存）且出口是
+     * 全量明文码。2A-2 翻面后 LegacyAdminTokenAuthenticationFilter 对 GET 同样要认证，
+     * 但语义上它本就该与写方法同类——回滚开关打开（GET 匿名放行）的窗口期里，
+     * GET 形态的这个端点会重新变成"匿名拉走全部码明文并烧掉属主的一次性导出资格"
+     * （对抗审查 critical，batchNo 雪花可推算），所以永远不提供 GET 形态。
      */
     @PostMapping("/batches/{batchNo}/codes")
     @OpenResource("code/batch/export")

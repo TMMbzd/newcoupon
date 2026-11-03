@@ -25,11 +25,16 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * V6 2A 第一刀验收（设计：docs/research-2026-10-21/01 §4 2A）。
+ * V6 2A 验收（设计：docs/research-2026-10-21/01 §4 2A）。
  *
- * <p>覆盖矩阵：①链结构（旧令牌语义钉住 + 匿名 GET 现状钉住 + /open 链不认会话）
+ * <p>覆盖矩阵：①链结构（旧令牌语义钉住 + **2A-2 翻面：匿名 GET /api 一律 401** + /open 链不认会话）
  * ②登录/me/登出 ③CSRF ④失败锁定 ⑤角色权限矩阵 ⑥权限即时生效 ⑦停用即失效
- * ⑧强制下线 ⑨actuator 链 ⑩认证审计落库。
+ * ⑧强制下线 ⑨actuator 链（health 匿名、metrics/prometheus 要 Basic——2A-2 收窄）
+ * ⑩认证审计落库 ⑪翻面验收三件套（匿名 GET 模板 401 / 旧令牌计数 / prometheus 凭据化）。
+ *
+ * <p>@AutoConfigureObservability：⑪ 要抓 /actuator/prometheus 断言
+ * admin_legacy_token_usage_total——@SpringBootTest 默认禁掉指标导出（端点 404），
+ * 必须显式开（与 GovernanceMetricsIntegrationTest 同一个坑）。
  *
  * <p>时间相关用例（空闲/绝对超时）单独在 {@link SecurityRbacSessionTimeoutIntegrationTest}
  * ——它们的短超时配置会换一个 Spring 上下文，与本类互不污染。
@@ -38,8 +43,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 不清理（共享库既定纪律：独有标识即隔离）。
  */
 @Import(securityprobe.RbacProbeController.class)
+@org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "coupon.security.actuator.password=it-actuator-pass",   // ⑨ Basic 正向断言用的已知凭据
+        "coupon.security.actuator.password=it-actuator-pass",   // ⑨⑪ Basic 正向断言用的已知凭据
         "coupon.security.login.ip-limit=1000"   // 整类几十次登录全来自 127.0.0.1，节流留给专测
 })
 class SecurityRbacIntegrationTest extends ShardedIntegrationTestSupport {
@@ -172,11 +178,13 @@ class SecurityRbacIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("① 匿名 GET /api 照旧 200（只读面公开——本刀不翻面，现状钉住）")
-    void chainMatrix_anonymousGetStillOpen() {
+    @DisplayName("① 翻面后：匿名 GET /api 一律 401 + 7002（2A-1 曾钉住'匿名 200'，2A-2 推翻）")
+    void chainMatrix_anonymousGetNowRejected() {
         ResponseEntity<String> resp = rest.getForEntity("/api/ping", String.class);
-        assertThat(resp.getStatusCode().value()).isEqualTo(200);
-        assertThat(resp.getBody()).contains("pong");
+        assertThat(resp.getStatusCode().value())
+                .as("只读面匿名放行的时代结束：GET 与写方法同一判据（破坏性变更，"
+                        + "公告 docs/runbook/管理面认证翻面.md）").isEqualTo(401);
+        assertThat(resp.getBody()).contains("7002");
     }
 
     @Test
@@ -370,6 +378,69 @@ class SecurityRbacIntegrationTest extends ShardedIntegrationTestSupport {
                 new HttpEntity<>(basic), String.class);
         assertThat(metricsAuth.getStatusCode().value())
                 .as("ROLE_ACTUATOR + Basic 放行。body=" + metricsAuth.getBody()).isEqualTo(200);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑪ 2A-2 翻面验收三件套：匿名 GET 401 / 旧令牌计数 / prometheus 凭据化
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("⑪-1 匿名 GET /api/templates/{id} → 401 + 7002（翻面钉住：只读面不再匿名）")
+    void flip_anonymousGetTemplateRejected() {
+        ResponseEntity<String> resp = rest.getForEntity("/api/templates/999999", String.class);
+        assertThat(resp.getStatusCode().value())
+                .as("2A-2 判据：/api 所有方法都要'旧令牌或会话'，GET 不例外").isEqualTo(401);
+        assertThat(resp.getBody()).contains("7002");
+    }
+
+    @Test
+    @DisplayName("⑪-2 旧令牌 GET 200，且 admin_legacy_token_usage_total 恰好 +1（退役计时）")
+    void flip_legacyTokenGetCountsUsage() {
+        double before = legacyTokenUsage(scrapePrometheus());
+
+        HttpHeaders token = new HttpHeaders();
+        token.set("X-Admin-Token", "dev-admin-token");   // dev profile 的便利令牌（application-dev.yml）
+        ResponseEntity<String> resp = rest.exchange("/api/templates/999999", HttpMethod.GET,
+                new HttpEntity<>(token), String.class);
+        assertThat(resp.getStatusCode().value())
+                .as("带旧令牌的 GET 照常放行（业务结果 200，模板不存在走业务码）"
+                        + "。body=" + resp.getBody()).isEqualTo(200);
+
+        // 计数断言用"前后差"而不是绝对值：本类 ① 的 POST 也用旧令牌，测试方法顺序不该影响结果
+        double after = legacyTokenUsage(scrapePrometheus());
+        assertThat(after)
+                .as("每次旧令牌命中计数 +1——删除令牌路径前看它是否归零（首次还会 WARN 迁移提醒）")
+                .isEqualTo(before + 1.0);
+    }
+
+    @Test
+    @DisplayName("⑪-3 /actuator/prometheus 匿名 401；Basic(ACTUATOR) 200（抓取器必须配凭据）")
+    void flip_prometheusRequiresBasic() {
+        ResponseEntity<String> anon = rest.getForEntity("/actuator/prometheus", String.class);
+        assertThat(anon.getStatusCode().value())
+                .as("抓取文本带标签值（租户/资源名），2A-2 起不属于匿名面").isEqualTo(401);
+
+        assertThat(scrapePrometheus())
+                .as("配上 Basic 凭据的抓取器照常工作（迁移路径见 runbook 管理面认证翻面.md）")
+                .contains("admin_legacy_token_usage_total");
+    }
+
+    /** 抓 /actuator/prometheus（2A-2 起要 Basic 凭据）。 */
+    private String scrapePrometheus() {
+        HttpHeaders basic = new HttpHeaders();
+        basic.setBasicAuth("actuator", "it-actuator-pass");
+        ResponseEntity<String> resp = rest.exchange("/actuator/prometheus", HttpMethod.GET,
+                new HttpEntity<>(basic), String.class);
+        assertThat(resp.getStatusCode().value()).as("带凭据抓取必须可用").isEqualTo(200);
+        return resp.getBody();
+    }
+
+    /** 从抓取文本解析 admin_legacy_token_usage_total 的当前值（指标还没被计数过时视为 0）。 */
+    private double legacyTokenUsage(String scrapeText) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(?m)^admin_legacy_token_usage_total\\s+([0-9.eE+-]+)")
+                .matcher(scrapeText);
+        return m.find() ? Double.parseDouble(m.group(1)) : 0.0;
     }
 
     // ------------------------------------------------------------------

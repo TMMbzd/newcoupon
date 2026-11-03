@@ -48,7 +48,10 @@ import org.springframework.beans.factory.annotation.Value;
                 "coupon.ratelimit.ip.enabled=true",
                 "coupon.ratelimit.ip.qps=2",
                 "coupon.ratelimit.resource.enabled=false",   // 只验 IP 维度，别让接口维度插手
-                "coupon.risk.ip-rate.enabled=false"          // 别让风控的 IP 频控抢先拒掉
+                "coupon.risk.ip-rate.enabled=false",         // 别让风控的 IP 频控抢先拒掉
+                // 2A-2 起 /actuator/prometheus 要 ROLE_ACTUATOR + Basic——给本上下文配已知凭据
+                "coupon.security.actuator.username=actuator",
+                "coupon.security.actuator.password=it-actuator-pass"
         })
 class SentinelIpDimensionTest extends ShardedIntegrationTestSupport {
 
@@ -148,7 +151,7 @@ class SentinelIpDimensionTest extends ShardedIntegrationTestSupport {
         String ip = uniqueIp("10.74");
         fireConcurrently(8, ip);      // 自己造出这次拒绝，断言才自包含
 
-        var scrape = rest.getForEntity("/actuator/prometheus", String.class);
+        var scrape = scrapePrometheus();
         assertThat(scrape.getStatusCode().value()).isEqualTo(200);
 
         assertThat(scrape.getBody())
@@ -192,6 +195,17 @@ class SentinelIpDimensionTest extends ShardedIntegrationTestSupport {
     /** 每个用例独占一个来源 IP：共享容器/共享 Redis 下，"数据自己建且别人建不出来"的同一纪律 */
     private static String uniqueIp(String prefix) {
         return prefix + "." + (System.nanoTime() % 250) + "." + (System.nanoTime() % 250);
+    }
+
+    /**
+     * 抓 /actuator/prometheus（2A-2 起不在匿名面）：带 Basic 凭据——与生产抓取器同款迁移路径
+     * （docs/runbook/管理面认证翻面.md）。
+     */
+    private org.springframework.http.ResponseEntity<String> scrapePrometheus() {
+        var headers = new org.springframework.http.HttpHeaders();
+        headers.setBasicAuth("actuator", "it-actuator-pass");
+        return rest.exchange("/actuator/prometheus", org.springframework.http.HttpMethod.GET,
+                new org.springframework.http.HttpEntity<>(headers), String.class);
     }
 
     private static List<Integer> statuses(List<OpenApiTestClient.Response> responses) {

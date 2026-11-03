@@ -89,7 +89,7 @@ ok "服务可达"
 [[ ! -f "$STATE_FILE" ]] || fail "发现残留的演练状态文件 $STATE_FILE——
 上次演练可能被中断（Ctrl-C 或断电）。请先确认 Redis 未被暂停、开关已恢复，再删除该文件重跑。
   docker ps --filter name=$REDIS_CONTAINER    # 状态应为 Up 而非 Paused
-  curl -sS $BASE/api/switches/breakers"
+  curl -sS $BASE/api/switches/breakers -H 'X-Admin-Token: <你的管理令牌>'   # 2A-2 起 GET 也要令牌"
 
 # ---------------------------------------------------------------- 准备
 step "1. 准备两个演练租户（drill- 前缀，便于与真实租户区分）"
@@ -163,7 +163,10 @@ PASS=$((PASS + 3))
 
 # ---------------------------------------------------------------- 新增：防线失效的可见性
 step "4'. 防线失效必须**看得见**（S3 第 6.5/7 步的承诺，在这里验）"
-text=$(curl -sS "$BASE/actuator/prometheus" 2>/dev/null || echo "")
+# 2A-2 起 prometheus 需要 Basic 凭据（与 SecurityConfig 的 actuator 链一致）；
+# ACTUATOR_AUTH 默认值=SecurityRbacIntegrationTest 同款 dev 凭据，生产用环境变量覆盖
+ACTUATOR_AUTH="${ACTUATOR_AUTH:-actuator:it-actuator-pass}"
+text=$(curl -sS -u "$ACTUATOR_AUTH" "$BASE/actuator/prometheus" 2>/dev/null || echo "")
 # ① 风控闸（Redis 频控）在故障期间是 fail-open 的——但它必须留下痕迹，
 #    否则"风控闸已经失效"与"今天没人刷"在监控上完全一样。
 printf '%s' "$text" | grep -q 'coupon_ratelimit_failopen_total{dimension="risk_ip"}' \

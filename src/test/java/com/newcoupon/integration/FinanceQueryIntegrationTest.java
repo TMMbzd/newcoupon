@@ -160,8 +160,18 @@ class FinanceQueryIntegrationTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("Q0: 查询路径没有 GET 映射——财务数据不能走无鉴权 GET")
     void queryPathsHaveNoGetMapping() {
-        ResponseEntity<String> r = rest.getForEntity("/api/refunds/query", String.class);
-        assertThat(r.getStatusCode().value()).isNotEqualTo(200);
+        // 两层防线各自钉一次：
+        // ①匿名 GET → 401 + 7002（2A-2 翻面：/api 所有方法都要"旧令牌或会话"）
+        ResponseEntity<String> anonymous = rest.getForEntity("/api/refunds/query", String.class);
+        assertThat(anonymous.getStatusCode().value()).isEqualTo(401);
+        assertThat(anonymous.getBody()).contains("7002");
+
+        // ②带令牌 → 405：查询端点只映射了 POST——就算翻面开关回滚，GET 也进不了查询
+        HttpHeaders withToken = new HttpHeaders();
+        withToken.set("X-Admin-Token", ADMIN_TOKEN);
+        ResponseEntity<String> allowed = rest.exchange("/api/refunds/query", HttpMethod.GET,
+                new HttpEntity<>(withToken), String.class);
+        assertThat(allowed.getStatusCode().value()).isEqualTo(405);
     }
 
     @Test

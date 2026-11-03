@@ -232,7 +232,10 @@ class SwitchPlanIntegrationTest extends ShardedIntegrationTestSupport {
     void h3_listShowsActiveAndAvailable() throws Exception {
         planService.apply(appId, SwitchPlan.YELLOW, OPERATOR, "test");
 
-        var r = rest.getForEntity("/api/apps/" + appId + "/plans", String.class);
+        // 2A-2 翻面起 /api GET 同样要令牌（匿名 401）——读预案清单也走管理员凭证
+        var r = rest.exchange("/api/apps/" + appId + "/plans",
+                org.springframework.http.HttpMethod.GET,
+                new org.springframework.http.HttpEntity<>(adminHeaders()), String.class);
         var data = objectMapper.readTree(r.getBody()).path("data");
 
         assertThat(data.path("active").path("level").asText()).isEqualTo("YELLOW");

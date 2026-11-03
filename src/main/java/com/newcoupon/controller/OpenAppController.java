@@ -27,7 +27,9 @@ import org.springframework.web.bind.annotation.RestController;
  * <p><b>为什么写操作要 POST /{appId}/status 而不是 PUT /{appId}</b>：只暴露"状态机允许的迁移"
  * （启/停），而不是"整行覆盖"。整行更新接口迟早会被用来改 appId/密钥状态这类不该被随手改的字段。
  *
- * <p>注意 {@code GET} 查询不设防（与 /api/templates 一致）：只读面公开，写操作才要令牌。
+ * <p>鉴权（2A-2 翻面后）：GET 与写方法同样要"X-Admin-Token 或控制台会话"——
+ * 只读面匿名公开的时代已结束（2026-11-03 起匿名 GET 401+7002，公告见
+ * docs/runbook/管理面认证翻面.md；判据在 LegacyAdminTokenAuthenticationFilter）。
  */
 @RestController
 @RequestMapping("/api/apps")

@@ -281,7 +281,7 @@ class OpenAppRegistryIntegrationTest extends ShardedIntegrationTestSupport {
         postAdmin("/api/apps", """
                 {"appId":"t-api-get","appName":"详情验证券商"}""");
 
-        ResponseEntity<String> r = rest.getForEntity("/api/apps/t-api-get", String.class);
+        ResponseEntity<String> r = getAdmin("/api/apps/t-api-get");
 
         assertThat(r.getStatusCode().value()).isEqualTo(200);
         assertThat(r.getBody()).contains("\"appId\":\"t-api-get\"").contains("\"usable\":true");
@@ -300,7 +300,7 @@ class OpenAppRegistryIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(rotated.getStatusCode().value()).as(String.valueOf(rotated.getBody())).isEqualTo(200);
         assertThat(rotated.getBody()).contains("\"secret\"");
 
-        ResponseEntity<String> detail = rest.getForEntity("/api/apps/t-api-rotate", String.class);
+        ResponseEntity<String> detail = getAdmin("/api/apps/t-api-rotate");
         assertThat(detail.getBody())
                 .as("轮换后密钥记录应为两条：status=1（当前）与 status=2（轮换期）")
                 .contains("\"status\":1").contains("\"status\":2");
@@ -321,6 +321,13 @@ class OpenAppRegistryIntegrationTest extends ShardedIntegrationTestSupport {
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set("X-Admin-Token", "test-admin-token");
         return rest.exchange(path, HttpMethod.POST, new HttpEntity<>(body, headers), String.class);
+    }
+
+    /** 管理面 GET（带令牌）。2A-2 翻面（2026-11-03）起 /api 的 GET 也要令牌——匿名 401。 */
+    private ResponseEntity<String> getAdmin(String path) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("X-Admin-Token", "test-admin-token");
+        return rest.exchange(path, HttpMethod.GET, new HttpEntity<>(headers), String.class);
     }
 
     private static HttpEntity<String> jsonEntity(String body, String token) {

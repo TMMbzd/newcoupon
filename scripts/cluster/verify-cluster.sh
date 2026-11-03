@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# 2A-2 起 /actuator/prometheus 要求 Basic 凭据（默认=SecurityRbac 集成测试同款 dev 凭据，生产用环境变量覆盖）
+ACTUATOR_AUTH="${ACTUATOR_AUTH:-actuator:it-actuator-pass}"
 #
 # 集群流控验收（S3 第 9 步）——**两个真实应用实例 + 一个 Token Server**。
 #
@@ -151,10 +153,10 @@ dump_cluster_state() {
     local label="$1" p
     for p in "$PORT_A" "$PORT_B"; do
         local state mode dec fb
-        state=$(curl -s --max-time 5 "http://localhost:$p/actuator/prometheus" | awk '/^coupon_sentinel_cluster_client_state/ {print $2}')
-        mode=$(curl -s --max-time 5 "http://localhost:$p/actuator/prometheus" | awk '/^coupon_sentinel_cluster_mode/ {print $2}')
-        dec=$(curl -s --max-time 5 "http://localhost:$p/actuator/prometheus" | awk '/^coupon_sentinel_cluster_decorator_active/ {print $2}')
-        fb=$(curl -s --max-time 5 "http://localhost:$p/actuator/prometheus" \
+        state=$(curl -s --max-time 5 -u "$ACTUATOR_AUTH" "http://localhost:$p/actuator/prometheus" | awk '/^coupon_sentinel_cluster_client_state/ {print $2}')
+        mode=$(curl -s --max-time 5 -u "$ACTUATOR_AUTH" "http://localhost:$p/actuator/prometheus" | awk '/^coupon_sentinel_cluster_mode/ {print $2}')
+        dec=$(curl -s --max-time 5 -u "$ACTUATOR_AUTH" "http://localhost:$p/actuator/prometheus" | awk '/^coupon_sentinel_cluster_decorator_active/ {print $2}')
+        fb=$(curl -s --max-time 5 -u "$ACTUATOR_AUTH" "http://localhost:$p/actuator/prometheus" \
              | awk '/^coupon_sentinel_cluster_token_fallback_total/ {printf "%s=%s ", $1, $2}')
         echo "  [$label] :$p clientState=$state mode=$mode decorator=$dec 降级: ${fb:-无}" >&2
     done

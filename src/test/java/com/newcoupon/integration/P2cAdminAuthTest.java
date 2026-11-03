@@ -69,10 +69,22 @@ class P2cAdminAuthTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("GET 查询不设防（只读面公开）")
-    void query_notGuarded() {
-        ResponseEntity<String> r = rest.getForEntity("/api/templates/999999", String.class);
-        assertThat(r.getStatusCode().value()).isNotEqualTo(401);   // 404/业务错误都行——只要不是鉴权拦
+    @DisplayName("GET 查询翻面后也要令牌：匿名 401，带令牌放行（2A-2 破坏性变更）")
+    void query_flippedToRequireToken() {
+        // 翻面前（L27 起）：GET 只读面公开，匿名可查。翻面后（2A-2，2026-11-03）：
+        // /api 所有方法都要"旧令牌或会话"——本用例就是那场翻面的验收钉子
+        //（公告：docs/runbook/管理面认证翻面.md；回滚开关 coupon.security.api-read-auth-enabled）。
+        ResponseEntity<String> anonymous = rest.getForEntity("/api/templates/999999", String.class);
+        assertThat(anonymous.getStatusCode().value()).isEqualTo(401);
+        assertThat(anonymous.getBody()).contains("7002");
+
+        HttpHeaders withToken = new HttpHeaders();
+        withToken.set("X-Admin-Token", "test-admin-token");
+        ResponseEntity<String> allowed = rest.exchange("/api/templates/999999", HttpMethod.GET,
+                new HttpEntity<>(withToken), String.class);
+        assertThat(allowed.getStatusCode().value())
+                .as("带令牌的 GET 放行：404/业务错误都行——只要不是鉴权拦。body=" + allowed.getBody())
+                .isNotEqualTo(401);
     }
 
     private ResponseEntity<String> postCreate(String token) {

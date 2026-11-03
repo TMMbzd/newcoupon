@@ -45,7 +45,10 @@ import org.springframework.beans.factory.annotation.Value;
         properties = {
                 "coupon.open.secret-master-key=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
                 "coupon.open.secret-rotation-hours=168",
-                "coupon.risk.ip-rate.enabled=false"     // 别被我们自己的风控抢先拒掉
+                "coupon.risk.ip-rate.enabled=false",   // 别被我们自己的风控抢先拒掉
+                // 2A-2 起 /actuator/prometheus 要 ROLE_ACTUATOR + Basic——给本上下文配已知凭据
+                "coupon.security.actuator.username=actuator",
+                "coupon.security.actuator.password=it-actuator-pass"
         })
 class SentinelTenantDimensionTest extends ShardedIntegrationTestSupport {
 
@@ -186,13 +189,24 @@ class SentinelTenantDimensionTest extends ShardedIntegrationTestSupport {
                 .as("前提：这一发真的被拒了，否则下面的指标断言没有意义。响应=" + rejected.body())
                 .isEqualTo(429);
 
-        var scrape = rest.getForEntity("/actuator/prometheus", String.class);
+        var scrape = scrapePrometheus();
         assertThat(scrape.getStatusCode().value()).as("抓取端点必须可用").isEqualTo(200);
 
         assertThat(scrape.getBody())
                 .as("被拒了却没有任何指标 → 仪表盘上「限流在起作用」与「没人被打过」完全一样")
                 .contains("coupon_ratelimit_rejected_total")
                 .contains("dimension=\"tenant_daily\"");
+    }
+
+    /**
+     * 抓 /actuator/prometheus（2A-2 起不在匿名面）：带 Basic 凭据——与生产抓取器同款迁移路径
+     * （docs/runbook/管理面认证翻面.md）。
+     */
+    private org.springframework.http.ResponseEntity<String> scrapePrometheus() {
+        var headers = new org.springframework.http.HttpHeaders();
+        headers.setBasicAuth("actuator", "it-actuator-pass");
+        return rest.exchange("/actuator/prometheus", org.springframework.http.HttpMethod.GET,
+                new org.springframework.http.HttpEntity<>(headers), String.class);
     }
 
 }

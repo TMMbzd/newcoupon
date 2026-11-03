@@ -157,19 +157,41 @@ class OpenApiOwnershipIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("例外：内部面（/api，无签名）不受归属限制——管理员视角，属刻意设计")
+    @DisplayName("例外：内部面（/api，管理员令牌）不受归属限制；匿名 GET 401（2A-2 翻面）")
     void internalFace_notRestricted() throws Exception {
-        // 显式带 Accept：不带时内容协商可能挑中 XML 转换器（实测拿到 <Result>...</Result>，
-        // 解析当然失败——**这是用例自己的坑，不是实现的**）
-        java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder(
+        // 翻面前（2A-1 及更早）：匿名 GET /api/coupons 就能看全部——"只读面公开"。
+        // 翻面后（2A-2，2026-11-03）：内部面 = 管理员视角，必须带 X-Admin-Token（或会话）；
+        // 归属豁免不变——管理员令牌持有者仍能看到全部应用的券。
+        String body = internalFaceGet("dev-admin-token");   // dev profile 的便利令牌（application-dev.yml）
+        assertThat(couponCount(body)).as("内部面能看到全部应用的券（运营/对账视角）").isEqualTo(1);
+
+        // 匿名访问同一个只读口：翻面后 401 + 7002（破坏性变更，公告 docs/runbook/管理面认证翻面.md）
+        java.net.http.HttpResponse<String> anonymous = internalFaceGetRaw(null);
+        assertThat(anonymous.statusCode()).as("匿名读内部面不再放行").isEqualTo(401);
+        assertThat(anonymous.body()).contains("7002");
+    }
+
+    /** 内部面 GET（带 X-Admin-Token），返回响应体。构造细节见 {@link #internalFaceGetRaw}。 */
+    private String internalFaceGet(String adminToken) throws Exception {
+        return internalFaceGetRaw(adminToken).body();
+    }
+
+    /**
+     * 内部面 GET 的原始响应（$1 = X-Admin-Token，null=匿名）。
+     * 显式带 Accept：不带时内容协商可能挑中 XML 转换器（实测拿到 &lt;Result&gt;...&lt;/Result&gt;，
+     * 解析当然失败——**这是用例自己的坑，不是实现的**）。
+     */
+    private java.net.http.HttpResponse<String> internalFaceGetRaw(String adminToken) throws Exception {
+        java.net.http.HttpRequest.Builder builder = java.net.http.HttpRequest.newBuilder(
                         java.net.URI.create("http://localhost:" + port + "/api/coupons?userId=" + USER_ID))
                 .header("Accept", "application/json")
                 .timeout(java.time.Duration.ofSeconds(10))
-                .GET().build();
-        String body = java.net.http.HttpClient.newHttpClient()
-                .send(request, java.net.http.HttpResponse.BodyHandlers.ofString()).body();
-
-        assertThat(couponCount(body)).as("内部面能看到全部应用的券（运营/对账视角）").isEqualTo(1);
+                .GET();
+        if (adminToken != null) {
+            builder.header("X-Admin-Token", adminToken);
+        }
+        return java.net.http.HttpClient.newHttpClient()
+                .send(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofString());
     }
 
     // ------------------------------------------------------------------

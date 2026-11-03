@@ -125,8 +125,9 @@ admin_post() {
 }
 
 # 读熔断器状态（S2 第 10 步的只读观测口）。$1=熔断器名（redis / mysql / redis:appId）
+# 2A-2 起 /api 的 GET 也要管理员令牌（匿名 401，公告 docs/runbook/管理面认证翻面.md）
 breaker_state() {
-  curl -sS "$BASE/api/switches/breakers" | python3 -c "
+  curl -sS "$BASE/api/switches/breakers" -H "X-Admin-Token: $ADMIN_TOKEN" | python3 -c "
 import sys, json
 name = sys.argv[1]
 for b in json.load(sys.stdin).get('data', []):

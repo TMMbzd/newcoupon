@@ -79,8 +79,9 @@ class SwitchCenterIntegrationTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("没被关的功能照常工作——开关不是把系统焊死")
     void otherEndpointsUnaffected() {
-        // 查券包没挂开关，照常走业务（用户不存在 → 空列表，code=0）
-        ResponseEntity<String> r = rest.getForEntity("/api/coupons?userId=123456", String.class);
+        // 查券包没挂开关，照常走业务（用户不存在 → 空列表，code=0）。
+        // 2A-2 起内部面 GET 要管理员令牌（匿名 401）——带 dev 默认令牌走管理员视角
+        ResponseEntity<String> r = adminGet("/api/coupons?userId=123456");
 
         assertThat(r.getStatusCode().value()).isEqualTo(200);
         assertThat(r.getBody()).contains("\"code\":0");
@@ -89,7 +90,7 @@ class SwitchCenterIntegrationTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("读取接口：列出全部开关（含未配置的），并标出'是否被显式配置过'")
     void switchList_showsAllWithState() throws Exception {
-        ResponseEntity<String> r = rest.getForEntity("/api/switches", String.class);
+        ResponseEntity<String> r = adminGet("/api/switches");
 
         assertThat(r.getStatusCode().value()).isEqualTo(200);
         JsonNode switches = objectMapper.readTree(r.getBody()).path("data");
@@ -123,5 +124,15 @@ class SwitchCenterIntegrationTest extends ShardedIntegrationTestSupport {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         return rest.exchange(path, HttpMethod.POST, new HttpEntity<>(body, headers), String.class);
+    }
+
+    /**
+     * 管理面 GET（带 X-Admin-Token）。2A-2 翻面（2026-11-03）起 /api 的 GET 也要
+     * "旧令牌或会话"——本类没配 coupon.admin.token，用的是 dev profile 的默认令牌。
+     */
+    private ResponseEntity<String> adminGet(String path) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("X-Admin-Token", "dev-admin-token");   // application-dev.yml 的 dev 便利令牌
+        return rest.exchange(path, HttpMethod.GET, new HttpEntity<>(headers), String.class);
     }
 }

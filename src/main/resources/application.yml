@@ -198,14 +198,21 @@ coupon:
   # 对外语义不变；RBAC 全面接管后保留一个发布周期即删除（设计裁定）。
   admin:
     token: ${ADMIN_TOKEN:}
-  # 管理面安全（V6 2A 第一刀）：种子管理员 / actuator Basic / 登录锁定 / 会话时长。
-  # 完整说明见 docs/research-2026-10-21/01 §4 2A 与 SecurityConfig/SessionConfig。
+  # 管理面安全（V6 2A）：种子管理员 / actuator Basic / 登录锁定 / 会话时长 / 2A-2 读面翻面开关。
+  # 完整说明见 docs/research-2026-10-21/01 §4 2A 与 SecurityConfig/SessionConfig；
+  # 2A-2 破坏性变更公告：docs/runbook/管理面认证翻面.md。
   security:
     # 种子管理员 admin 的初始密码：仅**建号时**读取一次（已存在不覆盖——改环境变量重置密码
     # 比"固定默认密码"更危险）。公共配置留空=不建号（fail-safe）；dev 便利值在 application-dev.yml。
     seed-admin-password: ${SEED_ADMIN_PASSWORD:}
+    # 2A-2 /api 读面翻面的回滚开关（2026-11-03 起，默认翻面）：true = /api、/console 所有方法
+    # 都要"旧令牌或会话"；false = 回到旧行为（只有写方法要令牌，GET 匿名放行）。
+    # 这是发布保险——翻面后匿名 GET 调用方全变 401，出问题先关它回旧行为；
+    # **过渡开关，一个发布周期（旧令牌删除时）后一并移除**，不要当长期功能用。
+    api-read-auth-enabled: ${API_READ_AUTH_ENABLED:true}
     # actuator 链的 Basic 凭据（机器凭据，与 admin_user 人肉账号分治）。
-    # 留空=随机生成（等价于关掉 Basic 入口；/health /info /prometheus 仍匿名可读）。
+    # 留空=随机生成（等价于关掉 Basic 入口；匿名面只剩 /health /info——
+    # prometheus 自 2A-2 起也要 Basic，抓取器必须配置凭据，见 runbook）。
     actuator:
       username: ${ACTUATOR_AUTH_USER:actuator}
       password: ${ACTUATOR_AUTH_PASSWORD:}
@@ -244,9 +251,11 @@ management:
     web:
       exposure:
         # V6 2A 加 metrics（细粒度指标，含标签值——与只读的 prometheus 抓取面不同）：
-        # 暴露面收在安全链上（SecurityConfig actuator 链：health/info/prometheus 匿名，
-        # 其余要 ROLE_ACTUATOR + Basic）。**未配 ACTUATOR_AUTH_PASSWORD 时 Basic 凭据随机**，
-        # 等价于 metrics 不可达——需要的环境再显式开。
+        # 暴露面收在安全链上（SecurityConfig actuator 链：health/info 匿名；
+        # prometheus/metrics 自 2A-2 起要 ROLE_ACTUATOR + Basic——抓取文本带标签值，
+        # 不属于匿名面，抓取器按 runbook 配凭据）。
+        # **未配 ACTUATOR_AUTH_PASSWORD 时 Basic 凭据随机**，等价于不可达——
+        # 需要的环境再显式开。
         include: health,info,prometheus,metrics
   endpoint:
     health:
