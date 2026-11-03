@@ -23,6 +23,13 @@ public class CouponEventPO {
     private Long amount;
     private LocalDateTime occurTime;
     private LocalDateTime createTime;
+    // 业务上下文五列（V43）：全部可空——归因快照，不是行为判据；camelCase→snake_case
+    // 由 map-underscore-to-camel-case 自动映射（appId→app_id 等）
+    private String appId;
+    private Long activityId;
+    private String source;
+    private String bizType;
+    private String bizId;
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
@@ -44,4 +51,14 @@ public class CouponEventPO {
     public void setOccurTime(LocalDateTime occurTime) { this.occurTime = occurTime; }
     public LocalDateTime getCreateTime() { return createTime; }
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }
+    public String getAppId() { return appId; }
+    public void setAppId(String appId) { this.appId = appId; }
+    public Long getActivityId() { return activityId; }
+    public void setActivityId(Long activityId) { this.activityId = activityId; }
+    public String getSource() { return source; }
+    public void setSource(String source) { this.source = source; }
+    public String getBizType() { return bizType; }
+    public void setBizType(String bizType) { this.bizType = bizType; }
+    public String getBizId() { return bizId; }
+    public void setBizId(String bizId) { this.bizId = bizId; }
 }

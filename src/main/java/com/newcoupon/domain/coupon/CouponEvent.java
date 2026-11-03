@@ -22,10 +22,15 @@ public final class CouponEvent {
     private final String orderNo;
     private final Long amount;
     private final LocalDateTime occurTime;
+    private final String appId;
+    private final Long activityId;
+    private final String source;
+    private final String bizType;
+    private final String bizId;
 
     private CouponEvent(Long id, String eventNo, EventType eventType, long templateId,
                         long userCouponId, long userId, String orderNo, Long amount,
-                        LocalDateTime occurTime) {
+                        LocalDateTime occurTime, BizContext biz) {
         this.id = id;
         this.eventNo = eventNo;
         this.eventType = eventType;
@@ -35,6 +40,36 @@ public final class CouponEvent {
         this.orderNo = orderNo;
         this.amount = amount;
         this.occurTime = occurTime;
+        // biz 为 null 表示这条事件没有业务上下文（非发放事件/旧调用点）：五列全落 NULL
+        this.appId = biz == null ? null : biz.appId();
+        this.activityId = biz == null ? null : biz.activityId();
+        this.source = biz == null ? null : biz.source();
+        this.bizType = biz == null ? null : biz.bizType();
+        this.bizId = biz == null ? null : biz.bizId();
+    }
+
+    /**
+     * 发放事件的业务上下文（V6 阶段 1D 验收 #7，V43 五列的内存形态）。
+     *
+     * <p>全部字段可空：这是可观测性归因，不是行为判据——某条链路没填，事件照常落库、
+     * 对应列落 NULL，存量调用零感知。appId/activityId 从模板行冗余（写时快照，防模板
+     * 后改导致历史事件"变性"）；source/bizType/bizId 描述"这次发放从哪来、挂在哪张单上"。
+     */
+    public record BizContext(String appId, Long activityId, String source,
+                             String bizType, String bizId) {
+
+        /** 发放链路：同步领取（HTTP 入口直接发） */
+        public static final String SOURCE_SYNC = "SYNC";
+        /** 发放链路：异步受理任务（先收单后由 worker 落库） */
+        public static final String SOURCE_ASYNC = "ASYNC";
+        /** 发放链路：批量发放任务 worker */
+        public static final String SOURCE_GRANT = "GRANT";
+        /** 发放链路：兑换码兑换 */
+        public static final String SOURCE_CODE = "CODE";
+        /** 单据背景：批量发放任务（bizId=taskNo） */
+        public static final String BIZ_TYPE_GRANT_TASK = "GRANT_TASK";
+        /** 单据背景：兑换码批次（bizId=batchNo） */
+        public static final String BIZ_TYPE_CODE = "CODE";
     }
 
     /**
@@ -49,11 +84,20 @@ public final class CouponEvent {
      * 发放事件的 amount 若填 face_value，对账时"优惠总成本"会被未核销的券虚增。
      */
     public static CouponEvent issued(UserCoupon coupon, LocalDateTime now) {
+        // 兼容旧调用点：不带业务上下文（V43 五列全落 NULL）
+        return issued(coupon, now, null);
+    }
+
+    /**
+     * 带业务上下文的发放事件（V6 阶段 1D）：appId/activityId 从模板冗余、source/biz
+     * 描述链路与单据背景——写时快照进事件行，之后模板怎么改都不影响历史事件的归因。
+     */
+    public static CouponEvent issued(UserCoupon coupon, LocalDateTime now, BizContext biz) {
         return new CouponEvent(null,
                 BoundedKey.of("RCV:", coupon.getAppId() + ":" + coupon.getUserId()
                         + ":" + coupon.getIdempotentKey()),
                 EventType.ISSUED, coupon.getTemplateId(), coupon.getId(), coupon.getUserId(),
-                null, null, now);
+                null, null, now, biz);
     }
 
     /**
@@ -65,7 +109,7 @@ public final class CouponEvent {
         return new CouponEvent(null,
                 BoundedKey.of("EXP:", String.valueOf(coupon.getId())),
                 EventType.EXPIRED, coupon.getTemplateId(), coupon.getId(), coupon.getUserId(),
-                usage == null ? null : usage.getOrderNo(), null, now);
+                usage == null ? null : usage.getOrderNo(), null, now, null);
     }
 
     /**
@@ -76,7 +120,7 @@ public final class CouponEvent {
         return new CouponEvent(null,
                 BoundedKey.of("LCK:", usage.getUsageNo()), EventType.LOCKED,
                 coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
-                usage.getOrderNo(), null, now);
+                usage.getOrderNo(), null, now, null);
     }
 
     /** 核销事件：amount = 本单实际抵扣金额（财务对账的金额事实源） */
@@ -84,7 +128,7 @@ public final class CouponEvent {
         return new CouponEvent(null,
                 BoundedKey.of("USE:", usage.getUsageNo()), EventType.USED,
                 coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
-                usage.getOrderNo(), discountAmt, now);
+                usage.getOrderNo(), discountAmt, now, null);
     }
 
     /** 退款冲销事件（第 2 环，兼容整单退：事件号按 usageNo，天然一次性） */
@@ -101,7 +145,7 @@ public final class CouponEvent {
         return new CouponEvent(null,
                 BoundedKey.of("RFD:", refundNo), EventType.REFUNDED,
                 coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
-                usage.getOrderNo(), discountAmt, now);
+                usage.getOrderNo(), discountAmt, now, null);
     }
 
     /**
@@ -112,7 +156,7 @@ public final class CouponEvent {
         return new CouponEvent(null,
                 BoundedKey.of("CEX:", usage.getUsageNo()), EventType.CONFIRM_EXCEPTION,
                 coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
-                usage.getOrderNo(), null, now);
+                usage.getOrderNo(), null, now, null);
     }
 
     /** 释放回退事件 */
@@ -120,7 +164,7 @@ public final class CouponEvent {
         return new CouponEvent(null,
                 BoundedKey.of("RLS:", usage.getUsageNo()), EventType.RELEASED,
                 coupon.getTemplateId(), usage.getUserCouponId(), usage.getUserId(),
-                usage.getOrderNo(), null, now);
+                usage.getOrderNo(), null, now, null);
     }
 
     /**
@@ -132,15 +176,23 @@ public final class CouponEvent {
         return new CouponEvent(null,
                 BoundedKey.of("LKT:", usage.getUsageNo()), EventType.LOCK_TIMEOUT,
                 coupon.getTemplateId(), coupon.getId(), usage.getUserId(),
-                usage.getOrderNo(), null, now);
+                usage.getOrderNo(), null, now, null);
     }
 
-    /** 从数据库复活 */
+    /** 从数据库复活（旧签名：业务上下文列不回读，兼容既有调用点） */
     public static CouponEvent reconstitute(Long id, String eventNo, EventType eventType, long templateId,
                                            long userCouponId, long userId, String orderNo,
                                            Long amount, LocalDateTime occurTime) {
+        return reconstitute(id, eventNo, eventType, templateId, userCouponId, userId,
+                orderNo, amount, occurTime, null);
+    }
+
+    /** 从数据库复活（V43 全参版：连业务上下文五列一起回读） */
+    public static CouponEvent reconstitute(Long id, String eventNo, EventType eventType, long templateId,
+                                           long userCouponId, long userId, String orderNo,
+                                           Long amount, LocalDateTime occurTime, BizContext biz) {
         return new CouponEvent(id, eventNo, eventType, templateId, userCouponId, userId,
-                orderNo, amount, occurTime);
+                orderNo, amount, occurTime, biz);
     }
 
     public Long getId() { return id; }
@@ -152,4 +204,9 @@ public final class CouponEvent {
     public String getOrderNo() { return orderNo; }
     public Long getAmount() { return amount; }
     public LocalDateTime getOccurTime() { return occurTime; }
+    public String getAppId() { return appId; }
+    public Long getActivityId() { return activityId; }
+    public String getSource() { return source; }
+    public String getBizType() { return bizType; }
+    public String getBizId() { return bizId; }
 }

@@ -144,7 +144,14 @@ public class CouponIssueTxService {
         UserCoupon saved = userCouponRepository.save(
                 UserCoupon.issue(template, req.userId(), req.requestId(), (int) seq, now));
         // ③ 事实源
-        CouponEvent issuedEvent = CouponEvent.issued(saved, now);
+        // V43 业务上下文五件套随发放事件一起落库：appId/activityId 从**事务内重读的模板行**
+        // （本方法的 template 形参，即 issueC1 里的 current）取快照——事件行自带租户/活动
+        // 归属，跨租户统计不必 join 模板表；source/bizType/bizId 由四条链路构造
+        // ReceiveRequest 时自带（同步/异步/批量/兑换码），这里只透传。全可空：
+        // 旧调用点不带值时归因列落 NULL，行为零变化。
+        CouponEvent issuedEvent = CouponEvent.issued(saved, now, new CouponEvent.BizContext(
+                template.getAppId(), template.getActivityId(),
+                req.source(), req.bizType(), req.bizId()));
         couponEventRepository.append(issuedEvent);
         // ④ 发件箱（ADR-0011，与事件同一事务）：事件表保持只追加，投递状态归 outbox 行
         outboxMapper.insert(CouponIssueArtifacts.issuedOutbox(issuedEvent, saved, now));

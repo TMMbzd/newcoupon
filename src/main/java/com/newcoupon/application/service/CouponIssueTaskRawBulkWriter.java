@@ -151,7 +151,11 @@ public class CouponIssueTaskRawBulkWriter {
             UserCouponPO couponPO = UserCouponPOConverter.toPO(coupon, coupon.getReceiveTime());
             couponsByUserShard.computeIfAbsent(userShard, k -> new ArrayList<>()).add(couponPO);
 
-            CouponEvent event = CouponEvent.issued(coupon, now);
+            // V43 事件归因：裸写批量路径同样标 ASYNC——与单任务路径（CouponIssueTaskTxService）
+            // 口径一致，不能因为走了批量快车道就丢归因；appId/activityId 从模板行取快照。
+            CouponEvent event = CouponEvent.issued(coupon, now, new CouponEvent.BizContext(
+                    template.getAppId(), template.getActivityId(),
+                    CouponEvent.BizContext.SOURCE_ASYNC, null, null));
             CouponEventPO eventPO = CouponEventPOConverter.toPO(event);
             eventPO.setId(idGenerator.next());
             events.add(eventPO);
@@ -233,9 +237,12 @@ public class CouponIssueTaskRawBulkWriter {
     }
 
     private void insertEvents(Connection conn, List<CouponEventPO> rows) throws SQLException {
+        // V43：业务上下文五列进显式列清单（裸 SQL 不认 PO 注解，列必须手写全）。
+        // 可空列按 setStringOrNull/setLongOrNull 落 NULL，与单条 insert 行为一致。
         String sql = "INSERT INTO coupon_event "
-                + "(id, event_no, event_type, template_id, user_coupon_id, user_id, order_no, amount, occur_time) "
-                + "VALUES " + placeholders(rows.size(), 9);
+                + "(id, event_no, event_type, template_id, user_coupon_id, user_id, order_no, "
+                + "amount, occur_time, app_id, activity_id, source, biz_type, biz_id) "
+                + "VALUES " + placeholders(rows.size(), 14);
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             int p = 1;
             for (CouponEventPO row : rows) {
@@ -256,6 +263,11 @@ public class CouponIssueTaskRawBulkWriter {
                     ps.setLong(p++, row.getAmount());
                 }
                 ps.setTimestamp(p++, Timestamp.valueOf(row.getOccurTime()));
+                p = setStringOrNull(ps, p, row.getAppId());
+                p = setLong(ps, p, row.getActivityId());
+                p = setStringOrNull(ps, p, row.getSource());
+                p = setStringOrNull(ps, p, row.getBizType());
+                p = setStringOrNull(ps, p, row.getBizId());
             }
             if (ps.executeUpdate() != rows.size()) {
                 throw new IllegalStateException("coupon_event batch insert mismatch: " + rows.size());
@@ -350,6 +362,17 @@ public class CouponIssueTaskRawBulkWriter {
 
     private static int setLong(PreparedStatement ps, int index, Long value) throws SQLException {
         psetLong(ps, index, value);
+        return index + 1;
+    }
+
+    /** V43 归因列用：可空字符串落 NULL（psetLong 已有同款空安全，字符串这里补上）。 */
+    private static int setStringOrNull(PreparedStatement ps, int index, String value)
+            throws SQLException {
+        if (value == null) {
+            ps.setNull(index, Types.VARCHAR);
+        } else {
+            ps.setString(index, value);
+        }
         return index + 1;
     }
 

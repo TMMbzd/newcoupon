@@ -1,6 +1,7 @@
 package com.newcoupon.application.service;
 
 import com.newcoupon.application.dto.ReceiveRequest;
+import com.newcoupon.domain.coupon.CouponEvent;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.infrastructure.persistence.mapper.CouponIssueTaskMapper;
@@ -43,7 +44,10 @@ public class CouponIssueTaskTxService {
             throw new IllegalStateException("issue task stat_day is null: taskId=" + task.getId());
         }
 
-        ReceiveRequest req = new ReceiveRequest(task.getRequestId(), task.getUserId(), task.getTemplateId());
+        // V43 事件归因：异步链路标 ASYNC（无单据背景——任务表本身就是单据，biz 列留 NULL；
+        // 幂等键=task.requestId，要追单据从事件行查 task 表即可）。
+        ReceiveRequest req = new ReceiveRequest(task.getRequestId(), task.getUserId(),
+                task.getTemplateId(), CouponEvent.BizContext.SOURCE_ASYNC, null, null);
         UserCoupon coupon = issueTxService.issueC1(
                 req, template, seq, layoutVersion, shardNo, LocalDateTime.now(), statDay);
 

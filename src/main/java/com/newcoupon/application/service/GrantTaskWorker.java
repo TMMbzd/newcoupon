@@ -4,6 +4,7 @@ import com.newcoupon.application.dto.ReceiveRequest;
 import com.newcoupon.application.dto.ReceiveResult;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
+import com.newcoupon.domain.coupon.CouponEvent;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.infrastructure.persistence.mapper.CouponGrantItemMapper;
@@ -299,7 +300,11 @@ public class GrantTaskWorker {
         String requestId = itemIdempotentKey(task.getTaskNo(), item.getSeq());
         try {
             ReceiveResult result = receiveService.receive(
-                    new ReceiveRequest(requestId, item.getUserId(), task.getTemplateId()),
+                    // V43 事件归因：批量链路标 GRANT，单据背景=本任务（taskNo 是运营后台
+                    // 可直接搜索的业务号，比内部 id 好用）
+                    new ReceiveRequest(requestId, item.getUserId(), task.getTemplateId(),
+                            CouponEvent.BizContext.SOURCE_GRANT,
+                            CouponEvent.BizContext.BIZ_TYPE_GRANT_TASK, task.getTaskNo()),
                     template);
             // duplicated=true 也是成功：幂等键命中=这张券在之前轮次（或崩溃前）已发出
             txService.completeItemSuccess(chunk, task.getId(), item.getId(), result.couponId());

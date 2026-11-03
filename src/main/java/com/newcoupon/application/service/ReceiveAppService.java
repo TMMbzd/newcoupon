@@ -6,6 +6,7 @@ import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.context.DeadlineGuard;
 import com.newcoupon.common.context.RequestContext;
+import com.newcoupon.domain.coupon.CouponEvent;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.infrastructure.persistence.po.CouponBudgetReservationPO;
@@ -52,7 +53,12 @@ public class ReceiveAppService {
         this.userCouponRepository = userCouponRepository;
     }
 
-    public ReceiveResult receive(ReceiveRequest req) {
+    public ReceiveResult receive(ReceiveRequest request) {
+        // V43 事件归因：同步入口补链路标记 SYNC。用 ifAbsent 语义——其余三条链路
+        // （异步/批量/兑换码）不经过本方法，它们构造 ReceiveRequest 时已自带 source；
+        // 若未来有调用方显式传了 source，以它的为准，这里不覆盖。重绑成新局部变量
+        // 而不是改参数：方法体后面的 lambda（withBreakers）要求捕获量 effectively final。
+        ReceiveRequest req = request.withSourceIfAbsent(CouponEvent.BizContext.SOURCE_SYNC);
         tagGovernanceContext(req);
         var sample = metrics.start();
         // 预算租约（V6 阶段 1C）：活动没开预算时 tryReserveSingle 内部一次缓存判断返回

@@ -21,12 +21,21 @@ public final class CouponEventPOConverter {
         p.setOrderNo(d.getOrderNo());
         p.setAmount(d.getAmount());
         p.setOccurTime(d.getOccurTime());
+        // V43 业务上下文五列：可空快照，直接搬运（null 即落 NULL 列）
+        p.setAppId(d.getAppId());
+        p.setActivityId(d.getActivityId());
+        p.setSource(d.getSource());
+        p.setBizType(d.getBizType());
+        p.setBizId(d.getBizId());
         return p;
     }
 
     public static CouponEvent toDomain(CouponEventPO p) {
+        // 全参 reconstitute：业务上下文一起回读，复活后的领域对象不丢归因信息
         return CouponEvent.reconstitute(p.getId(), p.getEventNo(), EventType.of(p.getEventType()),
                 p.getTemplateId(), p.getUserCouponId(), p.getUserId(),
-                p.getOrderNo(), p.getAmount(), p.getOccurTime());
+                p.getOrderNo(), p.getAmount(), p.getOccurTime(),
+                new CouponEvent.BizContext(p.getAppId(), p.getActivityId(), p.getSource(),
+                        p.getBizType(), p.getBizId()));
     }
 }

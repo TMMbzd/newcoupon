@@ -10,6 +10,7 @@ import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.domain.coupon.ApproveStatus;
+import com.newcoupon.domain.coupon.CouponEvent;
 import com.newcoupon.domain.coupon.CouponTemplate;
 import com.newcoupon.domain.coupon.PublishStatus;
 import com.newcoupon.domain.coupon.UserCoupon;
@@ -416,8 +417,12 @@ public class CouponCodeService {
             // 幂等键 redeem-{requestId} 派生自 requestId——同码同人重试返回原券；
             // 兜底回收后的重兑也在这一步命中幂等自愈（码回 USED、券不双发）
             ReceiveResult result = receiveService.receive(
+                    // V43 事件归因：兑换链路标 CODE，单据背景=码批次（batchNo 运营可读，
+                    // 比内部 codeId 好用——"这批码发出了哪些券"按 biz_id 一查即得）
                     new ReceiveRequest(redeemIdemKey(req.requestId()), req.userId(),
-                            batch.getTemplateId()), template);
+                            batch.getTemplateId(), CouponEvent.BizContext.SOURCE_CODE,
+                            CouponEvent.BizContext.BIZ_TYPE_CODE, batch.getBatchNo()),
+                    template);
             if (result.duplicated()) {
                 // 幂等命中的券可能是**别的码**在同 requestId 下发的（调用方跨码复用）——
                 // 本码没有对应任何新券，绝不能置 USED/used+1（否则码被无声烧掉、
