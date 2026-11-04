@@ -68,10 +68,17 @@ class AuditQueryIntegrationTest extends ShardedIntegrationTestSupport {
     private AuditLogMapper auditLogMapper;
 
     @Autowired
+    private com.newcoupon.application.service.AuditVerifyService verifyService;
+
+    @Autowired
     private com.newcoupon.application.service.AuditChainVerifyJob verifyJob;
 
     @Autowired
     private io.micrometer.core.instrument.MeterRegistry meterRegistry;
+
+    /** 链头对账用例的删行/回插走裸 SQL（显式 id 保链位，MyBatis-Plus 自增插入做不到）。 */
+    @Autowired
+    private org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     @org.springframework.test.context.DynamicPropertySource
     static void shardingProperties(org.springframework.test.context.DynamicPropertyRegistry registry) {
@@ -370,33 +377,92 @@ class AuditQueryIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("verify 混版链：v2 行手工改成 v1 口径（hash_version=1+v1 重算哈希）→ 仍 ok（按行版本选算法）")
-    void verify_mixedVersionChain() throws Exception {
+    @DisplayName("verify 对 v1 行豁免内容重算（C1）：v1 行内容被改不报断（纳秒口径永久盲区，衔接仍校验）；还原后仍 ok")
+    void verify_v1RowsSkipContentRecompute_documentedBlindSpot() throws Exception {
         String marker = writeAuditRow("IT2C-V2-" + UUID.randomUUID(), "{\"v\":2}");
         List<AuditLogPO> rows = waitFor(marker, 1);
         AuditLogPO row = rows.get(0);
-        String originalHash = row.getRecordHash();
         try {
-            // 构造"历史 v1 行"：同内容按 v1 口径重算（不含 actor 列），hash_version 落 1。
-            // prev_hash 不动——链的衔接关系不变，只有本行算法口径换了
-            AuditLogPO asV1 = copyAsVersion(row, 1);
+            // 构造"存量 v1 行"并篡改其内容：hash_version 落 1 + 改 action，record_hash 原样不动。
+            // v1 时代 createdAt 带纳秒进哈希、列是秒级（L81）——v1 行的哈希从写入起就
+            // 不可能从库内数据重算，verify 对 v1 行只做衔接校验（C1 裁定）。
+            // 代价如实钉住：改 v1 行内容（不动哈希）衔接也不破——**检测不到**，这是盲区不是能力
             auditLogMapper.update(null, new LambdaUpdateWrapper<AuditLogPO>()
                     .eq(AuditLogPO::getId, row.getId())
                     .set(AuditLogPO::getHashVersion, 1)
-                    .set(AuditLogPO::getRecordHash, AuditService.computeHash(asV1)));
+                    .set(AuditLogPO::getAction, "TAMPERED-V1-BLINDSPOT"));
 
-            JsonNode ok = post("/api/audit/verify", "{}");
-            assertThat(ok.path("data").path("ok").asBoolean())
-                    .as("v1 口径行必须用 v1 算法校验——用了 v2 会全链误报").isTrue();
+            com.newcoupon.application.dto.AuditDtos.AuditVerifyResult r = verifyService.verifyChain();
+            assertThat(r.ok())
+                    .as("v1 行内容篡改是已登记盲区（L81）：衔接未破则 verify 不报——"
+                            + "若这里报了 RECORD_HASH_MISMATCH，说明豁免逻辑回退").isTrue();
+
+            // 对照组：同一行改回 v2 再改内容 → 必须报（v2 行内容校验不受豁免影响）
+            auditLogMapper.update(null, new LambdaUpdateWrapper<AuditLogPO>()
+                    .eq(AuditLogPO::getId, row.getId())
+                    .set(AuditLogPO::getHashVersion, 2));
+            com.newcoupon.application.dto.AuditDtos.AuditVerifyResult broken =
+                    verifyService.verifyChain();
+            assertThat(broken.ok()).isFalse();
+            assertThat(broken.reason()).isEqualTo("RECORD_HASH_MISMATCH");
+            assertThat(broken.breakAtId()).isEqualTo(row.getId());
         } finally {
             auditLogMapper.update(null, new LambdaUpdateWrapper<AuditLogPO>()
                     .eq(AuditLogPO::getId, row.getId())
                     .set(AuditLogPO::getHashVersion, 2)
-                    .set(AuditLogPO::getRecordHash, originalHash));
+                    .set(AuditLogPO::getAction, marker));
         }
 
-        JsonNode ok = post("/api/audit/verify", "{}");
-        assertThat(ok.path("data").path("ok").asBoolean()).isTrue();
+        assertThat(verifyService.verifyChain().ok()).as("还原后全链恢复一致").isTrue();
+    }
+
+    @Test
+    @DisplayName("verify 链头对账（M1）：删末行 head 残留旧哈希 → CHAIN_HEAD_MISMATCH；还原后 ok")
+    void verify_crossChecksChainHead() throws Exception {
+        // 哨兵行先落库并等到它：异步审计单线程 FIFO，哨兵可见=队列已空，
+        // 之后不再发 HTTP（verify 直调服务），末行在删/验之间不会被并发追加
+        String marker = writeAuditRow("IT2C-HEAD-" + UUID.randomUUID(), "{\"h\":1}");
+        waitFor(marker, 1);
+        com.newcoupon.infrastructure.persistence.po.AuditLogPO last = lastRow();
+        assertThat(last).isNotNull();
+        assertThat(last.getAction()).as("哨兵行应是当前末行").isEqualTo(marker);
+        String deletedHash = last.getRecordHash();
+        try {
+            // 攻击模拟（可检出形态）：删末行但 head 残留被删行的哈希——只走链不核头对此失明
+            // （链体 1..N-1 衔接完好，唯独 head 指向不存在的行）。
+            // 注：攻击者若同时把 head 修成新末行哈希，库内证据无法检出——head 与表同库
+            // 同权限，抗"DB 主体亲自作案"要靠库外锚点（WORM/异地日志投递），runbook §5 已写明
+            jdbc.update("DELETE FROM audit_log WHERE id = ?", last.getId());
+
+            com.newcoupon.application.dto.AuditDtos.AuditVerifyResult r = verifyService.verifyChain();
+            assertThat(r.ok()).as("尾删+head 残留必须被链头对账抓到").isFalse();
+            assertThat(r.reason()).isEqualTo("CHAIN_HEAD_MISMATCH");
+        } finally {
+            // 原样塞回（显式 id 保持链位），head 恢复为该行哈希
+            jdbc.update("INSERT INTO audit_log (id, app_id, user_id, trace_id, action, resource_type, "
+                            + "resource_id, before_snapshot, after_snapshot, ip, result_code, "
+                            + "actor_type, actor_id, session_id, hash_version, prev_hash, record_hash, created_at) "
+                            + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    last.getId(), last.getAppId(), last.getUserId(), last.getTraceId(),
+                    last.getAction(), last.getResourceType(), last.getResourceId(),
+                    last.getBeforeSnapshot(), last.getAfterSnapshot(), last.getIp(),
+                    last.getResultCode(), last.getActorType(), last.getActorId(), last.getSessionId(),
+                    last.getHashVersion(), last.getPrevHash(), deletedHash,
+                    java.sql.Timestamp.valueOf(last.getCreatedAt()));
+            jdbc.update("UPDATE audit_chain_head SET last_hash = ? WHERE id = 1", deletedHash);
+        }
+
+        assertThat(verifyService.verifyChain().ok())
+                .as("还原（行+head）后全链与链头恢复一致").isTrue();
+    }
+
+    /** 当前全表末条（id 最大）。 */
+    private com.newcoupon.infrastructure.persistence.po.AuditLogPO lastRow() {
+        List<AuditLogPO> rows = auditLogMapper.selectList(
+                new LambdaQueryWrapper<AuditLogPO>()
+                        .orderByDesc(AuditLogPO::getId)
+                        .last("LIMIT 1"));
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     // ------------------------------------------------------------------
@@ -425,28 +491,6 @@ class AuditQueryIntegrationTest extends ShardedIntegrationTestSupport {
                     .set(AuditLogPO::getAction, marker));
         }
         assertThat(verifyJob.runOnce()).as("还原后：巡检恢复通过").isTrue();
-    }
-
-    /** 复制 PO 并只换 hashVersion（computeHash 读行对象，不能原地改——mapper 读出的对象是共享缓存外的副本，仍显式拷贝）。 */
-    private static AuditLogPO copyAsVersion(AuditLogPO src, int version) {
-        AuditLogPO copy = new AuditLogPO();
-        copy.setAppId(src.getAppId());
-        copy.setUserId(src.getUserId());
-        copy.setTraceId(src.getTraceId());
-        copy.setAction(src.getAction());
-        copy.setResourceType(src.getResourceType());
-        copy.setResourceId(src.getResourceId());
-        copy.setBeforeSnapshot(src.getBeforeSnapshot());
-        copy.setAfterSnapshot(src.getAfterSnapshot());
-        copy.setIp(src.getIp());
-        copy.setResultCode(src.getResultCode());
-        copy.setActorType(src.getActorType());
-        copy.setActorId(src.getActorId());
-        copy.setSessionId(src.getSessionId());
-        copy.setHashVersion(version);
-        copy.setPrevHash(src.getPrevHash());
-        copy.setCreatedAt(src.getCreatedAt());
-        return copy;
     }
 
     private static String sha256(String input) {
