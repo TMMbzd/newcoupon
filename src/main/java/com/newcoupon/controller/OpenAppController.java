@@ -4,10 +4,15 @@ import com.newcoupon.application.service.OpenAppService;
 import com.newcoupon.application.service.OpenAppService.AppView;
 import com.newcoupon.application.service.OpenAppService.AppWithSecret;
 import com.newcoupon.application.service.OpenAppService.CreateAppRequest;
+import com.newcoupon.application.service.TenantLifecycleService;
+import com.newcoupon.application.service.TenantLifecycleTxService;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.Result;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -37,11 +42,17 @@ public class OpenAppController {
 
     private final OpenAppService openAppService;
     private final com.newcoupon.application.service.TenantConfigService tenantConfigService;
+    private final TenantLifecycleService tenantLifecycleService;
+    private final ObjectMapper objectMapper;
 
     public OpenAppController(OpenAppService openAppService,
-                             com.newcoupon.application.service.TenantConfigService tenantConfigService) {
+                             com.newcoupon.application.service.TenantConfigService tenantConfigService,
+                             TenantLifecycleService tenantLifecycleService,
+                             ObjectMapper objectMapper) {
         this.openAppService = openAppService;
         this.tenantConfigService = tenantConfigService;
+        this.tenantLifecycleService = tenantLifecycleService;
+        this.objectMapper = objectMapper;
     }
 
     /** 注册接入方。返回体里的 secret 是**明文 SK，只此一次** */
@@ -104,6 +115,57 @@ public class OpenAppController {
                                      jakarta.servlet.http.HttpServletRequest request) {
         tenantConfigService.remove(appId, key, operatorOf(request));
         return Result.success();
+    }
+
+    /**
+     * 生命周期迁移（V6 2B）：按显式迁移表白名单执行（见 AppLifecycle），迁移与事件留痕同事务。
+     *
+     * <p>动作集：submit_review / approve_sandbox / activate / suspend / resume /
+     * close / confirm_close / delete。delete 需双人复核——请求体另带
+     * secondApproverUsername + secondApproverPassword（另一个 enabled 管理员的登录密码，
+     * 最小双人实现，完整审批表登记给 2C，见 TenantLifecycleService 的裁剪声明）。
+     *
+     * <p>权限是 tenant:lifecycle（影响面跨租户的治理动作，PLATFORM_OPERATOR 不持有）。
+     */
+    @PostMapping("/{appId}/lifecycle")
+    @org.springframework.security.access.prepost.PreAuthorize("hasAuthority('tenant:lifecycle')")
+    public Result<TenantLifecycleTxService.TransitionResult> lifecycle(
+            @PathVariable String appId,
+            @RequestBody TenantLifecycleService.LifecycleRequest req) {
+        return Result.success(tenantLifecycleService.transition(appId, req));
+    }
+
+    /**
+     * 租户数据导出（V6 2B，一次性）：返回 JSON 快照（app 行 + 模板 id 清单 +
+     * 每模板累计发放数），响应头 X-Data-Sha256 是体的 SHA-256。
+     * 只允许注销完成（CLOSED）之前导；已导出过再请求 4002（闸门判据是
+     * lifecycle 事件表里的 data_export 行）。裁剪：不做券明细/NDJSON/manifest 管道。
+     */
+    @GetMapping("/{appId}/data-export")
+    @org.springframework.security.access.prepost.PreAuthorize("hasAuthority('tenant:lifecycle')")
+    public ResponseEntity<byte[]> dataExport(@PathVariable String appId) throws Exception {
+        TenantLifecycleTxService.ExportSnapshot snapshot = tenantLifecycleService.export(appId);
+        // LinkedHashMap 保证字段序稳定——SHA-256 要可复现，调用方才能在任意时刻重算比对
+        java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("appId", snapshot.appId());
+        payload.put("appName", snapshot.appName());
+        payload.put("environment", snapshot.environment());
+        payload.put("lifecycleStatus", snapshot.lifecycleStatus());
+        payload.put("createTime", String.valueOf(snapshot.createTime()));
+        payload.put("templateIds", snapshot.templateIds());
+        payload.put("issuedCountByTemplate", snapshot.issuedCountByTemplate());
+        byte[] body = objectMapper.writeValueAsBytes(payload);
+        java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+        byte[] hash = digest.digest(body);
+        StringBuilder hex = new StringBuilder();
+        for (byte b : hash) {
+            hex.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+        }
+        return ResponseEntity.ok()
+                .header("X-Data-Sha256", hex.toString())
+                .header("Content-Disposition", "attachment; filename=data-export-" + appId + ".json")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
     }
 
     /** 变更审计里的操作者标识：管理面没有用户身份，记"令牌 + 来源 IP" */

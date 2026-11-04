@@ -33,6 +33,7 @@ public class ReceiveAppService {
     private static final Logger log = LoggerFactory.getLogger(ReceiveAppService.class);
 
     private final CachedTemplateReader cachedTemplateReader;
+    private final CachedOpenAppReader cachedOpenAppReader;
     private final C1ReceiveAppService c1ReceiveAppService;
     private final ReceiveMetrics metrics;
     private final DependencyCircuitBreakers breakers;
@@ -40,12 +41,14 @@ public class ReceiveAppService {
     private final UserCouponRepository userCouponRepository;
 
     public ReceiveAppService(CachedTemplateReader cachedTemplateReader,
+                             CachedOpenAppReader cachedOpenAppReader,
                              C1ReceiveAppService c1ReceiveAppService,
                              ReceiveMetrics metrics,
                              DependencyCircuitBreakers breakers,
                              BudgetService budgetService,
                              UserCouponRepository userCouponRepository) {
         this.cachedTemplateReader = cachedTemplateReader;
+        this.cachedOpenAppReader = cachedOpenAppReader;
         this.c1ReceiveAppService = c1ReceiveAppService;
         this.metrics = metrics;
         this.breakers = breakers;
@@ -71,6 +74,10 @@ public class ReceiveAppService {
                     .orElseThrow(() -> new BizException(ErrorCode.TEMPLATE_NOT_FOUND,
                             "id=" + req.templateId()));
             AppOwnership.assertAccessible(template.getAppId(), "template:" + req.templateId());
+            // 审查修正⑦：C 端受理口（平台身份，appId=null）此前不查租户生命周期——
+            // /open 面有 6013 闸门而这里没有，停用租户的券仍可经平台面继续新发。
+            // 已受理的在途任务不回收（202 是受理承诺），登记在 runbook §6.2
+            assertTenantIssuable(template.getAppId());
             template.assertReceivable(LocalDateTime.now());
             DeadlineGuard.requireBudget();
 
@@ -153,6 +160,15 @@ public class ReceiveAppService {
     }
 
     /** S1 治理上下文：userId/template 维度在应用层补齐（内部面 EMPTY 自动 no-op）。 */
+    /** 租户非 ACTIVE/SANDBOX_ACTIVE → 6013（与 /open 面同一码同一文案）。缓存读 30s 滞后可接受（停用是分钟级运营动作）。 */
+    private void assertTenantIssuable(String appId) {
+        cachedOpenAppReader.find(appId).ifPresent(auth -> {
+            if (!com.newcoupon.domain.open.AppLifecycle.callableOnOpenFace(auth.lifecycle())) {
+                throw new BizException(ErrorCode.TENANT_NOT_ACTIVE);
+            }
+        });
+    }
+
     private static void tagGovernanceContext(ReceiveRequest req) {
         RequestContext ctx = RequestContext.current();
         ctx.user(req.userId());

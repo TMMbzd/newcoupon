@@ -113,6 +113,17 @@ public enum ErrorCode {
     API_VERSION_UNSUPPORTED(6010, "不支持的接口版本"),
     RESOURCE_FORBIDDEN(6011, "无权访问该资源"),
     CLIENT_TOKEN_MISSING(6012, "缺少 clientToken（写接口必须携带 X-Client-Token 头）"),
+    /**
+     * 租户生命周期不可调用（V6 2B）：SUSPENDED/CLOSING/CLOSED/DELETED 任一态的开放面调用
+     * 在验签阶段被拒（HTTP 403）。这是<b>平台停用</b>语义，与"签名错"（6003）严格区分——
+     * 接入方看到 6013 该去找平台运营，看到 6003 该查自己的签名实现。
+     *
+     * <p><b>统一文案防探测</b>：不区分具体是哪个状态（停用还是注销中），
+     * 与 6002 的立场一致——区分开就等于向探测者播报租户的经营状态。
+     * 设计文档附录 A.2 曾把 6013 规划为"沙箱环境禁止该操作"，本刀按实施裁定
+     * 改用于 TENANT_NOT_ACTIVE（沙箱资金边界走 4002 STATE_CONFLICT，见 EnvironmentGuard）。
+     */
+    TENANT_NOT_ACTIVE(6013, "应用当前不可用（已停用或注销），请联系平台运营"),
 
     // ---- 7xxx 安全域（V6 2A：管理面会话认证族；HTTP 状态由安全链/控制器直接设置）----
     // 文案纪律：登录失败族（7011）不区分"用户不存在/密码错/锁定"——区分即用户名枚举。

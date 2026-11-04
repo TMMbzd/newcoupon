@@ -35,6 +35,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
  *   1. 版本前缀      /open/v1/** 之外 → 6010（400）
  *   2. 解析签名头    → 6001（401）
  *   3. 查应用+密钥   → 6002（401）
+ *   3.5 生命周期     非 ACTIVE/SANDBOX_ACTIVE → 6013（403，V6 2B：平台停用语义）
  *   4. 时间窗 ±5min  → 6004（401）
  *   5. 验签          → 6003（401）
  *   6. nonce 防重放  → 6005（401）/ Redis 故障 → 5000（503）
@@ -141,6 +142,20 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
                 return;
             }
             AppAuth app = found.get();
+
+            // 第 3.5 步：生命周期（V6 2B）。SUSPENDED/CLOSING/CLOSED/DELETED 一律 6013（403）。
+            //
+            // 放在验签（第 5 步）之前是刻意的：6013 的语义是"平台停用了你"，接入方
+            // 拿到它就该去找平台运营而不是去查签名实现——被停用的租户不必再浪费一次
+            // HMAC 计算才知道自己被停了。代价是 6013 与 6002 的差别会暴露"这个 appId
+            // 存在且被停用"，但 appId 本来就在签名头里明文传播，这不构成新的信息泄漏。
+            // 文案统一（不区分停用/注销中），与 6002 同一个防探测立场。
+            if (!app.callableOnOpenFace()) {
+                log.warn("OPEN-API 拒绝：租户生命周期不可调用 appId={} lifecycle={} path={}",
+                        header.appId(), app.lifecycle(), path);
+                rejectedCode = reject(response, 403, ErrorCode.TENANT_NOT_ACTIVE);
+                return;
+            }
 
             // 第 4 步：时间窗
             long now = System.currentTimeMillis();

@@ -42,6 +42,10 @@ public interface TemplateMapper extends BaseMapper<CouponTemplatePO> {
     @Select("SELECT * FROM coupon_template WHERE publish_status = 1")
     java.util.List<CouponTemplatePO> selectPublished();
 
+    /** 某接入方名下的模板 id 清单（V6 2B：租户数据导出的模板清单，按 id 升序保证导出可复现） */
+    @Select("SELECT id FROM coupon_template WHERE app_id = #{appId} ORDER BY id")
+    java.util.List<Long> selectIdsByApp(@Param("appId") String appId);
+
     /**
      * 行锁读：reshard/rollback 事务先锁模板行，再锁分片行——与库存调整的
      * “模板 CAS → 分片 UPDATE”保持同一加锁顺序，避免 AB-BA 死锁。

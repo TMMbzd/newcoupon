@@ -63,7 +63,11 @@ class TenantFlowRuleDataSourceTest {
     }
 
     private static OpenApp app(String appId, int status, int qps) {
-        return new OpenApp(appId, "测试租户", status, qps, 0, null, null);
+        // V6 2B 起 OpenApp 多了环境/生命周期等列：规则源只读配额列，
+        // 其余给生产默认值（PROD/ACTIVE）——与本用例的"租户配额读取"主题无关
+        return new OpenApp(appId, "测试租户", status, qps, 0, null, null,
+                com.newcoupon.domain.open.OpenApp.ENV_PROD,
+                com.newcoupon.domain.open.AppLifecycle.ACTIVE, null, null, 0);
     }
 
     // ------------------------------------------------------------------

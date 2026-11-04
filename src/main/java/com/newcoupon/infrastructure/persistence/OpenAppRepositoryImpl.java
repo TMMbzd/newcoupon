@@ -2,8 +2,10 @@ package com.newcoupon.infrastructure.persistence;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
+import com.newcoupon.domain.open.AppLifecycle;
 import com.newcoupon.domain.open.OpenApp;
 import com.newcoupon.domain.repository.OpenAppRepository;
+import java.time.LocalDate;
 import com.newcoupon.infrastructure.persistence.mapper.OpenAppMapper;
 import com.newcoupon.infrastructure.persistence.mapper.OpenAppSecretMapper;
 import com.newcoupon.infrastructure.persistence.po.OpenAppPO;
@@ -40,6 +42,8 @@ public class OpenAppRepositoryImpl implements OpenAppRepository {
         po.setQpsLimit(app.qpsLimit());
         po.setDailyQuota(app.dailyQuota());
         po.setContact(app.contact());
+        po.setEnvironment(app.environment());
+        po.setLifecycleStatus(app.lifecycle().name());
         appMapper.insert(po);   // appId 撞唯一索引 → DuplicateKeyException，交服务层分类
     }
 
@@ -50,9 +54,33 @@ public class OpenAppRepositoryImpl implements OpenAppRepository {
     }
 
     @Override
+    public Optional<OpenApp> findAppForUpdate(String appId) {
+        OpenAppPO po = appMapper.selectByAppIdForUpdate(appId);
+        return Optional.ofNullable(po).map(this::toDomain);
+    }
+
+    @Override
     public List<OpenApp> findAllApps() {
         return appMapper.selectList(new QueryWrapper<OpenAppPO>().orderByAsc("id"))
                 .stream().map(this::toDomain).toList();
+    }
+
+    @Override
+    public boolean updateLifecycle(String appId, AppLifecycle to,
+                                   LocalDateTime closedAt, LocalDate retentionUntil) {
+        // 只写状态列与注销两列：closedAt/retentionUntil 仅 CLOSED 迁移带值，其余迁移不带——
+        // 且"不带"必须是真的不 SET（条件拼接）而不是 SET null：DELETED 迁移若 SET null
+        // 会把 CLOSED 时写下的注销时刻抹掉，审计上等于"注销时间消失"
+        UpdateWrapper<OpenAppPO> wrapper = new UpdateWrapper<OpenAppPO>()
+                .eq("app_id", appId)
+                .set("lifecycle_status", to.name());
+        if (closedAt != null) {
+            wrapper.set("closed_at", closedAt);
+        }
+        if (retentionUntil != null) {
+            wrapper.set("retention_until", retentionUntil);
+        }
+        return appMapper.update(null, wrapper) == 1;
     }
 
     @Override
@@ -100,6 +128,25 @@ public class OpenAppRepositoryImpl implements OpenAppRepository {
     }
 
     @Override
+    public int expireAllRotatingSecrets(String appId) {
+        // 注销收尾专用：轮换期旧键立即死亡（status→INVALID 且 expire_time 归零），
+        // 不等它们自己的 7 天 expire_time——CLOSED 的语义是"这把钥匙串整串作废"
+        return secretMapper.update(null, new UpdateWrapper<OpenAppSecretPO>()
+                .eq("app_id", appId)
+                .eq("status", SecretRecord.STATUS_ROTATING)
+                .set("status", SecretRecord.STATUS_INVALID)
+                .set("expire_time", LocalDateTime.now()));
+    }
+
+    @Override
+    public boolean updateEnvironment(String appId, String environment) {
+        // 只在 activate（沙箱晋升）一条路径调用；账单/资金边界按本列实时判定
+        return appMapper.update(null, new UpdateWrapper<OpenAppPO>()
+                .eq("app_id", appId)
+                .set("environment", environment)) == 1;
+    }
+
+    @Override
     public boolean invalidateSecret(long secretId) {
         return secretMapper.update(null, new UpdateWrapper<OpenAppSecretPO>()
                 .eq("id", secretId)
@@ -107,8 +154,13 @@ public class OpenAppRepositoryImpl implements OpenAppRepository {
     }
 
     private OpenApp toDomain(OpenAppPO po) {
+        // lifecycle 容错解析：库里值不在枚举里（理论不可达——只有本服务写这一列）时
+        // 按 null 上抛，由调用方 fail-closed（开放面 6013），绝不默认放行
+        AppLifecycle lifecycle = AppLifecycle.parse(po.getLifecycleStatus()).orElse(null);
         return new OpenApp(po.getAppId(), po.getAppName(), po.getStatus(),
-                po.getQpsLimit(), po.getDailyQuota(), po.getContact(), po.getCreateTime());
+                po.getQpsLimit(), po.getDailyQuota(), po.getContact(), po.getCreateTime(),
+                po.getEnvironment(), lifecycle, po.getClosedAt(), po.getRetentionUntil(),
+                po.getLegalHold() == null ? 0 : po.getLegalHold());
     }
 
     private SecretRecord toRecord(OpenAppSecretPO po) {

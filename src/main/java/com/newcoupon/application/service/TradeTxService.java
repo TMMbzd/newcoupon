@@ -93,6 +93,8 @@ public class TradeTxService {
     private final PricingSnapshotRepository pricingSnapshotRepository;
     private final PricingUsageRepository pricingUsageRepository;
     private final CouponReleaseTaskGateway releaseTaskGateway;
+    /** 资金边界守卫（V6 2B）：退款入口拒绝沙箱租户 */
+    private final EnvironmentGuard environmentGuard;
     private final long lockTimeoutMinutes;
 
     public TradeTxService(UserCouponRepository userCouponRepository,
@@ -106,6 +108,7 @@ public class TradeTxService {
                           PricingSnapshotRepository pricingSnapshotRepository,
                           PricingUsageRepository pricingUsageRepository,
                           CouponReleaseTaskGateway releaseTaskGateway,
+                          EnvironmentGuard environmentGuard,
                           @Value("${coupon.trade.lock-timeout-minutes:30}") long lockTimeoutMinutes) {
         this.userCouponRepository = userCouponRepository;
         this.couponUsageRepository = couponUsageRepository;
@@ -116,6 +119,7 @@ public class TradeTxService {
         this.couponReturnLogMapper = couponReturnLogMapper;
         this.couponConfirmExceptionMapper = couponConfirmExceptionMapper;
         this.pricingSnapshotRepository = pricingSnapshotRepository;
+        this.environmentGuard = environmentGuard;
         this.pricingUsageRepository = pricingUsageRepository;
         this.releaseTaskGateway = releaseTaskGateway;
         this.lockTimeoutMinutes = lockTimeoutMinutes;
@@ -645,6 +649,10 @@ public class TradeTxService {
 
         UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
                 .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
+
+        // 资金边界守卫（V6 2B）：真实退款在事务入口（券已定位、尚未写任何行）拒绝沙箱租户。
+        // 幂等重放路径在上面已提前返回——已入账的退款重放不产生新的资金变动，不受此守卫影响。
+        environmentGuard.assertProd(coupon.getAppId(), "refund");
 
         List<CouponShareDetailPO> shares = couponShareDetailMapper.selectPositiveByUsageNo(req.usageNo());
         if (shares.isEmpty()) {

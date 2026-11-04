@@ -1,6 +1,8 @@
 package com.newcoupon.domain.repository;
 
+import com.newcoupon.domain.open.AppLifecycle;
 import com.newcoupon.domain.open.OpenApp;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -22,8 +24,24 @@ public interface OpenAppRepository {
     /** 全部接入方（管理面列表；量级小，不分页） */
     List<OpenApp> findAllApps();
 
+    /**
+     * 行锁读（V6 2B）：生命周期迁移/数据导出的事务首步。
+     * 锁住应用行再查迁移表与事件表，并发的两个操作被串行化——
+     * 后拿锁的事务必然读到先提交者的结果（迁移状态 / 已导出标记）。
+     */
+    Optional<OpenApp> findAppForUpdate(String appId);
+
     /** 启停。@return true=影响 1 行；false=应用不存在 */
     boolean updateStatus(String appId, int status);
+
+    /**
+     * 生命周期迁移落库（V6 2B）。只写状态列与注销两列——环境/密钥/配额
+     * 各有各的入口，不借道这条 SQL 顺带修改。
+     *
+     * @return true=影响 1 行；false=应用不存在（调用方按参数错误分类）
+     */
+    boolean updateLifecycle(String appId, AppLifecycle to,
+                            LocalDateTime closedAt, LocalDate retentionUntil);
 
     /** 追加一把密钥（status 见 {@link SecretRecord}） */
     void insertSecret(String appId, String cipher, int status, LocalDateTime expireTime);
@@ -63,4 +81,10 @@ public interface OpenAppRepository {
             return status == STATUS_CURRENT;
         }
     }
+
+    /** 注销收尾：把该应用所有轮换期（ROTATING）密钥立即置 INVALID——rotate 只撤 CURRENT 键。 */
+    int expireAllRotatingSecrets(String appId);
+
+    /** 沙箱晋升（activate）翻转环境：SANDBOX→PROD，资金边界按 environment 实时判定。 */
+    boolean updateEnvironment(String appId, String environment);
 }

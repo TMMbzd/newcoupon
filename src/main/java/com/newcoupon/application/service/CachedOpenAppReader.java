@@ -156,13 +156,15 @@ public class CachedOpenAppReader {
                     .toList();
             log.debug("open-app auth cache MISS→load: appId={} enabled={} usableSecrets={}",
                     appId, app.enabled(), secrets.size());
-            return new AppAuth(app.appId(), app.enabled(), secrets, app.qpsLimit(), app.dailyQuota());
+            return new AppAuth(app.appId(), app.enabled(), secrets,
+                    app.qpsLimit(), app.dailyQuota(), app.lifecycle());
         });
     }
 
     /** 验签所需的全部信息（密钥已解密）；{@code enabled=false} 的应用照样缓存（避免反复回源） */
     public record AppAuth(String appId, boolean enabled, List<String> secrets,
-                          int qpsLimit, int dailyQuota) {
+                          int qpsLimit, int dailyQuota,
+                          com.newcoupon.domain.open.AppLifecycle lifecycle) {
 
         /** 当前有效的密钥版本数（诊断用） */
         public int secretVersions() {
@@ -174,10 +176,21 @@ public class CachedOpenAppReader {
             return !secrets.isEmpty();
         }
 
+        /**
+         * 开放面是否可调（V6 2B）：ACTIVE/SANDBOX_ACTIVE 才放行。
+         * lifecycle 为 null（库里的值不在枚举里，理论不可达）时 fail-closed 返回 false——
+         * 身份轴上的未知值宁可误拒也不误放。
+         */
+        public boolean callableOnOpenFace() {
+            return lifecycle != null
+                    && com.newcoupon.domain.open.AppLifecycle.callableOnOpenFace(lifecycle);
+        }
+
         /** 供日志/诊断使用，绝不返回明文 */
         @Override
         public String toString() {
             return "AppAuth{appId=" + appId + ", enabled=" + enabled
+                    + ", lifecycle=" + lifecycle
                     + ", secretVersions=" + secrets.size()
                     + ", qpsLimit=" + qpsLimit + ", dailyQuota=" + dailyQuota + '}';
         }

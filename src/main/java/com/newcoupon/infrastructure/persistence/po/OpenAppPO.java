@@ -19,6 +19,16 @@ public class OpenAppPO {
     private String contact;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
+    /** V45：环境（PROD/SANDBOX）——资金边界守卫的依据 */
+    private String environment;
+    /** V45：生命周期状态（字符串即 AppLifecycle 枚举名，解析在领域层） */
+    private String lifecycleStatus;
+    /** V45：注销完成时刻（confirm_close 写入） */
+    private LocalDateTime closedAt;
+    /** V45：数据保留截止（只写不做——清理是 runbook 手动事项） */
+    private java.time.LocalDate retentionUntil;
+    /** V45：法务保留（1=禁止删除） */
+    private Integer legalHold;
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
@@ -38,4 +48,14 @@ public class OpenAppPO {
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }
     public LocalDateTime getUpdateTime() { return updateTime; }
     public void setUpdateTime(LocalDateTime updateTime) { this.updateTime = updateTime; }
+    public String getEnvironment() { return environment; }
+    public void setEnvironment(String environment) { this.environment = environment; }
+    public String getLifecycleStatus() { return lifecycleStatus; }
+    public void setLifecycleStatus(String lifecycleStatus) { this.lifecycleStatus = lifecycleStatus; }
+    public LocalDateTime getClosedAt() { return closedAt; }
+    public void setClosedAt(LocalDateTime closedAt) { this.closedAt = closedAt; }
+    public java.time.LocalDate getRetentionUntil() { return retentionUntil; }
+    public void setRetentionUntil(java.time.LocalDate retentionUntil) { this.retentionUntil = retentionUntil; }
+    public Integer getLegalHold() { return legalHold; }
+    public void setLegalHold(Integer legalHold) { this.legalHold = legalHold; }
 }

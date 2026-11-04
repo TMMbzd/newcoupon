@@ -43,19 +43,22 @@ public class BudgetTxService {
     private final CouponActivityMapper activityMapper;
     private final SnowflakeIdGenerator idGenerator;
     private final BudgetMetrics metrics;
+    private final EnvironmentGuard environmentGuard;
 
     public BudgetTxService(CouponBudgetAccountMapper accountMapper,
                            CouponBudgetReservationMapper reservationMapper,
                            CouponBudgetLedgerMapper ledgerMapper,
                            CouponActivityMapper activityMapper,
                            SnowflakeIdGenerator idGenerator,
-                           BudgetMetrics metrics) {
+                           BudgetMetrics metrics,
+                           EnvironmentGuard environmentGuard) {
         this.accountMapper = accountMapper;
         this.reservationMapper = reservationMapper;
         this.ledgerMapper = ledgerMapper;
         this.activityMapper = activityMapper;
         this.idGenerator = idGenerator;
         this.metrics = metrics;
+        this.environmentGuard = environmentGuard;
     }
 
     /**
@@ -196,6 +199,11 @@ public class BudgetTxService {
             // 活动被并发删除属理论不可达，按参数错误拒绝而不是 NPE
             throw new BizException(ErrorCode.ACTIVITY_NOT_FOUND, "id=" + activityId);
         }
+        // 资金边界守卫（V6 2B）：懒建=第一笔真钱进账本，沙箱租户到此为止（4002）。
+        // 放在 activity 存在性之后、金额校验之前——环境问题比配置问题更早暴露。
+        // 语义约定：沙箱活动想测发放就不要开 budget_enabled（券照发、账本不建）。
+        environmentGuard.assertProd(activity.getAppId() != null ? activity.getAppId() : appId,
+                "budget-account");
         if (activity.getBudgetAmount() == null || activity.getBudgetAmount() <= 0) {
             // budget_amount 只有 NOT NULL 没有 >0 约束（存量行可为 0；开关还支持
             // 事后直改 DB 打开）——放任 INSERT 会撞账户 CHECK 的裸

@@ -82,6 +82,7 @@ public class GlobalExceptionHandler {
             case 6006, 6007 -> 429;          // 配额
             case 6008, 6009 -> 409;          // 幂等冲突
             case 6011 -> 403;                // 越权
+            case 6013 -> 403;                // 租户生命周期不可调用（V6 2B）：身份是真的，是平台不让调
             case 6010, 6012 -> 400;          // 版本 / 缺 clientToken
             default -> 401;                  // 6001~6005：签名与身份
         };

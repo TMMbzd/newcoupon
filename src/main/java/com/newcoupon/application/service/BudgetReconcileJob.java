@@ -58,6 +58,7 @@ public class BudgetReconcileJob {
     private final JdbcTemplate jdbc;
     private final MeterRegistry meterRegistry;
     private final int codeBatchLimit;
+    private final com.newcoupon.domain.repository.OpenAppRepository openAppRepository;
 
     public BudgetReconcileJob(CouponBudgetAccountMapper accountMapper,
                               CouponBudgetLedgerMapper ledgerMapper,
@@ -66,6 +67,7 @@ public class BudgetReconcileJob {
                               RedisScanLock scanLock,
                               JdbcTemplate jdbc,
                               MeterRegistry meterRegistry,
+                              com.newcoupon.domain.repository.OpenAppRepository openAppRepository,
                               @Value("${coupon.budget.reconcile.code-batch-limit:1000}") int codeBatchLimit) {
         this.accountMapper = accountMapper;
         this.ledgerMapper = ledgerMapper;
@@ -74,6 +76,7 @@ public class BudgetReconcileJob {
         this.scanLock = scanLock;
         this.jdbc = jdbc;
         this.meterRegistry = meterRegistry;
+        this.openAppRepository = openAppRepository;
         this.codeBatchLimit = codeBatchLimit;
     }
 
@@ -115,6 +118,31 @@ public class BudgetReconcileJob {
                 || last.getConsumedAfter().longValue() != account.getConsumed().longValue();
     }
 
+    /**
+     * 沙箱账户过滤（V6 2B）：对账只看真钱账本。守卫（BudgetTxService.ensureAccount 的
+     * assertProd）让沙箱根本建不了账户，这里过滤的是"守卫之前手工建的/未来才补守卫的"
+     * 历史行——它们不是钱，对它们巡检只会产生无意义的告警噪音。
+     * 等式③④⑤不经过账户行循环（码批次/任务/模板维度），沙箱数据在这些等式里天然守恒，无需过滤。
+     */
+    private List<CouponBudgetAccountPO> prodAccounts() {
+        java.util.Set<String> sandboxApps = openAppRepository.findAllApps().stream()
+                .filter(com.newcoupon.domain.open.OpenApp::sandbox)
+                .map(com.newcoupon.domain.open.OpenApp::appId)
+                .collect(java.util.stream.Collectors.toSet());
+        if (sandboxApps.isEmpty()) {
+            return accountMapper.selectAll();
+        }
+        List<CouponBudgetAccountPO> all = accountMapper.selectAll();
+        List<CouponBudgetAccountPO> prod = all.stream()
+                .filter(a -> a.getAppId() == null || !sandboxApps.contains(a.getAppId()))
+                .toList();
+        int skipped = all.size() - prod.size();
+        if (skipped > 0) {
+            log.info("budget reconcile skipped {} sandbox account(s)", skipped);
+        }
+        return prod;
+    }
+
     private static void sleepQuietly(long ms) {
         try {
             Thread.sleep(ms);
@@ -125,7 +153,7 @@ public class BudgetReconcileJob {
 
     private int checkLedgerMatchesAccounts() {
         int drifts = 0;
-        for (CouponBudgetAccountPO account : accountMapper.selectAll()) {
+        for (CouponBudgetAccountPO account : prodAccounts()) {
             CouponBudgetLedgerPO last = ledgerMapper.selectLastByAccount(account.getId());
             if (last == null) {
                 // 账户存在但零流水：reserved/consumed 必须都是 0，否则钱是无中生有来的
@@ -164,7 +192,7 @@ public class BudgetReconcileJob {
     /** 等式②：每账户开口预占合计 vs reserved。 */
     private int checkOpenReservations() {
         int drifts = 0;
-        for (CouponBudgetAccountPO account : accountMapper.selectAll()) {
+        for (CouponBudgetAccountPO account : prodAccounts()) {
             long openSum = reservationMapper.sumOpenByAccount(account.getId());
             if (openSum != account.getReserved()) {
                 // 两段式复核：见 checkLedgerMatchesAccounts——并发结算与两读交错的假差异

@@ -265,6 +265,44 @@ public class AdminSessionService {
      * 记一次失败并返回窗口内累计数。未知用户名同样计数：不数的话，探测者可用
      * "失败后第 6 次还能不能继续错"反推用户名存在性；数了，两种情况行为一致。
      */
+    /**
+     * 第二管理员凭据核验（双人删除用）：与登录同一批 BCrypt 哈希、同一防枚举立场，
+     * **并且接入同一锁定计数**——否则这里成为绕过登录锁定的密码爆破旁路
+     * （审查发现：无计数无节流，且可在应用存在性校验之前反复试）。
+     * 键名空间独立（approver:）与登录计数互不干扰，但阈值/窗口同配置。
+     * @return true=凭据有效；false=无效或已锁定（不区分，防枚举）
+     */
+    public boolean verifyApproverCredential(String username, String password) {
+        if (username == null || username.isBlank() || password == null || password.isBlank()
+                || username.length() > 64) {
+            return false;
+        }
+        String key = "c:admin:auth:approver:" + username;
+        try {
+            String existing = redis.opsForValue().get(key);
+            if (existing != null && Long.parseLong(existing) >= maxAttempts) {
+                return false;   // 已锁定：正确密码也拒（与登录同语义）
+            }
+            AdminUserPO approver = rbacMapper.findByUsername(username.trim());
+            boolean ok = approver != null && approver.getEnabled() != null
+                    && approver.getEnabled() == 1
+                    && passwordEncoder.matches(password, approver.getPasswordHash());
+            if (!ok) {
+                Long n = redis.opsForValue().increment(key);
+                if (n != null && n == 1) {
+                    redis.expire(key, lockWindow);   // 固定窗口，与登录同款
+                }
+            } else {
+                redis.delete(key);   // 核验通过清计数（复核成功不该累计）
+            }
+            return ok;
+        } catch (RuntimeException e) {
+            // Redis 故障 fail-closed：双人删除是不可逆操作，宁可拒绝不可绕过锁定
+            log.warn("approver credential check degraded (fail-closed): user={}", username, e);
+            return false;
+        }
+    }
+
     private long registerFailure(String username, HttpServletRequest request) {
         // 键=用户名+来源 IP（审查修正：只按用户名的话，未认证攻击者拿公开的种子
         // 用户名每 15 分钟补 1 次失败即可**永久锁死唯一管理员**；加 IP 后攻击者

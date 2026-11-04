@@ -68,7 +68,14 @@ public class OpenAppService {
     /**
      * 注册接入方。
      *
-     * @throws BizException {@link ErrorCode#PARAM_ERROR}——appId 格式非法 / 名称缺失 / appId 已存在
+     * <p><b>环境与入口生命周期（V6 2B）</b>：environment 参数（PROD/SANDBOX）与
+     * {@code sbx-} appId 前缀二者任一即沙箱。入口生命周期按环境定：
+     * PROD → ACTIVE、SANDBOX → SANDBOX_ACTIVE——内部面建应用即"平台已审"
+     * （既有"建好就能调"的语义不变）；DRAFT/PENDING_REVIEW 留给后续租户自助注册
+     * （设计原文的自助端点已裁剪，运营可 SQL 置入后由状态机正常走链，见 AppLifecycle）。
+     *
+     * @throws BizException {@link ErrorCode#PARAM_ERROR}——appId 格式非法 / 名称缺失 /
+     *                       appId 已存在 / environment 取值非法
      */
     @Transactional
     public AppWithSecret create(CreateAppRequest req) {
@@ -88,11 +95,17 @@ public class OpenAppService {
         if (qpsLimit < 0 || dailyQuota < 0) {
             throw new BizException(ErrorCode.PARAM_ERROR, "配额不能为负（0=不限）");
         }
+        String environment = resolveEnvironment(appId, req.environment());
+        com.newcoupon.domain.open.AppLifecycle initialLifecycle =
+                OpenApp.ENV_SANDBOX.equals(environment)
+                        ? com.newcoupon.domain.open.AppLifecycle.SANDBOX_ACTIVE
+                        : com.newcoupon.domain.open.AppLifecycle.ACTIVE;
 
         String secret = SecretCipher.newSecret();
         try {
             repository.insertApp(new OpenApp(appId, appName, OpenApp.STATUS_ENABLED,
-                    qpsLimit, dailyQuota, req.contact(), null));
+                    qpsLimit, dailyQuota, req.contact(), null, environment, initialLifecycle,
+                    null, null, 0));
         } catch (DuplicateKeyException e) {
             // 唯一索引终审：不做"先查再插"（两者之间总有竞态窗口），直接让数据库判
             throw new BizException(ErrorCode.PARAM_ERROR, "appId 已存在：" + appId);
@@ -105,7 +118,28 @@ public class OpenAppService {
         eventPublisher.publishEvent(new com.newcoupon.infrastructure.ratelimit.TenantQuotaChangedEvent(
                 "新建接入方：" + appId));
 
-        return new AppWithSecret(appId, appName, secret, OpenApp.STATUS_ENABLED, qpsLimit, dailyQuota);
+        return new AppWithSecret(appId, appName, secret, OpenApp.STATUS_ENABLED, qpsLimit, dailyQuota,
+                environment, initialLifecycle.name());
+    }
+
+    /**
+     * 环境裁决：显式参数优先校验，前缀约定兜底——"sbx- 前缀即沙箱"让运营不必记参数，
+     * 看到 appId 就知道环境；显式传 PROD 但 appId 带 sbx- 时按沙箱处理（前缀是公开承诺，
+     * 不能被一个参数悄悄否掉——沙箱误入生产资金链路的后果远大于反向）。
+     */
+    private static String resolveEnvironment(String appId, String environment) {
+        if (appId.startsWith(OpenApp.SANDBOX_PREFIX)) {
+            return OpenApp.ENV_SANDBOX;
+        }
+        if (environment == null || environment.isBlank()) {
+            return OpenApp.ENV_PROD;
+        }
+        String normalized = environment.trim().toUpperCase();
+        if (!OpenApp.ENV_PROD.equals(normalized) && !OpenApp.ENV_SANDBOX.equals(normalized)) {
+            throw new BizException(ErrorCode.PARAM_ERROR,
+                    "environment 只能是 PROD 或 SANDBOX（收到：" + environment + "）");
+        }
+        return normalized;
     }
 
     /** 查询单个接入方（含密钥状态，不含明文）。不存在则 PARAM_ERROR（管理面按"查无此应用"处理） */
@@ -116,7 +150,9 @@ public class OpenAppService {
                 .map(r -> toView(r, now))
                 .toList();
         return new AppView(app.appId(), app.appName(), app.status(), app.qpsLimit(),
-                app.dailyQuota(), app.contact(), app.createTime(), secrets);
+                app.dailyQuota(), app.contact(), app.createTime(), secrets,
+                app.environment(), app.lifecycle() == null ? null : app.lifecycle().name(),
+                app.closedAt(), app.retentionUntil(), app.legalHold());
     }
 
     /** 全部接入方（管理面列表） */
@@ -164,7 +200,8 @@ public class OpenAppService {
         authReader.invalidateAfterCommit(appId);
 
         return new AppWithSecret(app.appId(), app.appName(), secret,
-                app.status(), app.qpsLimit(), app.dailyQuota());
+                app.status(), app.qpsLimit(), app.dailyQuota(),
+                app.environment(), app.lifecycle() == null ? null : app.lifecycle().name());
     }
 
     // ------------------------------------------------------------------
@@ -206,14 +243,25 @@ public class OpenAppService {
     // 请求/响应模型
     // ------------------------------------------------------------------
 
-    /** 注册请求。appId 可空（系统生成）；qpsLimit/dailyQuota 可空（用建表默认值） */
+    /**
+     * 注册请求。appId 可空（系统生成）；qpsLimit/dailyQuota 可空（用建表默认值）；
+     * environment 可空（PROD/SANDBOX，sbx- 前缀的 appId 无论参数一律沙箱，V6 2B）
+     */
     public record CreateAppRequest(String appId, String appName,
-                                   Integer qpsLimit, Integer dailyQuota, String contact) {
+                                   Integer qpsLimit, Integer dailyQuota, String contact,
+                                   String environment) {
+
+        /** 旧调用方兼容（5 参，V6 2B 前的形状）：environment 缺省 PROD */
+        public CreateAppRequest(String appId, String appName,
+                                Integer qpsLimit, Integer dailyQuota, String contact) {
+            this(appId, appName, qpsLimit, dailyQuota, contact, null);
+        }
     }
 
-    /** 创建/轮换的返回：secret 是明文 SK，**只在这一次返回** */
+    /** 创建/轮换的返回：secret 是明文 SK，**只在这一次返回**；environment/lifecycle 供调用方核对（V6 2B） */
     public record AppWithSecret(String appId, String appName, String secret,
-                                int status, int qpsLimit, int dailyQuota) {
+                                int status, int qpsLimit, int dailyQuota,
+                                String environment, String lifecycleStatus) {
     }
 
     /** 密钥视图：不返回明文，但返回"还能不能用"（运营排查"我的旧密钥怎么失效了"时的第一手信息） */
@@ -221,7 +269,10 @@ public class OpenAppService {
                              LocalDateTime createTime, boolean usable) {
     }
 
+    /** 应用视图：V6 2B 起带环境/生命周期/注销三列与法务保留（运营面的第一手状态） */
     public record AppView(String appId, String appName, int status, int qpsLimit, int dailyQuota,
-                          String contact, LocalDateTime createTime, List<SecretView> secrets) {
+                          String contact, LocalDateTime createTime, List<SecretView> secrets,
+                          String environment, String lifecycleStatus,
+                          LocalDateTime closedAt, java.time.LocalDate retentionUntil, int legalHold) {
     }
 }

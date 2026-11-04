@@ -77,7 +77,14 @@ public class DailyBillService {
         this.meterRegistry = meterRegistry;
     }
 
-    /** 生成指定日期的账单（幂等，可重跑/补数）。返回聚合出的模板行数 */
+    /**
+     * 生成指定日期的账单（幂等，可重跑/补数）。返回聚合出的模板行数。
+     *
+     * <p><b>沙箱过滤（V6 2B）</b>：聚合 SQL 里 LEFT JOIN open_app 只取 PROD 租户的行
+     * （沙箱核销不进真账单）；被跳过的沙箱行数不单独统计——想知道沙箱用量走
+     * 开放面审计（open_api_audit），账单这条管道只对真钱负责。
+     * {@link #generateSettlePartyBill} 用同一过滤条件，保证 reconcile 等式两侧口径一致。
+     */
     public int generateBill(LocalDate date) {
         LocalDateTime start = date.atStartOfDay();
         LocalDateTime end = date.plusDays(1).atStartOfDay();

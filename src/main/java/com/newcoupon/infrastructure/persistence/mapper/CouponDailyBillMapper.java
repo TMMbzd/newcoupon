@@ -48,6 +48,12 @@ public interface CouponDailyBillMapper extends BaseMapper<CouponDailyBillPO> {
      *
      * <p><b>旧负行取 `-ABS(...)`</b>：负行本身的金额已经是负数，直接相加即可净额；
      * 早期写法 `-share_total` 会把负数翻成正数、反而虚增账单。V24 起修正。
+     *
+     * <p><b>沙箱过滤（V6 2B）</b>：JOIN open_app 只聚合 PROD 租户的行——沙箱是联调数据，
+     * 进账单就是"假钱进真账"。detail 行自带 app_id（V22 起 NOT NULL）；
+     * LEFT JOIN + COALESCE 按 PROD 处理"归属行缺失"的边角（open_app 行被物理删之类，
+     * 理论不可达——DELETED 是逻辑死），钱的口径宁可多算进人工复核也不静默漏账。
+     * 主体账单（同日同源）必须用同一个过滤条件，否则 reconcile 对不上。
      */
     @Select("SELECT template_id AS templateId, " +
             "       COALESCE(SUM(confirmCount), 0) AS confirmCount, " +
@@ -56,19 +62,21 @@ public interface CouponDailyBillMapper extends BaseMapper<CouponDailyBillPO> {
             "       COALESCE(SUM(platformBurden), 0) AS platformBurden, " +
             "       COALESCE(SUM(merchantBurden), 0) AS merchantBurden " +
             "FROM ( " +
-            "  SELECT template_id, 1 AS confirmCount, 0 AS refundCount, " +
+            "  SELECT app_id, template_id, 1 AS confirmCount, 0 AS refundCount, " +
             "         share_total AS discountTotal, platform_burden AS platformBurden, " +
             "         merchant_burden AS merchantBurden, create_time " +
             "  FROM coupon_share_detail WHERE share_total > 0 " +
             "  UNION ALL " +
-            "  SELECT template_id, 0, 1, " +
+            "  SELECT app_id, template_id, 0, 1, " +
             "         -ABS(share_total), -ABS(platform_burden), -ABS(merchant_burden), create_time " +
             "  FROM coupon_share_detail WHERE share_total < 0 " +
             "  UNION ALL " +
-            "  SELECT template_id, 0, 1, -refund_discount_amt, -refund_platform_amt, " +
+            "  SELECT app_id, template_id, 0, 1, -refund_discount_amt, -refund_platform_amt, " +
             "         -refund_merchant_amt, create_time " +
             "  FROM coupon_refund_detail " +
-            ") t WHERE create_time >= #{start} AND create_time < #{end} " +
+            ") t LEFT JOIN open_app a ON a.app_id = t.app_id " +
+            "WHERE t.create_time >= #{start} AND t.create_time < #{end} " +
+            "AND COALESCE(a.environment, 'PROD') = 'PROD' " +
             "GROUP BY template_id")
     List<DailyAgg> aggregateByDate(@Param("start") LocalDateTime start, @Param("end") LocalDateTime end);
 

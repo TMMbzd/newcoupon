@@ -51,7 +51,11 @@ public interface CouponSettlePartyDailyBillMapper extends BaseMapper<CouponSettl
         public void setMerchantBurden(Long merchantBurden) { this.merchantBurden = merchantBurden; }
     }
 
-    @Select("SELECT app_id COLLATE utf8mb4_bin AS appId, " +
+    /**
+     * 沙箱过滤（V6 2B）：与模板账单同条件（LEFT JOIN open_app 只聚合 PROD）——
+     * 两张账单的对账等式要求过滤口径完全一致，只滤一张必然 reconcile 报差异。
+     */
+    @Select("SELECT t.app_id COLLATE utf8mb4_bin AS appId, " +
             "       settle_party_id COLLATE utf8mb4_bin AS settlePartyId, template_id AS templateId, " +
             "       COALESCE(SUM(confirmCount), 0) AS confirmCount, " +
             "       COALESCE(SUM(refundCount), 0) AS refundCount, " +
@@ -71,8 +75,10 @@ public interface CouponSettlePartyDailyBillMapper extends BaseMapper<CouponSettl
             "  SELECT app_id, settle_party_id, template_id, 0, 1, " +
             "         -refund_discount_amt, -refund_platform_amt, -refund_merchant_amt, create_time " +
             "  FROM coupon_refund_detail " +
-            ") t WHERE create_time >= #{start} AND create_time < #{end} " +
-            "GROUP BY app_id COLLATE utf8mb4_bin, " +
+            ") t LEFT JOIN open_app a ON a.app_id = t.app_id " +
+            "WHERE t.create_time >= #{start} AND t.create_time < #{end} " +
+            "AND COALESCE(a.environment, 'PROD') = 'PROD' " +
+            "GROUP BY t.app_id COLLATE utf8mb4_bin, " +
             "         settle_party_id COLLATE utf8mb4_bin, template_id")
     List<SettlePartyAgg> aggregateByDate(@Param("start") LocalDateTime start,
                                          @Param("end") LocalDateTime end);
