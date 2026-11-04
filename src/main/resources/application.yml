@@ -206,6 +206,14 @@ coupon:
       expire-hours: ${AUDIT_EXPORT_EXPIRE_HOURS:24}
       # 行数上限：超限任务落 FAILED（提示缩窗）——LONGTEXT 上界 4GB，先拿行数保护构建时长与库压。
       max-rows: ${AUDIT_EXPORT_MAX_ROWS:200000}
+    # 哈希链巡检任务（V6 2C）：默认关，照 BudgetReconcileJob 的开关纪律——
+    # 没有这个条目时 @ConditionalOnProperty 静默不装配，巡检永远不跑且无任何提示。
+    verify:
+      enabled: ${AUDIT_CHAIN_VERIFY_ENABLED:false}
+      # @Scheduled 降级通道的轮次间隔（默认一天一轮；XXL couponAuditChainVerifyJob 是主通道，
+      # 手动触发不受此值限制）。每轮全表扫描，按数据量决定开不开、跑多勤。
+      fixed-delay-ms: ${AUDIT_CHAIN_VERIFY_FIXED_DELAY_MS:86400000}
+      initial-delay-ms: ${AUDIT_CHAIN_VERIFY_INITIAL_DELAY_MS:3600000}
   # 管理面安全（V6 2A）：种子管理员 / actuator Basic / 登录锁定 / 会话时长 / 2A-2 读面翻面开关。
   # 完整说明见 docs/research-2026-10-21/01 §4 2A 与 SecurityConfig/SessionConfig；
   # 2A-2 破坏性变更公告：docs/runbook/管理面认证翻面.md。

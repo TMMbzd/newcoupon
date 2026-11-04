@@ -48,7 +48,10 @@ import org.springframework.http.ResponseEntity;
  * RBAC 拒绝面的矩阵在 SecurityRbacIntegrationTest。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "coupon.audit.export.max-rows=3"   // 超限 FAILED 用例的触发线：本类 marker 行数控制在 2/4 两侧
+        "coupon.audit.export.max-rows=3",   // 超限 FAILED 用例的触发线：本类 marker 行数控制在 2/4 两侧
+        // 巡检任务装配进上下文（默认关）：用例直调 runOnce() 驱动——
+        // 调度间隔保持默认 1h 初始延迟，测试窗口内后台轮次不会自己跑
+        "coupon.audit.verify.enabled=true"
 })
 class AuditQueryIntegrationTest extends ShardedIntegrationTestSupport {
 
@@ -63,6 +66,12 @@ class AuditQueryIntegrationTest extends ShardedIntegrationTestSupport {
 
     @Autowired
     private AuditLogMapper auditLogMapper;
+
+    @Autowired
+    private com.newcoupon.application.service.AuditChainVerifyJob verifyJob;
+
+    @Autowired
+    private io.micrometer.core.instrument.MeterRegistry meterRegistry;
 
     @org.springframework.test.context.DynamicPropertySource
     static void shardingProperties(org.springframework.test.context.DynamicPropertyRegistry registry) {
@@ -388,6 +397,34 @@ class AuditQueryIntegrationTest extends ShardedIntegrationTestSupport {
 
         JsonNode ok = post("/api/audit/verify", "{}");
         assertThat(ok.path("data").path("ok").asBoolean()).isTrue();
+    }
+
+    // ------------------------------------------------------------------
+    // 每日巡检任务（AuditChainVerifyJob）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("巡检任务：健康轮 true；断链轮 false + coupon_audit_chain_broken_total 指标；还原后恢复 true")
+    void chainVerifyJob_reportsBrokenWithMetric() throws Exception {
+        String marker = writeAuditRow("IT2C-JOB-" + UUID.randomUUID(), "{\"j\":1}");
+        List<AuditLogPO> rows = waitFor(marker, 1);
+        AuditLogPO victim = rows.get(0);
+        try {
+            assertThat(verifyJob.runOnce()).as("健康链：巡检通过").isTrue();
+
+            auditLogMapper.update(null, new LambdaUpdateWrapper<AuditLogPO>()
+                    .eq(AuditLogPO::getId, victim.getId())
+                    .set(AuditLogPO::getAction, "TAMPERED-BY-JOB-TEST"));
+            assertThat(verifyJob.runOnce()).as("断链：巡检必须失败").isFalse();
+            double broken = meterRegistry.get("coupon_audit_chain_broken_total")
+                    .counter().count();
+            assertThat(broken).as("断链指标已计数").isGreaterThanOrEqualTo(1.0);
+        } finally {
+            auditLogMapper.update(null, new LambdaUpdateWrapper<AuditLogPO>()
+                    .eq(AuditLogPO::getId, victim.getId())
+                    .set(AuditLogPO::getAction, marker));
+        }
+        assertThat(verifyJob.runOnce()).as("还原后：巡检恢复通过").isTrue();
     }
 
     /** 复制 PO 并只换 hashVersion（computeHash 读行对象，不能原地改——mapper 读出的对象是共享缓存外的副本，仍显式拷贝）。 */
