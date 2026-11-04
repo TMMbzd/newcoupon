@@ -4,6 +4,9 @@ target/
 *.jar
 !.mvn/wrapper/maven-wrapper.jar
 
+# 控制台前端依赖（node_modules 绝不入 git；构建产物 static/console/ 入 git——克隆即跑）
+console/node_modules/
+
 # ---- IDE ----
 .idea/
 *.iml

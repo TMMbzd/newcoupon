@@ -1,0 +1,58 @@
+/* 控制台最小页样式（裁剪裁定：无组件库，手写一张样式表，总量控制在百行内） */
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  color: #1f2329;
+  background: #f5f6f8;
+}
+
+.center-note { padding: 48px; text-align: center; color: #646a73; }
+
+/* ---- 登录页 ---- */
+.login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+.login-card {
+  width: 320px; padding: 32px 28px; background: #fff; border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(31, 35, 41, .08); display: flex; flex-direction: column; gap: 16px;
+}
+.login-card h1 { margin: 0 0 8px; font-size: 18px; text-align: center; }
+.login-card label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #646a73; }
+.login-card input {
+  padding: 8px 10px; border: 1px solid #dcdfe6; border-radius: 4px; font-size: 14px;
+}
+.login-card input:focus { outline: none; border-color: #3370ff; }
+
+/* ---- 通用控件 ---- */
+button {
+  padding: 7px 16px; border: 1px solid #3370ff; background: #3370ff; color: #fff;
+  border-radius: 4px; font-size: 14px; cursor: pointer;
+}
+button:hover:not(:disabled) { background: #2860e1; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.ghost { background: #fff; color: #1f2329; border-color: #dcdfe6; }
+button.ghost:hover:not(:disabled) { background: #f2f3f5; }
+
+.alert {
+  padding: 8px 12px; margin-bottom: 12px; border-radius: 4px; font-size: 13px;
+  background: #fef1f1; color: #d83931; border: 1px solid #fde2e2;
+}
+
+/* ---- 列表页 ---- */
+.page { max-width: 1000px; margin: 24px auto; padding: 0 16px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.topbar h1 { margin: 0; font-size: 20px; }
+.who { display: flex; align-items: center; gap: 12px; font-size: 14px; color: #646a73; }
+
+table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 6px; overflow: hidden;
+  box-shadow: 0 1px 4px rgba(31, 35, 41, .06); }
+th, td { padding: 10px 12px; text-align: left; font-size: 13px; border-bottom: 1px solid #f0f1f3; }
+th { background: #f7f8fa; color: #646a73; font-weight: 500; white-space: nowrap; }
+tbody tr:hover { background: #f7f9fe; }
+td.empty { text-align: center; color: #8f959e; padding: 32px 0; }
+
+.pager { display: flex; align-items: center; justify-content: space-between; margin-top: 12px;
+  font-size: 13px; color: #646a73; }
+.pager div { display: flex; gap: 8px; }
+.pager button { background: #fff; color: #1f2329; border-color: #dcdfe6; }
+.pager button:hover:not(:disabled) { background: #f2f3f5; }

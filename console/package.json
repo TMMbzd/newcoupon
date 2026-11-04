@@ -1,0 +1,24 @@
+{
+  "name": "newcoupon-console",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "newcoupon 管理台（V6 2D 裁剪版：登录 + 模板列表，无路由库/无组件库）",
+  "scripts": {
+    "build": "tsc && vite build"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.4",
+    "typescript": "5.6.3",
+    "vite": "5.4.11"
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true
+  }
+}
