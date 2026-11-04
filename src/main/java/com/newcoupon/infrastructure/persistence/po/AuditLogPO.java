@@ -11,8 +11,13 @@ import java.time.LocalDateTime;
  * <p>六要素对应：appId/userId（谁）、createdAt（何时）、ip（何处）、
  * action/resourceType/resourceId（何事）、beforeSnapshot/afterSnapshot（前后值）、traceId（链路）。
  *
- * <p>哈希链：recordHash = SHA-256(全部字段拼接 + prevHash)；
+ * <p>actor 三列（V6 2C / V46）：六要素里的"谁"原先只覆盖开放面（appId）与业务用户
+ * （userId），管理面动作回答不了"哪个管理员在哪个会话里干的"——actorType/actorId/sessionId
+ * 补这个维度。存量行为 NULL（写入时无 actor 概念，不回填）。
+ *
+ * <p>哈希链：recordHash = SHA-256(按 hashVersion 选口径的全部字段拼接 + prevHash)；
  * 首条记录的 prevHash = SHA-256("AUDIT_GENESIS")。
+ * hashVersion=1（存量）：拼接不含 actor 三列；=2（V46 起新写入）：含。
  * 篡改任何字段 → 重算 hash 与存储值不匹配；删除任何记录 → 后续 prevHash 断链。
  */
 @TableName("audit_log")
@@ -31,6 +36,10 @@ public class AuditLogPO {
     private String afterSnapshot;
     private String ip;
     private Integer resultCode;
+    private String actorType;
+    private String actorId;
+    private String sessionId;
+    private Integer hashVersion;
     private String prevHash;
     private String recordHash;
     private LocalDateTime createdAt;
@@ -57,6 +66,14 @@ public class AuditLogPO {
     public void setIp(String ip) { this.ip = ip; }
     public Integer getResultCode() { return resultCode; }
     public void setResultCode(Integer resultCode) { this.resultCode = resultCode; }
+    public String getActorType() { return actorType; }
+    public void setActorType(String actorType) { this.actorType = actorType; }
+    public String getActorId() { return actorId; }
+    public void setActorId(String actorId) { this.actorId = actorId; }
+    public String getSessionId() { return sessionId; }
+    public void setSessionId(String sessionId) { this.sessionId = sessionId; }
+    public Integer getHashVersion() { return hashVersion; }
+    public void setHashVersion(Integer hashVersion) { this.hashVersion = hashVersion; }
     public String getPrevHash() { return prevHash; }
     public void setPrevHash(String prevHash) { this.prevHash = prevHash; }
     public String getRecordHash() { return recordHash; }

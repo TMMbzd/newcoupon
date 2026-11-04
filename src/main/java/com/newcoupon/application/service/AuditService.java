@@ -31,7 +31,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  *   <li><b>computeHash 是静态方法</b>：测试可以直接调用来验证篡改（重算哈希与存储值比对）。</li>
  * </ul>
  *
- * <p>哈希链原理：每条记录的 record_hash = SHA-256(全部字段拼接 + prev_hash)。
+ * <p>哈希链原理：每条记录的 record_hash = SHA-256(按行 hashVersion 选口径的字段拼接 + prev_hash)。
  * 篡改任何字段 → 重算的 hash 与存储值不匹配；删除任何记录 → 后续记录的 prev_hash 断链。
  */
 @Service
@@ -41,6 +41,14 @@ public class AuditService {
 
     /** 首条记录的前驱哈希（创世值）——所有链的起点 */
     public static final String GENESIS_HASH = sha256("AUDIT_GENESIS");
+
+    /**
+     * 当前哈希算法版本（V6 2C）：新写入一律 v2——actor_type/actor_id/session_id 三列
+     * 参与 record_hash 拼接（改 actor 即篡改，可被 verify 检出）。存量行是 v1
+     * （列默认 1），v1 口径不含 actor 列且**永不重算**——重算历史哈希等于平台亲手
+     * 毁掉"链上历史不可改"这个性质本身。
+     */
+    public static final int HASH_VERSION_CURRENT = 2;
 
     /** JSON 序列化器（静态——审计序列化不需要 Spring 配置的定制 mapper） */
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -82,7 +90,23 @@ public class AuditService {
             String appId, Long userId, String traceId,
             String action, String resourceType, String resourceId,
             String beforeSnapshot, String afterSnapshot,
-            String ip, Integer resultCode) {
+            String ip, Integer resultCode,
+            String actorType, String actorId, String sessionId, Integer hashVersion) {
+
+        /**
+         * 调用方入口（唯一受支持的构造方式）：hashVersion 由服务端钉死为当前版本——
+         * 版本号的意义是"链上每行的算法可辨识"（校验按行选口径），调用方传错
+         * （比如写 1，新行就不含 actor 三列地进哈希）比不传更糟，所以不给选择。
+         */
+        public static AuditContext of(String appId, Long userId, String traceId,
+                                      String action, String resourceType, String resourceId,
+                                      String beforeSnapshot, String afterSnapshot,
+                                      String ip, Integer resultCode,
+                                      String actorType, String actorId, String sessionId) {
+            return new AuditContext(appId, userId, traceId, action, resourceType, resourceId,
+                    beforeSnapshot, afterSnapshot, ip, resultCode,
+                    actorType, actorId, sessionId, HASH_VERSION_CURRENT);
+        }
     }
 
     /**
@@ -117,6 +141,12 @@ public class AuditService {
             po.setAfterSnapshot(ctx.afterSnapshot());
             po.setIp(ctx.ip());
             po.setResultCode(ctx.resultCode() != null ? ctx.resultCode() : 0);
+            // actor 三列与算法版本：版本只信服务端——canonical 构造器直接传 null 时
+            // 也按当前版本落库（写 1 会让新行绕开 actor 列参与哈希的口径）
+            po.setActorType(ctx.actorType());
+            po.setActorId(ctx.actorId());
+            po.setSessionId(ctx.sessionId());
+            po.setHashVersion(ctx.hashVersion() != null ? ctx.hashVersion() : HASH_VERSION_CURRENT);
             po.setCreatedAt(LocalDateTime.now());
 
             String prev = auditChainHeadMapper.selectLastHashForUpdate();
@@ -125,30 +155,36 @@ public class AuditService {
 
             auditLogMapper.insert(po);
             auditChainHeadMapper.updateLastHash(po.getRecordHash());
-            log.debug("AUDIT WRITTEN: id={} action={} hash={}",
-                    po.getId(), po.getAction(), po.getRecordHash().substring(0, 12) + "…");
+            log.debug("AUDIT WRITTEN: id={} action={} actor={}/{} hash={}",
+                    po.getId(), po.getAction(), po.getActorType(), po.getActorId(),
+                    po.getRecordHash().substring(0, 12) + "…");
         });
     }
 
     /**
      * 计算一条审计记录的哈希（静态——测试可直接调用来验证篡改）。
-     * 拼接规则：全部业务字段 + prev_hash，用 "|" 分隔，null 转空串，SHA-256 输出十六进制。
+     * 拼接规则：业务字段 + prev_hash，用 "|" 分隔，null 转空串，SHA-256 输出十六进制。
+     * 版本口径按行的 hashVersion 选：null 或 1 = v1（不含 actor 三列——存量行的哈希
+     * 就是按这个口径算的，换口径等于全部误报篡改）；2 = v2（actor 三列插在
+     * createdAt 与 prev_hash 之间）。
      */
     public static String computeHash(AuditLogPO po) {
-        String canonical = String.join("|",
-                ns(po.getAppId()),
-                ns(po.getUserId()),
-                ns(po.getTraceId()),
-                ns(po.getAction()),
-                ns(po.getResourceType()),
-                ns(po.getResourceId()),
-                ns(po.getBeforeSnapshot()),
-                ns(po.getAfterSnapshot()),
-                ns(po.getIp()),
-                ns(po.getResultCode()),
-                ns(po.getCreatedAt()),
-                ns(po.getPrevHash()));
-        return sha256(canonical);
+        boolean v2 = po.getHashVersion() != null && po.getHashVersion() >= 2;
+        String[] fields = v2
+                ? new String[]{
+                        ns(po.getAppId()), ns(po.getUserId()), ns(po.getTraceId()),
+                        ns(po.getAction()), ns(po.getResourceType()), ns(po.getResourceId()),
+                        ns(po.getBeforeSnapshot()), ns(po.getAfterSnapshot()),
+                        ns(po.getIp()), ns(po.getResultCode()), ns(po.getCreatedAt()),
+                        ns(po.getActorType()), ns(po.getActorId()), ns(po.getSessionId()),
+                        ns(po.getPrevHash())}
+                : new String[]{
+                        ns(po.getAppId()), ns(po.getUserId()), ns(po.getTraceId()),
+                        ns(po.getAction()), ns(po.getResourceType()), ns(po.getResourceId()),
+                        ns(po.getBeforeSnapshot()), ns(po.getAfterSnapshot()),
+                        ns(po.getIp()), ns(po.getResultCode()), ns(po.getCreatedAt()),
+                        ns(po.getPrevHash())};
+        return sha256(String.join("|", fields));
     }
 
     /** 把任意对象序列化为 JSON 字符串（失败时退化为 toString——审计不能因序列化失败而丢） */

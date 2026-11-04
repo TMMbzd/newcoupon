@@ -75,11 +75,14 @@ class AuditLogIntegrationTest extends ShardedIntegrationTestSupport {
         return List.of();
     }
 
-    /** 产生一条审计记录（直接调 AuditService，不经过业务方法） */
+    /**
+     * 产生一条审计记录（直接调 AuditService，不经过业务方法）。
+     * V6 2C 起走带 actor 三列的工厂方法（hashVersion 由服务端钉死为 2）。
+     */
     private void produceAuditRecord(String marker) {
-        auditService.record(new AuditService.AuditContext(
+        auditService.record(AuditService.AuditContext.of(
                 "test-app",                 // 谁：appId
-                100L,                       // 谁：userId
+                100L,                       // 谁：userId（操作对象维度）
                 "trace-" + marker,          // 链路 ID
                 "TEST_" + marker,           // 何事：action
                 "TEST_RESOURCE",            // 何事：resourceType
@@ -87,7 +90,8 @@ class AuditLogIntegrationTest extends ShardedIntegrationTestSupport {
                 "{\"before\":\"" + marker + "\"}",  // 前值快照
                 "{\"after\":\"done\"}",     // 后值快照
                 "127.0.0.1",                // 何处：IP
-                0));                        // 结果码
+                0,                          // 结果码
+                "TENANT", "test-app", null));   // actor：模拟开放面应用发起
     }
 
     @Test
@@ -109,6 +113,10 @@ class AuditLogIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(latest.getBeforeSnapshot()).as("要素⑤前值快照").contains("T1");
         assertThat(latest.getAfterSnapshot()).as("要素⑤后值快照").isNotNull();
         assertThat(latest.getIp()).as("要素③何处：IP").isEqualTo("127.0.0.1");
+        assertThat(latest.getActorType()).as("actor 类型（V6 2C）").isEqualTo("TENANT");
+        assertThat(latest.getActorId()).as("actor 标识（V6 2C）").isEqualTo("test-app");
+        assertThat(latest.getHashVersion()).as("新写入哈希算法版本=2（actor 列参与哈希）")
+                .isEqualTo(AuditService.HASH_VERSION_CURRENT);
         assertThat(latest.getRecordHash()).as("哈希链：本条哈希").isNotBlank();
         assertThat(latest.getPrevHash()).as("哈希链：前条哈希").isNotBlank();
     }

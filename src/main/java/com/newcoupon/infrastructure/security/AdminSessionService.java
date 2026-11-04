@@ -115,7 +115,7 @@ public class AdminSessionService {
             throw new AdminLoginException();
         }
         if (overIpThrottle(request)) {
-            audit(request, username, null, AUDIT_LOGIN_FAILED, Map.of("reason", "IP_THROTTLED"));
+            audit(request, username, null, null, AUDIT_LOGIN_FAILED, Map.of("reason", "IP_THROTTLED"));
             throw new AdminLoginException();
         }
         AdminUserPO user = rbacService.findUser(username);
@@ -134,7 +134,7 @@ public class AdminSessionService {
             long after = registerFailure(username, request);
             if (after >= maxAttempts) {
                 // 恰好在本次跨过阈值：单独记一条锁定审计（运维要能回答"谁被锁了、何时能解"）
-                audit(request, username, null, AUDIT_LOCKED,
+                audit(request, username, null, null, AUDIT_LOCKED,
                         Map.of("failures", after, "lockWindowMs", lockWindow.toMillis()));
             }
             failReason = "BAD_PASSWORD";
@@ -147,7 +147,7 @@ public class AdminSessionService {
         }
 
         if (failReason != null) {
-            audit(request, username, null, AUDIT_LOGIN_FAILED, Map.of("reason", failReason));
+            audit(request, username, null, null, AUDIT_LOGIN_FAILED, Map.of("reason", failReason));
             throw new AdminLoginException();
         }
 
@@ -172,7 +172,7 @@ public class AdminSessionService {
         // 成功即清失败计数：锁定只累计"连续"失败
         redis.delete(FAIL_KEY_PREFIX + username);
 
-        audit(request, username, user.getId(), AUDIT_LOGIN_SUCCESS, null);
+        audit(request, username, user.getId(), session.getId(), AUDIT_LOGIN_SUCCESS, null);
         return profileOf(user);
     }
 
@@ -180,12 +180,15 @@ public class AdminSessionService {
     public void logout(HttpServletRequest request) {
         Object principal = currentPrincipal();
         HttpSession session = request.getSession(false);
+        // 会话 id 先取后失效：invalidate 之后再读 id 会抛 IllegalStateException，
+        // 而"登出发生在哪个会话"正是这条审计要留的事实
+        String sessionId = session == null ? null : session.getId();
         if (session != null) {
             session.invalidate();
         }
         SecurityContextHolder.clearContext();
         if (principal instanceof AdminPrincipal admin) {
-            audit(request, admin.getUsername(), admin.getUserId(), AUDIT_LOGOUT, null);
+            audit(request, admin.getUsername(), admin.getUserId(), sessionId, AUDIT_LOGOUT, null);
         }
     }
 
@@ -219,17 +222,26 @@ public class AdminSessionService {
         rbacMapper.bumpAuthVersion(target.getId());
         log.warn("ADMIN FORCE LOGOUT: username={} 删除会话 {} 个（{}）",
                 targetUsername, removed, operatorNote);
-        audit(targetUsername, target.getId(), AUDIT_FORCE_LOGOUT,
+        audit(null, targetUsername, target.getId(), null, AUDIT_FORCE_LOGOUT,
                 Map.of("removedSessions", removed, "note", String.valueOf(operatorNote)));
         return removed;
     }
 
-    private void audit(String username, Long userId, String action, Map<String, ?> detail) {
-        auditService.record(new AuditService.AuditContext(
+    /**
+     * 会话动作审计的统一出口（V6 2C 起带 actor 三列）。
+     *
+     * <p>actor 口径：ADMIN + userId；sessionId=当前请求会话 id（登录前/非 HTTP 调用为空）。
+     * 注意 userId 与 resourceId 的分工——resourceId 放 username（人会读），
+     * actorId 放 userId（程序 join admin_user 用），两个维度都要能查。
+     */
+    private void audit(HttpServletRequest request, String username, Long userId,
+                       String sessionId, String action, Map<String, ?> detail) {
+        auditService.record(AuditService.AuditContext.of(
                 "SYSTEM", userId, MDC.get(TraceIdFilter.TRACE_ID),
                 action, "ADMIN_AUTH", username,
                 null, detail == null ? null : AuditService.serialize(detail),
-                null, 0));
+                request == null ? null : RiskControlFilter.clientIp(request), 0,
+                "ADMIN", userId == null ? null : String.valueOf(userId), sessionId));
     }
 
     /** 会话里重建 Authentication 用（登录时）；之后每请求由 Refresh 过滤器按 DB 重载。 */
@@ -345,19 +357,6 @@ public class AdminSessionService {
             log.warn("login ip throttle unavailable (fail-open)", e);
             return false;
         }
-    }
-
-    private void audit(HttpServletRequest request, String username, Long userId,
-                       String action, Map<String, ?> detail) {
-        auditService.record(new AuditService.AuditContext(
-                "SYSTEM",
-                userId,
-                MDC.get(TraceIdFilter.TRACE_ID),
-                action, "ADMIN_AUTH", username,
-                null,
-                detail == null ? null : AuditService.serialize(detail),
-                RiskControlFilter.clientIp(request),
-                0));
     }
 
     /** 登录失败异常：对外只有一种表现（401 + 7011），原因只在审计里。 */

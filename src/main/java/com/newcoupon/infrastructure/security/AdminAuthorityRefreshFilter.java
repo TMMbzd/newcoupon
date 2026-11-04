@@ -106,18 +106,21 @@ public class AdminAuthorityRefreshFilter extends OncePerRequestFilter {
 
         String reason = terminateReason(user, loginVersion, loginAt);
         if (reason != null) {
+            // 会话 id 先取后失效：invalidate 后再读会抛 IllegalStateException
+            String terminatedSessionId = session.getId();
             // 删会话：既有 Redis 会话行，也清本请求的 SecurityContext——后续过滤器看到的是匿名
             session.invalidate();
             SecurityContextHolder.clearContext();
             log.warn("ADMIN SESSION TERMINATED: user={} username={} reason={}",
                     admin.getUserId(), admin.getUsername(), reason);
-            auditService.record(new AuditService.AuditContext(
+            auditService.record(AuditService.AuditContext.of(
                     "SYSTEM", admin.getUserId(),
                     org.slf4j.MDC.get(com.newcoupon.infrastructure.web.TraceIdFilter.TRACE_ID),
                     "ADMIN_AUTH_SESSION_TERMINATED", "ADMIN_SESSION", admin.getUsername(),
                     null, AuditService.serialize(java.util.Map.of("reason", reason)),
                     com.newcoupon.infrastructure.web.RiskControlFilter.clientIp(request),
-                    ErrorCode.ADMIN_SESSION_REQUIRED.getCode()));
+                    ErrorCode.ADMIN_SESSION_REQUIRED.getCode(),
+                    "ADMIN", String.valueOf(admin.getUserId()), terminatedSessionId));
             reject(response);
             return false;
         }

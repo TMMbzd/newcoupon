@@ -4,6 +4,7 @@ import com.newcoupon.infrastructure.persistence.mapper.AdminRbacMapper;
 import com.newcoupon.infrastructure.persistence.po.AdminUserPO;
 import com.newcoupon.integration.ShardedIntegrationTestSupport;
 import com.newcoupon.infrastructure.security.AdminSessionService;
+import com.newcoupon.application.service.AuditService;
 import com.newcoupon.infrastructure.persistence.mapper.AuditLogMapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.newcoupon.infrastructure.persistence.po.AuditLogPO;
@@ -460,7 +461,8 @@ class SecurityRbacIntegrationTest extends ShardedIntegrationTestSupport {
         rest.exchange("/console/api/auth/login", HttpMethod.POST,
                 new HttpEntity<>("{\"username\":\"" + user.getUsername() + "\",\"password\":\"wrong\"}",
                         failHeaders), String.class);
-        assertThat(login(user.getUsername(), USER_PASSWORD).response().getStatusCode().value()).isEqualTo(200);
+        LoginOutcome okLogin = login(user.getUsername(), USER_PASSWORD);
+        assertThat(okLogin.response().getStatusCode().value()).isEqualTo(200);
 
         // 审计是异步单线程写：轮询最多 5 秒
         AtomicReference<List<AuditLogPO>> found = new AtomicReference<>(List.of());
@@ -482,5 +484,29 @@ class SecurityRbacIntegrationTest extends ShardedIntegrationTestSupport {
             }
         }
         assertThat(found.get()).as("登录成功与失败各一条审计").hasSizeGreaterThanOrEqualTo(2);
+
+        // V6 2C：会话审计带 actor 三列——ADMIN + userId + 登录会话 id
+        // （会话 id 与响应 Cookie 里的 SESSION 值一致：登录成功记的是轮换后的新会话）
+        AuditLogPO successRow = found.get().stream()
+                .filter(r -> AdminSessionService.AUDIT_LOGIN_SUCCESS.equals(r.getAction()))
+                .findFirst().orElseThrow();
+        assertThat(successRow.getActorType()).as("会话动作 actor 类型").isEqualTo("ADMIN");
+        assertThat(successRow.getActorId()).as("会话动作 actor 标识=管理员 userId")
+                .isEqualTo(String.valueOf(user.getId()));
+        assertThat(okLogin.sessionCookie()).as("登录审计的 session_id=轮换后的会话 id").isNotNull();
+        // SESSION Cookie 是 Base64(会话 id)（Spring Session 默认编码），库里存的是原始 id
+        String rawSessionId = new String(
+                java.util.Base64.getDecoder().decode(okLogin.sessionCookie()),
+                java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(successRow.getSessionId()).isEqualTo(rawSessionId);
+        assertThat(successRow.getHashVersion()).isEqualTo(AuditService.HASH_VERSION_CURRENT);
+        // 失败审计发生在建会话之前：actor 仍是 ADMIN 域动作（谁在试密码），但身份未知——
+        // actorId 与会话 id 都为空（试密码的人尚未证明自己是任何人），被冒名的用户名在 resourceId
+        AuditLogPO failRow = found.get().stream()
+                .filter(r -> AdminSessionService.AUDIT_LOGIN_FAILED.equals(r.getAction()))
+                .findFirst().orElseThrow();
+        assertThat(failRow.getActorType()).isEqualTo("ADMIN");
+        assertThat(failRow.getActorId()).as("登录失败者身份未证明，actorId 空").isNull();
+        assertThat(failRow.getSessionId()).as("登录失败时还没有会话").isNull();
     }
 }
