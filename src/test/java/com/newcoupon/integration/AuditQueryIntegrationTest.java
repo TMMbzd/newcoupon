@@ -529,10 +529,21 @@ class AuditQueryIntegrationTest extends ShardedIntegrationTestSupport {
         JsonNode created = post("/api/apps", "{\"appId\":\"" + appId + "\",\"appName\":\"M3 审计验签应用\"}");
         assertThat(created.path("code").asInt()).as("注册接入方应成功: " + created).isEqualTo(0);
 
-        List<AuditLogPO> rows = waitFor("APP_CREATE", 1);
-        AuditLogPO row = rows.stream()
-                .filter(r -> appId.equals(r.getResourceId()))
-                .findFirst().orElse(null);
+        // 按 action+resourceId 双条件轮询：共享 JVM 里别的测试类也建应用（APP_CREATE 行
+        // 先于本用例存在），只按 action 轮询会提前返回然后过滤出 null
+        AuditLogPO row = null;
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (System.currentTimeMillis() < deadline && row == null) {
+            List<AuditLogPO> rows = auditLogMapper.selectList(
+                    new LambdaQueryWrapper<AuditLogPO>()
+                            .eq(AuditLogPO::getAction, "APP_CREATE")
+                            .eq(AuditLogPO::getResourceId, appId));
+            if (!rows.isEmpty()) {
+                row = rows.get(rows.size() - 1);
+            } else {
+                Thread.sleep(150);
+            }
+        }
         assertThat(row).as("APP_CREATE 审计行（resourceId=appId）必须出现").isNotNull();
         assertThat(row.getResourceType()).isEqualTo("OPEN_APP");
         // 旧管理令牌（本用例的凭据）是共享机器凭据 → actor=SYSTEM；动作照记（M3 闸门裁定），
