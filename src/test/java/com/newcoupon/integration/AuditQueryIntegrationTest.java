@@ -470,21 +470,33 @@ class AuditQueryIntegrationTest extends ShardedIntegrationTestSupport {
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("巡检任务：健康轮 true；断链轮 false + coupon_audit_chain_broken_total 指标；还原后恢复 true")
+    @DisplayName("巡检任务：健康轮 true；断链轮 false + 断链/轮次/活性指标（M2）；还原后恢复 true")
     void chainVerifyJob_reportsBrokenWithMetric() throws Exception {
         String marker = writeAuditRow("IT2C-JOB-" + UUID.randomUUID(), "{\"j\":1}");
         List<AuditLogPO> rows = waitFor(marker, 1);
         AuditLogPO victim = rows.get(0);
+        double gaugeBefore = meterRegistry.get("coupon_audit_chain_last_success_epoch_ms")
+                .gauge().value();
         try {
             assertThat(verifyJob.runOnce()).as("健康链：巡检通过").isTrue();
+            assertThat(meterRegistry.get("coupon_audit_chain_verify_total")
+                    .tag("result", "ok").counter().count())
+                    .as("健康轮也要计数（M2：只有失败才计数=『从未跑过』与『跑且健康』不可区分）")
+                    .isGreaterThanOrEqualTo(1.0);
+            assertThat(meterRegistry.get("coupon_audit_chain_last_success_epoch_ms").gauge().value())
+                    .as("成功轮更新最近成功时刻 gauge")
+                    .isGreaterThanOrEqualTo(gaugeBefore);
 
             auditLogMapper.update(null, new LambdaUpdateWrapper<AuditLogPO>()
                     .eq(AuditLogPO::getId, victim.getId())
                     .set(AuditLogPO::getAction, "TAMPERED-BY-JOB-TEST"));
             assertThat(verifyJob.runOnce()).as("断链：巡检必须失败").isFalse();
-            double broken = meterRegistry.get("coupon_audit_chain_broken_total")
-                    .counter().count();
-            assertThat(broken).as("断链指标已计数").isGreaterThanOrEqualTo(1.0);
+            assertThat(meterRegistry.get("coupon_audit_chain_broken_total")
+                    .tag("reason", "RECORD_HASH_MISMATCH").counter().count())
+                    .as("断链指标已按原因计数").isGreaterThanOrEqualTo(1.0);
+            assertThat(meterRegistry.get("coupon_audit_chain_verify_total")
+                    .tag("result", "broken").counter().count())
+                    .as("断链轮计数与 ok 分标签").isGreaterThanOrEqualTo(1.0);
         } finally {
             auditLogMapper.update(null, new LambdaUpdateWrapper<AuditLogPO>()
                     .eq(AuditLogPO::getId, victim.getId())
