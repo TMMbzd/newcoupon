@@ -69,6 +69,9 @@ class ConsoleTemplateListIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired
     private com.newcoupon.application.service.ReceiveAppService receiveAppService;
 
+    @Autowired
+    private com.newcoupon.infrastructure.persistence.mapper.TemplateMapper templateMapper;
+
     // ------------------------------------------------------------------
     // HTTP 小工具：与 SecurityRbacIntegrationTest 同款（手工管 Cookie，
     // 每一步带什么凭据写清楚——这正是本类要钉的语义）
@@ -280,7 +283,7 @@ class ConsoleTemplateListIntegrationTest extends ShardedIntegrationTestSupport {
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("④ GET /console/ → 200 HTML，且引用的 js 真实存在（防产物丢的假绿）")
+    @DisplayName("④ GET /console/ → 200 HTML，且引用的 js/css 资产全部真实存在（防产物丢的假绿）")
     void consoleStatic_servedWithAssets() throws Exception {
         ResponseEntity<String> page = rest.getForEntity("/console/", String.class);
         assertThat(page.getStatusCode().value())
@@ -289,15 +292,56 @@ class ConsoleTemplateListIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(String.valueOf(page.getHeaders().getContentType())).contains("html");
         assertThat(page.getBody()).contains("</html>");
 
-        // 解析首个 script src（Vite 构建产物 /console/assets/index-*.js）再 GET 它——
+        // 解析 HTML 引用的全部资产再逐个 GET——script 与 link 一视同仁（审查 mi5：
+        // 只验 script 时 css 同族事故漏网）；路径从 HTML 动态解析，不硬编码 hash 文件名。
         // index.html 在而构建产物丢是最常见的"部署了一半"事故
         String html = page.getBody();
-        java.util.regex.Matcher m = java.util.regex.Pattern
+        List<String> assets = new java.util.ArrayList<>();
+        java.util.regex.Matcher scripts = java.util.regex.Pattern
                 .compile("<script[^>]+src=\"([^\"]+)\"").matcher(html);
-        assertThat(m.find()).as("入口 HTML 应引用至少一个脚本。html=" + html).isTrue();
-        String src = m.group(1);
-        ResponseEntity<String> js = rest.getForEntity(src, String.class);
-        assertThat(js.getStatusCode().value())
-                .as("HTML 引用的脚本必须真实存在：" + src).isEqualTo(200);
+        while (scripts.find()) {
+            assets.add(scripts.group(1));
+        }
+        java.util.regex.Matcher links = java.util.regex.Pattern
+                .compile("<link[^>]+href=\"([^\"]+)\"").matcher(html);
+        while (links.find()) {
+            assets.add(links.group(1));
+        }
+        assertThat(assets).as("入口 HTML 至少应引用一个脚本。html=" + html).isNotEmpty();
+        for (String src : assets) {
+            // 防御外链（favicon 站点等绝对 URL 不会出现在 vite 产物里，但断言只对同源资产负责）
+            if (!src.startsWith("/")) {
+                continue;
+            }
+            ResponseEntity<String> asset = rest.getForEntity(src, String.class);
+            assertThat(asset.getStatusCode().value())
+                    .as("HTML 引用的资产必须真实存在：" + src).isEqualTo(200);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // ⑤ 脏枚举行降级（审查 mi4）：列表是扇出读，一行脏数据不掀翻整页
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("⑤ 某行 coupon_type 为未知码 → 列表 200 且该行显示'未知码'，不 500")
+    void dirtyEnumRow_degradesNotWholePage500() throws Exception {
+        long id = createTemplateViaApi("2D脏码行-" + UUID.randomUUID().toString().substring(0, 8));
+        // 模拟版本回滚场景：库里出现当前代码不认识的枚举值（直接改列，绕过领域校验）
+        templateMapper.update(null,
+                new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<com.newcoupon.infrastructure.persistence.po.CouponTemplatePO>()
+                        .eq(com.newcoupon.infrastructure.persistence.po.CouponTemplatePO::getId, id)
+                        .set(com.newcoupon.infrastructure.persistence.po.CouponTemplatePO::getCouponType, 99));
+
+        String session = login("admin", SEED_ADMIN_PASSWORD);
+        ResponseEntity<String> resp = getWithSession("/api/templates?page=1&size=20", session);
+        assertThat(resp.getStatusCode().value())
+                .as("扇出读里一行脏数据不得变成整页 500（新模板 id 必在第一页，翻页绕不过）")
+                .isEqualTo(200);
+        JsonNode row = findRow(JSON.readTree(resp.getBody()).path("data").path("rows"), id);
+        assertThat(row.path("couponType").asText())
+                .as("未知码降级显示原始码，不抛不吞")
+                .isEqualTo("券类型未知码 99");
+        // 详情路径维持"抛错暴露不一致"的现状语义（见 TemplateQueryService.enumDesc 注释）
     }
 }

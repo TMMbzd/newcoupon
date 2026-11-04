@@ -70,16 +70,36 @@ public class TemplateQueryService {
                         CouponStockShardPO::getUsed));
     }
 
-    /** PO → 表格行：只投影八列；issuedCount 用分片真实口径（见类注释 Ma2）。 */
+    /**
+     * PO → 表格行：只投影八列；issuedCount 用分片真实口径（见类注释 Ma2）。
+     * 枚举码走降级路径（见 {@link #enumDesc}）——列表是扇出读，一行脏数据不能掀翻整页。
+     */
     private static TemplateListItem toItem(CouponTemplatePO po, long realUsed) {
         return new TemplateListItem(
                 po.getId(),
                 po.getName(),
-                CouponType.of(po.getCouponType()).getDesc(),
+                enumDesc("券类型", po.getCouponType(), code -> CouponType.of(code).getDesc()),
                 po.getFaceValue(),
-                PublishStatus.of(po.getPublishStatus()).getDesc(),
+                enumDesc("发布状态", po.getPublishStatus(), code -> PublishStatus.of(code).getDesc()),
                 po.getTotalCount(),
                 realUsed,
                 po.getCreateTime());
+    }
+
+    /**
+     * 枚举码 → 描述，未知码降级显示"未知码 N"而不抛（审查 mi4）。
+     *
+     * <p><b>为什么列表降级、详情维持现状（TemplateResponse 的 of() 会抛）</b>：列表是
+     * 扇出读——版本回滚后库里存在新枚举值时，一行脏数据若抛 IllegalArgumentException，
+     * 整页 500 且翻页绕不过（新模板 id 必在第一页）；详情是单行语义，未知码抛错
+     * 反而把"这行数据与当前代码版本不一致"尽早暴露给调用方。两条路径的语义差异
+     * 是有意为之。
+     */
+    private static String enumDesc(String what, Integer code, java.util.function.IntFunction<String> resolver) {
+        try {
+            return resolver.apply(code);
+        } catch (IllegalArgumentException e) {
+            return what + "未知码 " + code;
+        }
     }
 }
