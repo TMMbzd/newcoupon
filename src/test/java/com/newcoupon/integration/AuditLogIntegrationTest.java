@@ -165,4 +165,61 @@ class AuditLogIntegrationTest extends ShardedIntegrationTestSupport {
                 .as("篡改后重算的哈希应与存储值不匹配（篡改可检出）")
                 .isNotEqualTo(tampered.getRecordHash());
     }
+
+    /**
+     * T4（V6 2C）：两线程并发 record → 链连续无分叉。
+     *
+     * <p>串行化机制是 V35 的 audit_chain_head 单行 FOR UPDATE（跨实例也成立）；
+     * v2 口径（actor 列进哈希）换了 writeRecord 的拼接内容但没动加锁路径——
+     * 本用例把这个性质钉住：并发写入后全表按 id 升序 prev_hash 逐条衔接，
+     * 且不存在两条记录 prev_hash 相同的分叉（分叉=两个写者读了同一个链头）。
+     */
+    @Test
+    @Order(4)
+    @DisplayName("T4: 两线程并发 record 各 10 条 → 全链按 id 衔接、无分叉")
+    void t4_concurrentWritesChainStaysContinuous() throws Exception {
+        int perThread = 10;
+        Runnable writer = () -> {
+            for (int i = 0; i < perThread; i++) {
+                auditService.record(AuditService.AuditContext.of(
+                        "test-app", 200L, "trace-t4",
+                        "TEST_T4", "TEST_RESOURCE", "r-t4",
+                        "{\"b\":1}", "{\"a\":1}",
+                        "127.0.0.1", 0,
+                        "TENANT", "test-app", null));
+            }
+        };
+        Thread t1 = new Thread(writer, "audit-t4-a");
+        Thread t2 = new Thread(writer, "audit-t4-b");
+        t1.start();
+        t2.start();
+        t1.join();
+        t2.join();
+
+        // 等两线程全部落库（共 20 条 TEST_T4）
+        List<AuditLogPO> records = List.of();
+        for (int i = 0; i < 50; i++) {
+            records = waitForAuditRecordsByAction("TEST_T4");
+            if (records.size() >= 2 * perThread) {
+                break;
+            }
+            Thread.sleep(100);
+        }
+        assertThat(records).as("两线程各 10 条应全部落库").hasSize(2 * perThread);
+
+        records.sort((a, b) -> Long.compare(a.getId(), b.getId()));
+        // 无分叉：任何 record_hash 至多被一个后继引用（两个后继=两条链，FOR UPDATE 失效）
+        java.util.Set<String> referenced = new java.util.HashSet<>();
+        for (int i = 1; i < records.size(); i++) {
+            AuditLogPO prev = records.get(i - 1);
+            AuditLogPO cur = records.get(i);
+            assertThat(cur.getPrevHash())
+                    .as("id=%d 的 prev_hash 应等于前一条 id=%d 的 record_hash",
+                            cur.getId(), prev.getId())
+                    .isEqualTo(prev.getRecordHash());
+            assertThat(referenced.add(cur.getPrevHash()))
+                    .as("record_hash 被 %d 引用两次——链分叉（FOR UPDATE 串行失效）", prev.getId())
+                    .isTrue();
+        }
+    }
 }
