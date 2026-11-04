@@ -22,7 +22,9 @@ import com.newcoupon.domain.repository.CouponEventRepository;
 import com.newcoupon.domain.repository.CouponUsageRepository;
 import com.newcoupon.domain.repository.PricingSnapshotRepository;
 import com.newcoupon.domain.repository.PricingUsageRepository;
+import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
+import com.newcoupon.domain.settle.SettleQualityFlags;
 import com.newcoupon.domain.statemachine.CouponStateMachine;
 import com.newcoupon.domain.statemachine.CouponTransition;
 import com.newcoupon.infrastructure.persistence.CouponReleaseTaskGateway;
@@ -95,6 +97,9 @@ public class TradeTxService {
     private final CouponReleaseTaskGateway releaseTaskGateway;
     /** 资金边界守卫（V6 2B）：退款入口拒绝沙箱租户 */
     private final EnvironmentGuard environmentGuard;
+    /** 质量打标（V47）要读模板出资方：直读不走缓存——funder_type 创建后不可变，但保持
+     *  事务层"读什么就信什么"的朴素（缓存纪律见 CachedTemplateReader 注释，不扩大其服务面） */
+    private final TemplateRepository templateRepository;
     private final long lockTimeoutMinutes;
 
     public TradeTxService(UserCouponRepository userCouponRepository,
@@ -109,6 +114,7 @@ public class TradeTxService {
                           PricingUsageRepository pricingUsageRepository,
                           CouponReleaseTaskGateway releaseTaskGateway,
                           EnvironmentGuard environmentGuard,
+                          TemplateRepository templateRepository,
                           @Value("${coupon.trade.lock-timeout-minutes:30}") long lockTimeoutMinutes) {
         this.userCouponRepository = userCouponRepository;
         this.couponUsageRepository = couponUsageRepository;
@@ -122,6 +128,7 @@ public class TradeTxService {
         this.environmentGuard = environmentGuard;
         this.pricingUsageRepository = pricingUsageRepository;
         this.releaseTaskGateway = releaseTaskGateway;
+        this.templateRepository = templateRepository;
         this.lockTimeoutMinutes = lockTimeoutMinutes;
     }
 
@@ -218,10 +225,13 @@ public class TradeTxService {
 
         // ════ 第 2 环：出资拆分落表（与核销同一事务——原子）════
         if (split != null) {
+            // 质量打标（V47）要判"商家/共担出资的钱是否落 __default__ 主体"——出资方在同一事务里
+            // 读一次模板主数据（funder_type 创建后不可变），下面两条插入路径共用这一份判定。
+            FundingQuality funding = resolveFundingQuality(coupon.getTemplateId());
             if (lineShares != null && !lineShares.isEmpty()) {
-                insertLineShares(req, coupon, usage, split, lineShares);
+                insertLineShares(req, coupon, usage, split, lineShares, funding);
             } else {
-                insertOrderLevelShare(req, coupon, usage, split);
+                insertOrderLevelShare(req, coupon, usage, split, funding);
             }
         }
 
@@ -230,7 +240,7 @@ public class TradeTxService {
 
     /** 订单粒度分账（有 split 但没有行级分摊时的兼容路径：没有行号/行金额/行数量） */
     private void insertOrderLevelShare(ConfirmRequest req, UserCoupon coupon, CouponUsage usage,
-                                       FundingSplit split) {
+                                       FundingSplit split, FundingQuality funding) {
         CouponShareDetailPO share = new CouponShareDetailPO();
         share.setUserCouponId(coupon.getId());
         share.setUserId(coupon.getUserId());
@@ -243,6 +253,11 @@ public class TradeTxService {
         share.setPlatformBurden(split.platformBurden());
         share.setMerchantBurden(split.merchantBurden());
         share.setShareTotal(split.total());
+        // 订单级行没有行号 → NO_ITEMS（与 coupon_refund_order.funding_known=0 同族的粗粒度标记）；
+        // 出资拆分是平台算的真实值，只降观测粒度、不排除出账单
+        ShareQuality quality = shareQuality(funding, DEFAULT_PARTY, true);
+        share.setQualityFlags(quality.flags());
+        share.setSettleEligible(quality.eligible() ? 1 : 0);
         couponShareDetailMapper.insert(share);
     }
 
@@ -252,7 +267,8 @@ public class TradeTxService {
      */
     private void insertLineShares(ConfirmRequest req, UserCoupon coupon, CouponUsage usage,
                                   FundingSplit split,
-                                  java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares) {
+                                  java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares,
+                                  FundingQuality funding) {
         long sumDiscount = lineShares.stream()
                 .mapToLong(com.newcoupon.application.dto.TradeDtos.LineShare::discountAmt).sum();
         long sumPlatform = lineShares.stream()
@@ -274,8 +290,8 @@ public class TradeTxService {
             share.setUserId(coupon.getUserId());
             share.setTemplateId(coupon.getTemplateId());
             share.setAppId(coupon.getAppId());
-            share.setSettlePartyId(line.settlePartyId() == null
-                    ? DEFAULT_PARTY : line.settlePartyId());
+            String party = line.settlePartyId() == null ? DEFAULT_PARTY : line.settlePartyId();
+            share.setSettlePartyId(party);
             share.setPricingId(req.pricingId());
             share.setUsageNo(req.usageNo());
             share.setOrderNo(usage.getOrderNo());
@@ -285,8 +301,55 @@ public class TradeTxService {
             share.setPlatformBurden(line.platformBurden());
             share.setMerchantBurden(line.merchantBurden());
             share.setShareTotal(line.discountAmt());
+            // 主体逐行不同（灰度开时一行 A 一行 __default__ 都可能），判定必须放进循环里
+            ShareQuality quality = shareQuality(funding, party, false);
+            share.setQualityFlags(quality.flags());
+            share.setSettleEligible(quality.eligible() ? 1 : 0);
             couponShareDetailMapper.insert(share);
         }
+    }
+
+    /**
+     * 分账行质量打标（V47，与迁移回填同口径——两处判定必须一致，见 SettleBackfillSql）。
+     *
+     * <p>排除规则只有两条：①模板主数据缺失（ORPHAN_TEMPLATE——归属没法判，宁可多排除进
+     * 人工复核，不把归属不明的行算进可结算桶；正常不可达，核销前链路都要求模板存在）；
+     * ②商家/共担出资的钱落在 {@code __default__}（灰度关期间的写入/行缺主体）→ LEGACY_DEFAULT
+     * ——这钱算不清该和哪个商家结算。平台券 {@code __default__} 是合法空主体（平台和自己结算），
+     * 不打标不排除。订单级兼容行加 NO_ITEMS：出资拆分真实，只降观测粒度。
+     */
+    private ShareQuality shareQuality(FundingQuality funding, String party, boolean orderLevel) {
+        int flags = 0;
+        boolean eligible = true;
+        if (funding.orphan()) {
+            flags |= SettleQualityFlags.ORPHAN_TEMPLATE;
+            eligible = false;
+        } else if (funding.merchantFunded() && DEFAULT_PARTY.equals(party)) {
+            flags |= SettleQualityFlags.LEGACY_DEFAULT;
+            eligible = false;
+        }
+        if (orderLevel) {
+            flags |= SettleQualityFlags.NO_ITEMS;
+        }
+        return new ShareQuality(flags, eligible);
+    }
+
+    /** 分账行质量判定结果（flags=位掩码；eligible=是否进真实结算口径） */
+    private record ShareQuality(int flags, boolean eligible) {
+    }
+
+    /** 模板出资方判定（一次核销读一次，两条插入路径共用）：merchantFunded=商家/共担；orphan=模板缺失 */
+    private record FundingQuality(boolean merchantFunded, boolean orphan) {
+    }
+
+    /** 读模板主数据判出资方（funder_type 创建后不可变；直读不走缓存，理由见字段注释） */
+    private FundingQuality resolveFundingQuality(long templateId) {
+        return templateRepository.findById(templateId)
+                .map(t -> new FundingQuality(
+                        t.getBudgetOwner() == com.newcoupon.domain.coupon.BudgetOwner.MERCHANT
+                                || t.getBudgetOwner() == com.newcoupon.domain.coupon.BudgetOwner.SPLIT,
+                        false))
+                .orElse(new FundingQuality(false, true));
     }
 
     // ════ 环 2：支付后核销异常（CONFIRM_EXCEPTION）════
@@ -381,10 +444,11 @@ public class TradeTxService {
         couponEventRepository.append(CouponEvent.used(coupon, usage, discountAmt, now));
         if (split != null) {
             ConfirmRequest shareReq = new ConfirmRequest(usageNo, discountAmt, null, pricingId);
+            FundingQuality funding = resolveFundingQuality(coupon.getTemplateId());
             if (lineShares != null && !lineShares.isEmpty()) {
-                insertLineShares(shareReq, coupon, usage, split, lineShares);
+                insertLineShares(shareReq, coupon, usage, split, lineShares, funding);
             } else {
-                insertOrderLevelShare(shareReq, coupon, usage, split);
+                insertOrderLevelShare(shareReq, coupon, usage, split, funding);
             }
         }
         couponConfirmExceptionMapper.markResolved(usageNo, "CONFIRMED",
