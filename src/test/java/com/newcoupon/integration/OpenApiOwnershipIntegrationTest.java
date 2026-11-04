@@ -194,6 +194,45 @@ class OpenApiOwnershipIntegrationTest extends ShardedIntegrationTestSupport {
                 .send(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofString());
     }
 
+    @Test
+    @DisplayName("L73：跨租户同 userId+requestId（同步链路）→ 各领各的模板，两笔都成功互不干扰")
+    void syncReceive_sameUserIdAndRequestId_acrossTenants_bothSucceed() throws Exception {
+        // 乙应用建自己的模板并发布（甲的模板已在 provisionOnce 建好发布）。
+        // 模板 id 全局唯一：跨租户同 user 领的是两张不同的模板，不撞 uk_user_seq。
+        long templateB = readLong(client.post("/open/v1/templates", """
+                {"name":"乙应用的L73验证券","activityId":1001,"couponType":1,"faceValue":500,
+                 "threshold":1000,"totalCount":100,"perUserLimit":5,
+                 "validType":2,"validDays":7}""", APP_B, secretB, "own-create-b-tpl").body(), "/data/id");
+        client.post("/open/v1/templates/" + templateB + "/publish", "", APP_B, secretB, "own-publish-b-tpl");
+
+        long sharedUserId = 99_777L;              // 与其它用例的 USER_ID 错开，钱包断言不串台
+        String sharedRequestId = "own-shared-req-1";   // 两个租户刻意用同一个 requestId
+
+        // 租户甲：同 userId+requestId 领甲的模板
+        OpenApiTestClient.Response asA = client.post("/open/v1/coupons/receive",
+                sharedReceiveBody(sharedRequestId, sharedUserId, templateIdOfA),
+                APP_A, secretA, "own-rcv-l73-a");
+        assertThat(asA.status()).as(asA.body()).isEqualTo(200);
+        assertThat(asA.body()).contains("\"code\":0");
+
+        // 租户乙：**同一个 userId + 同一个 requestId** 领乙的模板——uk_idem=(user_id, app_id,
+        // idempotent_key) 三元组在同步链路（C1 receive）也必须成立：这笔不能被当成
+        // "甲那笔的重复"拦掉（异步链路的同类断言在 AsyncIssueSchemaIntegrationTest，DB 层）。
+        OpenApiTestClient.Response asB = client.post("/open/v1/coupons/receive",
+                sharedReceiveBody(sharedRequestId, sharedUserId, templateB),
+                APP_B, secretB, "own-rcv-l73-b");
+        assertThat(asB.status()).as("跨租户同 userId+requestId 必须各自成立：" + asB.body()).isEqualTo(200);
+        assertThat(asB.body()).contains("\"code\":0");
+
+        // 两边钱包各一张自己的券——互不干扰，也互不可见
+        assertThat(couponCount(client.get("/open/v1/coupons",
+                "userId=" + sharedUserId, APP_A, secretA).body()))
+                .as("甲钱包里只有甲发的券").isEqualTo(1);
+        assertThat(couponCount(client.get("/open/v1/coupons",
+                "userId=" + sharedUserId, APP_B, secretB).body()))
+                .as("乙钱包里只有乙发的券").isEqualTo(1);
+    }
+
     // ------------------------------------------------------------------
     // 越权⑥：模板生命周期与库存调整五个端点（2026-11-02 审计发现的裸奔面）
     // ------------------------------------------------------------------
@@ -240,6 +279,12 @@ class OpenApiOwnershipIntegrationTest extends ShardedIntegrationTestSupport {
     private String receiveBody(String requestId, long userId) {
         return "{\"requestId\":\"" + requestId + "\",\"userId\":" + userId
                 + ",\"templateId\":" + templateIdOfA + "}";
+    }
+
+    /** L73 用例的领券体：templateId 显式传入（跨租户两笔领的是不同模板） */
+    private String sharedReceiveBody(String requestId, long userId, long templateId) {
+        return "{\"requestId\":\"" + requestId + "\",\"userId\":" + userId
+                + ",\"templateId\":" + templateId + "}";
     }
 
     private long couponCount(String json) {

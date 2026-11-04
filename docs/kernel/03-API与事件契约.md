@@ -52,6 +52,7 @@ NONCE
 - `BODY_SHA256_HEX`：请求体的 SHA-256（空体按空数组）；
 - 密钥：每个 appId 至少一把可用 secret；轮换期新旧密钥并存，验签会逐个尝试；默认轮换 168 小时（7 天）；
 - 未知签名头字段忽略（向前兼容）；任一必需字段缺失/格式错 → 6001；
+- 版本段在路径里且**已签进 canonical**（不加请求头版本——头版本会造成"路径与版本两处真相"）：版本段未登记（含 `/open/v2`、无尾斜杠的 `/open/v1`）→ `400 / 6010`，`data.supportedVersions` 列出可用版本；认证成功的响应带 `X-API-Version` 头（V6 2B-2，ADR-0022）；
 - Redis nonce 存储不可用时按 fail-closed 返回 `503 / 5000`（认证不能靠“Redis 挂了就放行”）。
 
 ### 0.2 幂等（开放面所有 POST）
@@ -427,10 +428,11 @@ NONCE
 ## 11. 版本与兼容
 
 - 开放面 `/open/v1`；破坏性变更出 `/open/v2`（目标）；
+- **版本注册表（V6 2B-2，ADR-0022）**：`ApiVersionRegistry` 代码表登记版本存在性与状态（当前仅 v1/ACTIVE），认证链第 1 步据此判 6010（`data.supportedVersions` 引导）；认证成功响应带 `X-API-Version` 头；DEPRECATED 版本会追加 `Deprecation`/`Sunset`/`Link` 三头（RFC 9745/8594，机制已实现+单测，当前无 DEPRECATED 版本）；
 - 字段只增不改；新增字段可选；客户端忽略未知字段（服务端 Jackson 默认可忽略未知字段，签名头解析也忽略未知字段）；
 - 错误码只增不改；
-- 废弃：公告 → 双版本并行 → 迁移期 → 下线（**目标，当前没有正式废弃流程**）；
-- 契约测试：提供方维护、接入方接入前跑（**目标，当前没有契约测试套件**）；
+- 废弃：公告 → 双版本并行 → 迁移期 → 下线（迁移期机制=注册表置 DEPRECATED + 三头；首个 DEPRECATED 版本与 Sunset 日期待 v2 GA 时拍板，ADR-0016 参数表）；
+- 契约测试：**已有套件（V6 2B-2）**——黄金基线 `docs/open-api/openapi-v1.json`（springdoc 生成）+ `OpenApiContractIntegrationTest` 四守卫（泄漏防守/防漂移只增不改门禁/黄金样例/匿名拉 spec 401），规则与纪律见 ADR-0022 与 docs/open-api/README.md；接入方接入前可向平台索取基线 spec 做客户端校验；
 - 沙箱：目标态；外部产品先在沙箱跑通试算/锁/核销/退款；
 - `settlePartyId` 已由 DTO 接收并落库，但灰度开关 `trade.settle_party.enabled` 默认关；关闭时字段被忽略（所有行 `__default__`），开启后才参与过滤/退款归属。
 - `pricingId` 已由 `CalculateRequest`（`orderNo`）/`CalculateResponse`/`LockRequest`/`ConfirmRequest` 接收；灰度 `trade.pricing.enabled` 默认关。关闭时 calculate 不返回 ID，lock/confirm 的旧路径不变；已绑定的占用单仍按快照核销（数据面承诺）。
