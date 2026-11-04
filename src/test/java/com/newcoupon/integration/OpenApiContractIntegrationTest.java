@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.newcoupon.application.service.OpenAppService;
 import com.newcoupon.application.service.OpenAppService.CreateAppRequest;
+import com.newcoupon.integration.OpenApiDriftComparator.Rule;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -162,17 +163,25 @@ class OpenApiContractIntegrationTest extends ShardedIntegrationTestSupport {
     // 守卫 2b：比较器自检——每条规则都能抓到对应的破坏性变异、都不误伤 additive 变异
     // ------------------------------------------------------------------
 
-    /** 合成 mini spec：覆盖参数/请求体/响应/枚举/$ref 嵌套的最小可读样本 */
+    /**
+     * 合成 mini spec：覆盖参数（含 enum 与 pathItem 级共享参数）/请求体（数组 items、Map 值、
+     * 约束键、枚举）/响应（枚举、约束、组合成员）/$ref 嵌套的最小可读样本。
+     * 自检变异表必须覆盖比较器的全部 18 条规则与全部下钻路径（items/additionalProperties/组合）。
+     */
     private static final String MINI_SPEC = """
             {
               "openapi": "3.0.3",
               "paths": {
                 "/open/v1/templates/{id}": {
+                  "parameters": [
+                    {"name": "X-Trace-Id", "in": "header", "required": false, "schema": {"type": "string"}}
+                  ],
                   "get": {
                     "summary": "查询模板",
                     "parameters": [
                       {"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}},
-                      {"name": "verbose", "in": "query", "required": false, "schema": {"type": "boolean"}}
+                      {"name": "verbose", "in": "query", "required": false,
+                       "schema": {"type": "string", "enum": ["full", "brief"]}}
                     ],
                     "responses": {
                       "200": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/ResultTemplate"}}}},
@@ -194,70 +203,145 @@ class OpenApiContractIntegrationTest extends ShardedIntegrationTestSupport {
                   }},
                   "Template": {"type": "object", "properties": {
                     "id": {"type": "integer"},
-                    "name": {"type": "string"},
-                    "status": {"type": "string", "enum": ["DRAFT", "PUBLISHED", "OFFLINE"]}
+                    "name": {"type": "string", "maxLength": 64},
+                    "status": {"type": "string", "enum": ["DRAFT", "PUBLISHED", "OFFLINE"]},
+                    "group": {"anyOf": [
+                      {"type": "string", "maxLength": 10},
+                      {"type": "integer"}
+                    ]}
                   }},
                   "TemplateUpsert": {"type": "object", "required": ["name"], "properties": {
                     "name": {"type": "string"},
-                    "tag": {"type": "string"}
+                    "tag": {"type": "string"},
+                    "priority": {"type": "string", "enum": ["high", "low"]},
+                    "meta": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "tags": {"type": "array", "maxItems": 10, "items": {"$ref": "#/components/schemas/Tag"}}
+                  }},
+                  "Tag": {"type": "object", "properties": {
+                    "key": {"type": "string", "maxLength": 8},
+                    "weight": {"type": "integer", "minimum": 0}
                   }}
                 }
               }
             }
             """;
 
-    private record Mutation(String name, OpenApiDriftComparator.Rule expected, Consumer<JsonNode> mutation) {
+    /** mini spec 里最常用的节点定位（变异表里反复出现，收成局部变量免得每行都写一遍长链） */
+    private static JsonNode item(JsonNode n) {
+        return n.path("paths").path("/open/v1/templates/{id}");
+    }
+
+    private static JsonNode schema(JsonNode n, String name) {
+        return n.path("components").path("schemas").path(name);
+    }
+
+    private record Mutation(String name, Rule expected, Consumer<JsonNode> mutation) {
     }
 
     @Test
-    @DisplayName("比较器自检（破坏性）：15 类变异逐条命中自己的规则")
+    @DisplayName("比较器自检（破坏性）：33 类变异逐条命中自己的规则（覆盖全部 18 规则与 items/Map/组合下钻）")
     void comparator_flagsEveryBreakingMutation() throws Exception {
         List<Mutation> mutations = List.of(
-                new Mutation("删 path", OpenApiDriftComparator.Rule.PATH_REMOVED,
+                // ---- path / method / 参数 ----
+                new Mutation("删 path", Rule.PATH_REMOVED,
                         n -> ((ObjectNode) n.path("paths")).remove("/open/v1/templates/{id}")),
-                new Mutation("删 method", OpenApiDriftComparator.Rule.OPERATION_REMOVED,
-                        n -> ((ObjectNode) n.path("paths").path("/open/v1/templates/{id}")).remove("get")),
-                new Mutation("删参数", OpenApiDriftComparator.Rule.PARAM_REMOVED,
-                        n -> ((ArrayNode) n.path("paths").path("/open/v1/templates/{id}")
-                                .path("get").path("parameters")).remove(0)),
-                new Mutation("参数类型变化", OpenApiDriftComparator.Rule.PARAM_TYPE_CHANGED,
-                        n -> ((ObjectNode) n.path("paths").path("/open/v1/templates/{id}")
-                                .path("get").path("parameters").get(0).path("schema")).put("type", "string")),
-                new Mutation("参数可选变必填", OpenApiDriftComparator.Rule.PARAM_NEWLY_REQUIRED,
-                        n -> ((ObjectNode) n.path("paths").path("/open/v1/templates/{id}")
-                                .path("get").path("parameters").get(1)).put("required", true)),
-                new Mutation("新增必填参数", OpenApiDriftComparator.Rule.PARAM_ADDED_REQUIRED,
-                        n -> ((ArrayNode) n.path("paths").path("/open/v1/templates/{id}")
-                                .path("get").path("parameters")).add(JSON.createObjectNode()
+                new Mutation("删 method", Rule.OPERATION_REMOVED,
+                        n -> ((ObjectNode) item(n)).remove("get")),
+                new Mutation("删参数", Rule.PARAM_REMOVED,
+                        n -> ((ArrayNode) item(n).path("get").path("parameters")).remove(0)),
+                new Mutation("参数类型变化", Rule.PARAM_TYPE_CHANGED,
+                        n -> ((ObjectNode) item(n).path("get").path("parameters").get(0).path("schema"))
+                                .put("type", "string")),
+                new Mutation("参数可选变必填", Rule.PARAM_NEWLY_REQUIRED,
+                        n -> ((ObjectNode) item(n).path("get").path("parameters").get(1))
+                                .put("required", true)),
+                new Mutation("新增必填参数", Rule.PARAM_ADDED_REQUIRED,
+                        n -> ((ArrayNode) item(n).path("get").path("parameters")).add(JSON.createObjectNode()
                                 .put("name", "force").put("in", "query").put("required", true)
                                 .set("schema", JSON.createObjectNode().put("type", "string")))),
-                new Mutation("请求体变必填", OpenApiDriftComparator.Rule.REQUEST_BODY_NEWLY_REQUIRED,
-                        n -> ((ObjectNode) n.path("paths").path("/open/v1/templates/{id}")
-                                .path("post").path("requestBody")).put("required", true)),
-                new Mutation("请求体新增必填字段", OpenApiDriftComparator.Rule.REQUEST_FIELD_NEWLY_REQUIRED,
-                        n -> ((ArrayNode) n.path("components").path("schemas").path("TemplateUpsert")
-                                .path("required")).add("tag")),
-                new Mutation("请求体字段删除", OpenApiDriftComparator.Rule.REQUEST_FIELD_REMOVED,
-                        n -> ((ObjectNode) n.path("components").path("schemas").path("TemplateUpsert")
-                                .path("properties")).remove("name")),
-                new Mutation("请求体字段类型变化", OpenApiDriftComparator.Rule.REQUEST_FIELD_TYPE_CHANGED,
-                        n -> ((ObjectNode) n.path("components").path("schemas").path("TemplateUpsert")
-                                .path("properties").path("tag")).put("type", "integer")),
-                new Mutation("删响应码", OpenApiDriftComparator.Rule.RESPONSE_REMOVED,
-                        n -> ((ObjectNode) n.path("paths").path("/open/v1/templates/{id}")
-                                .path("get").path("responses")).remove("404")),
-                new Mutation("响应字段删除", OpenApiDriftComparator.Rule.RESPONSE_FIELD_REMOVED,
-                        n -> ((ObjectNode) n.path("components").path("schemas").path("ResultTemplate")
-                                .path("properties")).remove("data")),
-                new Mutation("响应字段类型变化", OpenApiDriftComparator.Rule.RESPONSE_FIELD_TYPE_CHANGED,
-                        n -> ((ObjectNode) n.path("components").path("schemas").path("ResultTemplate")
-                                .path("properties").path("code")).put("type", "string")),
-                new Mutation("枚举收窄", OpenApiDriftComparator.Rule.ENUM_NARROWED,
-                        n -> ((ArrayNode) n.path("components").path("schemas").path("Template")
-                                .path("properties").path("status").path("enum")).remove(2)),
-                new Mutation("响应嵌套字段（经 $ref）删除", OpenApiDriftComparator.Rule.RESPONSE_FIELD_REMOVED,
-                        n -> ((ObjectNode) n.path("components").path("schemas").path("Template")
-                                .path("properties")).remove("name")));
+                new Mutation("参数枚举收窄", Rule.ENUM_NARROWED,
+                        n -> ((ArrayNode) item(n).path("get").path("parameters").get(1)
+                                .path("schema").path("enum")).remove(1)),
+                new Mutation("pathItem 级共享参数删除", Rule.PARAM_REMOVED,
+                        n -> ((ArrayNode) item(n).path("parameters")).remove(0)),
+                // ---- 请求体 ----
+                new Mutation("请求体变必填", Rule.REQUEST_BODY_NEWLY_REQUIRED,
+                        n -> ((ObjectNode) item(n).path("post").path("requestBody")).put("required", true)),
+                new Mutation("请求体新增必填字段", Rule.REQUEST_FIELD_NEWLY_REQUIRED,
+                        n -> ((ArrayNode) schema(n, "TemplateUpsert").path("required")).add("tag")),
+                new Mutation("请求体字段删除", Rule.REQUEST_FIELD_REMOVED,
+                        n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties")).remove("name")),
+                new Mutation("请求体字段类型变化", Rule.REQUEST_FIELD_TYPE_CHANGED,
+                        n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties")
+                                .path("tag")).put("type", "integer")),
+                new Mutation("请求枚举约束新增（裸 string 加 enum）", Rule.ENUM_ADDED_CONSTRAINT,
+                        n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties").path("tag"))
+                                .set("enum", JSON.createArrayNode().add("a").add("b"))),
+                // ---- items（数组元素） ----
+                new Mutation("items 元素字段删除", Rule.REQUEST_FIELD_REMOVED,
+                        n -> ((ObjectNode) schema(n, "Tag").path("properties")).remove("key")),
+                new Mutation("items 元素类型变化", Rule.REQUEST_FIELD_TYPE_CHANGED,
+                        n -> ((ObjectNode) schema(n, "Tag").path("properties").path("weight"))
+                                .put("type", "string")),
+                new Mutation("items $ref 换组件", Rule.REQUEST_FIELD_TYPE_CHANGED,
+                        n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties").path("tags"))
+                                .set("items", JSON.createObjectNode()
+                                        .put("$ref", "#/components/schemas/Template"))),
+                new Mutation("items 元素新增必填", Rule.REQUEST_FIELD_NEWLY_REQUIRED,
+                        n -> ((ObjectNode) schema(n, "Tag")).set("required",
+                                JSON.createArrayNode().add("key"))),
+                new Mutation("items 元素定义消失", Rule.REQUEST_FIELD_REMOVED,
+                        n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties").path("tags"))
+                                .remove("items")),
+                // ---- additionalProperties（Map 值） ----
+                new Mutation("Map 值类型变化", Rule.REQUEST_FIELD_TYPE_CHANGED,
+                        n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties").path("meta")
+                                .path("additionalProperties")).put("type", "integer")),
+                new Mutation("Map 值定义消失", Rule.REQUEST_FIELD_REMOVED,
+                        n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties").path("meta"))
+                                .remove("additionalProperties")),
+                // ---- 组合 schema ----
+                new Mutation("组合成员内部约束收紧", Rule.CONSTRAINT_TIGHTENED,
+                        n -> ((ObjectNode) schema(n, "Template").path("properties").path("group")
+                                .path("anyOf").get(0)).put("maxLength", 5)),
+                new Mutation("组合成员数量变化", Rule.RESPONSE_FIELD_TYPE_CHANGED,
+                        n -> ((ArrayNode) schema(n, "Template").path("properties").path("group")
+                                .path("anyOf")).add(JSON.createObjectNode().put("type", "boolean"))),
+                // ---- 约束键 ----
+                new Mutation("请求上界收紧（maxLength 变小）", Rule.CONSTRAINT_TIGHTENED,
+                        n -> ((ObjectNode) schema(n, "Tag").path("properties").path("key"))
+                                .put("maxLength", 4)),
+                new Mutation("请求下界收紧（minimum 变大）", Rule.CONSTRAINT_TIGHTENED,
+                        n -> ((ObjectNode) schema(n, "Tag").path("properties").path("weight"))
+                                .put("minimum", 1)),
+                new Mutation("新增强度约束（从无到有）", Rule.CONSTRAINT_TIGHTENED,
+                        n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties").path("tag"))
+                                .put("maxLength", 4)),
+                new Mutation("items 上界收紧（maxItems 变小）", Rule.CONSTRAINT_TIGHTENED,
+                        n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties").path("tags"))
+                                .put("maxItems", 5)),
+                new Mutation("pattern 新增", Rule.CONSTRAINT_TIGHTENED,
+                        n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties").path("tag"))
+                                .put("pattern", "^[a-z]+$")),
+                new Mutation("响应约束收紧", Rule.CONSTRAINT_TIGHTENED,
+                        n -> ((ObjectNode) schema(n, "Template").path("properties").path("name"))
+                                .put("maxLength", 32)),
+                // ---- 响应 ----
+                new Mutation("删响应码", Rule.RESPONSE_REMOVED,
+                        n -> ((ObjectNode) item(n).path("get").path("responses")).remove("404")),
+                new Mutation("响应字段删除", Rule.RESPONSE_FIELD_REMOVED,
+                        n -> ((ObjectNode) schema(n, "ResultTemplate").path("properties")).remove("data")),
+                new Mutation("响应字段类型变化", Rule.RESPONSE_FIELD_TYPE_CHANGED,
+                        n -> ((ObjectNode) schema(n, "ResultTemplate").path("properties")
+                                .path("code")).put("type", "string")),
+                new Mutation("响应嵌套字段（经 $ref）删除", Rule.RESPONSE_FIELD_REMOVED,
+                        n -> ((ObjectNode) schema(n, "Template").path("properties")).remove("name")),
+                new Mutation("响应枚举新增值（codegen 遇新值）", Rule.ENUM_EXTENDED,
+                        n -> ((ArrayNode) schema(n, "Template").path("properties").path("status")
+                                .path("enum")).add("ARCHIVED")),
+                new Mutation("响应枚举声明整删", Rule.ENUM_REMOVED,
+                        n -> ((ObjectNode) schema(n, "Template").path("properties").path("status"))
+                                .remove("enum")));
 
         List<String> failures = new ArrayList<>();
         for (Mutation mutation : mutations) {
@@ -276,38 +360,58 @@ class OpenApiContractIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("比较器自检（additive）：新增 path/method/可选字段/枚举值/响应码/描述变化全部放行")
+    @DisplayName("比较器自检（additive）：新增/放宽/镜像绿方向 17 类全部放行")
     void comparator_allowsAdditiveMutations() throws Exception {
         List<Consumer<JsonNode>> additives = List.of(
                 // 新增可选参数
-                n -> ((ArrayNode) n.path("paths").path("/open/v1/templates/{id}")
-                        .path("get").path("parameters")).add(JSON.createObjectNode()
+                n -> ((ArrayNode) item(n).path("get").path("parameters")).add(JSON.createObjectNode()
                         .put("name", "hint").put("in", "query").put("required", false)
                         .set("schema", JSON.createObjectNode().put("type", "string"))),
                 // 新增 path
                 n -> ((ObjectNode) n.path("paths")).set("/open/v1/codes",
                         JSON.createObjectNode().set("get", JSON.createObjectNode())),
                 // 新增 method
-                n -> ((ObjectNode) n.path("paths").path("/open/v1/templates/{id}"))
-                        .set("delete", JSON.createObjectNode()),
+                n -> ((ObjectNode) item(n)).set("delete", JSON.createObjectNode()),
                 // 响应新增可选字段
-                n -> ((ObjectNode) n.path("components").path("schemas").path("Template")
-                        .path("properties")).set("memo", JSON.createObjectNode().put("type", "string")),
-                // 枚举新增值
-                n -> ((ArrayNode) n.path("components").path("schemas").path("Template")
-                        .path("properties").path("status").path("enum")).add("ARCHIVED"),
+                n -> ((ObjectNode) schema(n, "Template").path("properties"))
+                        .set("memo", JSON.createObjectNode().put("type", "string")),
+                // 请求枚举值增加（放宽：存量值仍全过）
+                n -> ((ArrayNode) schema(n, "TemplateUpsert").path("properties").path("priority")
+                        .path("enum")).add("mid"),
                 // 新增响应码
-                n -> ((ObjectNode) n.path("paths").path("/open/v1/templates/{id}")
-                        .path("get").path("responses")).set("400", JSON.createObjectNode()),
+                n -> ((ObjectNode) item(n).path("get").path("responses"))
+                        .set("400", JSON.createObjectNode()),
                 // 描述变化
-                n -> ((ObjectNode) n.path("paths").path("/open/v1/templates/{id}")
-                        .path("get")).put("summary", "换了文案"),
-                // 响应侧 required 新增（服务端多保证一个字段不伤害客户端，见比较器类注释）
-                n -> ((ObjectNode) n.path("components").path("schemas").path("Template"))
-                        .set("required", JSON.createArrayNode().add("id")),
+                n -> ((ObjectNode) item(n).path("get")).put("summary", "换了文案"),
+                // 响应侧 required 新增（服务端多保证一个字段不伤害客户端）
+                n -> ((ObjectNode) schema(n, "Template")).set("required", JSON.createArrayNode().add("id")),
                 // 请求体新增可选字段
-                n -> ((ObjectNode) n.path("components").path("schemas").path("TemplateUpsert")
-                        .path("properties")).set("note", JSON.createObjectNode().put("type", "string")));
+                n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties"))
+                        .set("note", JSON.createObjectNode().put("type", "string")),
+                // 约束放宽（上界变大）
+                n -> ((ObjectNode) schema(n, "Tag").path("properties").path("key")).put("maxLength", 16),
+                // 约束删除（删掉 maxLength）
+                n -> ((ObjectNode) schema(n, "Tag").path("properties").path("key")).remove("maxLength"),
+                // items 上界放宽（maxItems 变大）
+                n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties").path("tags"))
+                        .put("maxItems", 20),
+                // 请求枚举声明整删（放宽）
+                n -> ((ObjectNode) schema(n, "TemplateUpsert").path("properties").path("priority"))
+                        .remove("enum"),
+                // 响应枚举值删除（服务端不再发它）
+                n -> ((ArrayNode) schema(n, "Template").path("properties").path("status")
+                        .path("enum")).remove(2),
+                // 组合成员渲染顺序对调（规范化排序后同集，不构成变化）
+                n -> ((ObjectNode) schema(n, "Template").path("properties").path("group"))
+                        .set("anyOf", JSON.createArrayNode()
+                                .add(JSON.createObjectNode().put("type", "integer"))
+                                .add(JSON.createObjectNode().put("type", "string").put("maxLength", 10))),
+                // items 元素新增可选字段
+                n -> ((ObjectNode) schema(n, "Tag").path("properties"))
+                        .set("label", JSON.createObjectNode().put("type", "string")),
+                // 响应对象新增 Map 值声明（原本未声明，从无到有）
+                n -> ((ObjectNode) schema(n, "Template")).set("additionalProperties",
+                        JSON.createObjectNode().put("type", "string")));
 
         List<String> failures = new ArrayList<>();
         for (Consumer<JsonNode> additive : additives) {
@@ -318,7 +422,7 @@ class OpenApiContractIntegrationTest extends ShardedIntegrationTestSupport {
                 failures.add("additive 变更被误判为破坏：" + violations);
             }
         }
-        assertThat(failures).as("只增不改：additive 变更必须放行").isEmpty();
+        assertThat(failures).as("只增不改：additive 变更必须放行（共 " + additives.size() + " 类）").isEmpty();
     }
 
     // ------------------------------------------------------------------
