@@ -88,6 +88,7 @@ public final class FinanceDtos {
             @Min(1) @Max(200) Integer size) {
     }
 
+    /** V47 起新增四列（老调用方可忽略）：hold 扣减额/应付净额/质量排除行数（可观测） */
     public record SettlePartyBillView(
             LocalDate billDate,
             String appId,
@@ -97,7 +98,11 @@ public final class FinanceDtos {
             Integer refundCount,
             Long discountTotal,
             Long platformBurden,
-            Long merchantBurden) {
+            Long merchantBurden,
+            Long holdAmount,
+            Long payableAmount,
+            Integer ineligibleShareCount,
+            Integer ineligibleRefundCount) {
     }
 
     public record TemplateBillView(

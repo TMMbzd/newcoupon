@@ -2,9 +2,11 @@ package com.newcoupon.application.service;
 
 import com.newcoupon.infrastructure.persistence.mapper.CouponDailyBillMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponSettlePartyDailyBillMapper;
+import com.newcoupon.infrastructure.persistence.mapper.CouponSettlementHoldMapper;
 import com.newcoupon.infrastructure.persistence.po.CouponDailyBillPO;
 import com.newcoupon.infrastructure.persistence.po.CouponSettlePartyDailyBillPO;
 import com.newcoupon.infrastructure.redis.RedisScanLock;
+import com.newcoupon.infrastructure.persistence.StockDriftLogGateway;
 import com.xxl.job.core.context.XxlJobHelper;
 import com.xxl.job.core.handler.annotation.XxlJob;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -40,6 +42,10 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>结算语义：退款明细按 create_time 归入退款日的账单——当日退款当日净额归零，
  * 跨日退款（T+7 售后）在退款日记一笔负数，财务在账单上能单独看到冲回。
+ *
+ * <p>可结算口径（V47，3min 结算最小版）：两张账单聚合都只取 settle_eligible=1——
+ * 质量排除行（商家钱落 __default__/出资不明，见 SettleQualityFlags）不进真实账单；
+ * 主体账单另记 ineligible_*_count 与 hold/payable（应付=净额-ACTIVE hold，负数如实展示）。
  */
 @Service
 public class DailyBillService {
@@ -55,6 +61,8 @@ public class DailyBillService {
 
     private final CouponDailyBillMapper billMapper;
     private final CouponSettlePartyDailyBillMapper settlePartyBillMapper;
+    private final CouponSettlementHoldMapper holdMapper;
+    private final StockDriftLogGateway driftLog;
     private final TransactionTemplate transactionTemplate;
     /** 主体账单开关：默认开（纯增量新表）；关闭后只出旧模板账单，便于回滚 */
     private final boolean settlePartyBillEnabled;
@@ -63,6 +71,8 @@ public class DailyBillService {
 
     public DailyBillService(CouponDailyBillMapper billMapper,
                             CouponSettlePartyDailyBillMapper settlePartyBillMapper,
+                            CouponSettlementHoldMapper holdMapper,
+                            StockDriftLogGateway driftLog,
                             PlatformTransactionManager transactionManager,
                             @org.springframework.beans.factory.annotation.Value(
                                     "${coupon.billing.settle-party.enabled:true}")
@@ -71,6 +81,8 @@ public class DailyBillService {
                             MeterRegistry meterRegistry) {
         this.billMapper = billMapper;
         this.settlePartyBillMapper = settlePartyBillMapper;
+        this.holdMapper = holdMapper;
+        this.driftLog = driftLog;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.settlePartyBillEnabled = settlePartyBillEnabled;
         this.scanLock = scanLock;
@@ -109,9 +121,18 @@ public class DailyBillService {
     }
 
     /**
-     * 按结算主体生成指定日期的账单（V24，环 3）。与模板账单同源：
-     * 正分账行计核销，退款明细/旧负分账行计冲回；唯一键 `(日期,appId,主体,模板)` 幂等覆盖。
-     * 返回聚合出的主体行数。
+     * 按结算主体生成指定日期的账单（V24 环 3；V47 起带 hold/payable/质量桶）。
+     * 与模板账单同源：正分账行计核销，退款明细/旧负分账行计冲回，**两张账单都只取
+     * settle_eligible=1**（可结算口径，V47）——质量排除行两边同步不进，reconcile 等式不破。
+     * 唯一键 `(日期,appId,主体,模板)` 幂等覆盖。
+     *
+     * <p><b>hold 扣减（V47）</b>：按 (appId, 主体) 汇总 ACTIVE hold，模板级 hold 只扣对应
+     * 模板行；**主体级 hold（template_id 为空）对该主体的每个模板行全额扣减**——
+     * 主体跨多模板时合计扣减=行数×金额，会过度扣减；payable 允许为负并如实展示
+     * （负数=该主体有未释放 hold 超过当期净额，财务需人工关注）。精确分摊/结转属
+     * 3B 批次与结算单的职责（本刀裁剪，见 runbook）。
+     *
+     * @return 聚合出的主体行数
      */
     public int generateSettlePartyBill(LocalDate date) {
         LocalDateTime start = date.atStartOfDay();
@@ -119,6 +140,25 @@ public class DailyBillService {
 
         List<CouponSettlePartyDailyBillMapper.SettlePartyAgg> rows =
                 settlePartyBillMapper.aggregateByDate(start, end);
+        // 质量桶与 hold 各一条聚合查询拿全量 map（生成循环里只查内存——不 N+1）
+        Map<String, CouponSettlePartyDailyBillMapper.IneligibleAgg> ineligible =
+                new HashMap<>();
+        for (CouponSettlePartyDailyBillMapper.IneligibleAgg agg
+                : settlePartyBillMapper.countIneligibleByDate(start, end)) {
+            ineligible.put(aggKey(agg.getAppId(), agg.getSettlePartyId(), agg.getTemplateId()), agg);
+        }
+        Map<String, Long> partyLevelHold = new HashMap<>();
+        Map<String, Long> templateHold = new HashMap<>();
+        for (CouponSettlementHoldMapper.HoldAgg agg : holdMapper.sumActiveGrouped()) {
+            if (agg.getTemplateId() == null) {
+                partyLevelHold.merge(agg.getAppId() + '|' + agg.getSettlePartyId(),
+                        agg.getTotalAmount(), Long::sum);
+            } else {
+                templateHold.merge(agg.getAppId() + '|' + agg.getSettlePartyId() + '|' + agg.getTemplateId(),
+                        agg.getTotalAmount(), Long::sum);
+            }
+        }
+
         for (CouponSettlePartyDailyBillMapper.SettlePartyAgg row : rows) {
             CouponSettlePartyDailyBillPO bill = new CouponSettlePartyDailyBillPO();
             bill.setBillDate(date);
@@ -130,6 +170,20 @@ public class DailyBillService {
             bill.setDiscountTotal(row.getDiscountTotal());
             bill.setPlatformBurden(row.getPlatformBurden());
             bill.setMerchantBurden(row.getMerchantBurden());
+
+            // hold：主体级（全适用）+ 模板级（只扣本行）——金额口径见方法注释
+            long hold = partyLevelHold.getOrDefault(
+                    row.getAppId() + '|' + row.getSettlePartyId(), 0L)
+                    + templateHold.getOrDefault(aggKey(row.getAppId(), row.getSettlePartyId(),
+                    row.getTemplateId()), 0L);
+            bill.setHoldAmount(hold);
+            // payable = 分账净额(已含退款冲回) - hold；负数不钳制——钳制会掩盖"hold 超净额"这个事实本身
+            bill.setPayableAmount(row.getDiscountTotal() - hold);
+
+            CouponSettlePartyDailyBillMapper.IneligibleAgg bucket = ineligible.get(
+                    aggKey(row.getAppId(), row.getSettlePartyId(), row.getTemplateId()));
+            bill.setIneligibleShareCount(bucket == null ? 0 : bucket.getIneligibleShareCount().intValue());
+            bill.setIneligibleRefundCount(bucket == null ? 0 : bucket.getIneligibleRefundCount().intValue());
             settlePartyBillMapper.upsertBill(bill);
         }
         log.info("SETTLE_PARTY_DAILY_BILL date={} parties/templates={} 核销行={} 退款行={}",
@@ -137,6 +191,10 @@ public class DailyBillService {
                 rows.stream().mapToLong(CouponSettlePartyDailyBillMapper.SettlePartyAgg::getConfirmCount).sum(),
                 rows.stream().mapToLong(CouponSettlePartyDailyBillMapper.SettlePartyAgg::getRefundCount).sum());
         return rows.size();
+    }
+
+    private static String aggKey(String appId, String partyId, Long templateId) {
+        return appId + '|' + partyId + '|' + templateId;
     }
 
     /**
@@ -168,6 +226,12 @@ public class DailyBillService {
      * 返回不一致的模板数，并逐条 ERROR 留现场；0 = 一致。
      *
      * <p>这是“多主体相加 = 模板账单”验收的运行时守卫，不只是一条测试断言。
+     *
+     * <p><b>差异落表+指标（V47）</b>：现状差异只打 ERROR 日志——日志会滚走、不可查询。
+     * 起落 {@code stock_drift_log}（action=SETTLE_BILL_RECONCILE，detail 记两侧五项读数，
+     * 复用预算对账的告警通道）+ 指标 {@code coupon_settle_reconcile_diff_total{type}}
+     * （type 有界：PARTY_VS_TEMPLATE=金额/行数对不上 / PARTY_ORPHAN_TEMPLATE=主体有行模板没有）。
+     * 落库失败不阻断对账主流程（与 StockDriftLogGateway 的使用约定一致）。
      */
     public int reconcile(LocalDate date) {
         Map<Long, CouponDailyBillPO> templates = new HashMap<>();
@@ -198,6 +262,9 @@ public class DailyBillService {
                         date, e.getKey(), t.getConfirmCount(), t.getRefundCount(),
                         t.getDiscountTotal(), t.getPlatformBurden(), t.getMerchantBurden(),
                         v[0], v[1], v[2], v[3], v[4]);
+                recordReconcileDiff(date, e.getKey(), "PARTY_VS_TEMPLATE",
+                        t.getConfirmCount(), t.getRefundCount(), t.getDiscountTotal(),
+                        t.getPlatformBurden(), t.getMerchantBurden(), v);
             }
         }
         for (Long templateId : sums.keySet()) {
@@ -205,12 +272,43 @@ public class DailyBillService {
                 mismatches++;
                 log.error("SETTLE_PARTY_BILL_RECONCILE_ORPHAN date={} templateId={} "
                         + "主体账单有行但模板账单没有", date, templateId);
+                recordReconcileDiff(date, templateId, "PARTY_ORPHAN_TEMPLATE",
+                        0, 0, 0, 0, 0, sums.get(templateId));
             }
         }
         if (mismatches == 0) {
             log.info("SETTLE_PARTY_BILL_RECONCILE_OK date={} templates={}", date, templates.size());
         }
         return mismatches;
+    }
+
+    /**
+     * 差异三连：drift log（detail 是紧凑 JSON——两侧五项读数，512 列宽内）+ 指标。
+     * 两步各自 try/catch：留痕失败不能让对账本身失败（对账的返回值驱动 mismatch 指标）。
+     */
+    private void recordReconcileDiff(LocalDate date, Long templateId, String type,
+                                     long tConfirm, long tRefund, long tDiscount,
+                                     long tPlatform, long tMerchant, long[] partySum) {
+        String detail = String.format(
+                "{\"date\":\"%s\",\"templateId\":%d,\"type\":\"%s\","
+                        + "\"template\":{\"confirm\":%d,\"refund\":%d,\"discount\":%d,"
+                        + "\"platform\":%d,\"merchant\":%d},"
+                        + "\"partySum\":{\"confirm\":%d,\"refund\":%d,\"discount\":%d,"
+                        + "\"platform\":%d,\"merchant\":%d}}",
+                date, templateId, type, tConfirm, tRefund, tDiscount, tPlatform, tMerchant,
+                partySum[0], partySum[1], partySum[2], partySum[3], partySum[4]);
+        try {
+            driftLog.record(new StockDriftLogGateway.DriftEvent(
+                    templateId, 0, 0, 0, 0, 0, null, null, 1, "SETTLE_BILL_RECONCILE", detail));
+        } catch (RuntimeException e) {
+            log.error("SETTLE_BILL_RECONCILE drift log failed: date={} templateId={}",
+                    date, templateId, e);
+        }
+        try {
+            meterRegistry.counter("coupon_settle_reconcile_diff_total", "type", type).increment();
+        } catch (RuntimeException ignore) {
+            // 指标失败不影响对账
+        }
     }
 
     /**

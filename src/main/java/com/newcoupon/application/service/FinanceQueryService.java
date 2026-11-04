@@ -173,7 +173,9 @@ public class FinanceQueryService {
     private SettlePartyBillView toSettlePartyView(CouponSettlePartyDailyBillPO p) {
         return new SettlePartyBillView(p.getBillDate(), p.getAppId(), p.getSettlePartyId(),
                 p.getTemplateId(), p.getConfirmCount(), p.getRefundCount(),
-                p.getDiscountTotal(), p.getPlatformBurden(), p.getMerchantBurden());
+                p.getDiscountTotal(), p.getPlatformBurden(), p.getMerchantBurden(),
+                p.getHoldAmount(), p.getPayableAmount(),
+                p.getIneligibleShareCount(), p.getIneligibleRefundCount());
     }
 
     private TemplateBillView toTemplateView(CouponDailyBillMapper.TemplateBillRow r) {

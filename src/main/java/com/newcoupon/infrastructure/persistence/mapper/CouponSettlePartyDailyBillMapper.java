@@ -54,6 +54,10 @@ public interface CouponSettlePartyDailyBillMapper extends BaseMapper<CouponSettl
     /**
      * 沙箱过滤（V6 2B）：与模板账单同条件（LEFT JOIN open_app 只聚合 PROD）——
      * 两张账单的对账等式要求过滤口径完全一致，只滤一张必然 reconcile 报差异。
+     *
+     * <p><b>可结算口径（V47）</b>：三个 UNION 分支都只取 {@code settle_eligible=1}，
+     * 与模板账单同步——被质量排除的行（商家钱落 __default__/出资不明）两张账单都不进，
+     * 等式不破；被排除行数由 {@link #countIneligibleByDate} 另算进 ineligible_*_count。
      */
     @Select("SELECT t.app_id COLLATE utf8mb4_bin AS appId, " +
             "       settle_party_id COLLATE utf8mb4_bin AS settlePartyId, template_id AS templateId, " +
@@ -66,15 +70,15 @@ public interface CouponSettlePartyDailyBillMapper extends BaseMapper<CouponSettl
             "  SELECT app_id, settle_party_id, template_id, 1 AS confirmCount, 0 AS refundCount, " +
             "         share_total AS discountTotal, platform_burden AS platformBurden, " +
             "         merchant_burden AS merchantBurden, create_time " +
-            "  FROM coupon_share_detail WHERE share_total > 0 " +
+            "  FROM coupon_share_detail WHERE share_total > 0 AND settle_eligible = 1 " +
             "  UNION ALL " +
             "  SELECT app_id, settle_party_id, template_id, 0, 1, " +
             "         -ABS(share_total), -ABS(platform_burden), -ABS(merchant_burden), create_time " +
-            "  FROM coupon_share_detail WHERE share_total < 0 " +
+            "  FROM coupon_share_detail WHERE share_total < 0 AND settle_eligible = 1 " +
             "  UNION ALL " +
             "  SELECT app_id, settle_party_id, template_id, 0, 1, " +
             "         -refund_discount_amt, -refund_platform_amt, -refund_merchant_amt, create_time " +
-            "  FROM coupon_refund_detail " +
+            "  FROM coupon_refund_detail WHERE settle_eligible = 1 " +
             ") t LEFT JOIN open_app a ON a.app_id = t.app_id " +
             "WHERE t.create_time >= #{start} AND t.create_time < #{end} " +
             "AND COALESCE(a.environment, 'PROD') = 'PROD' " +
@@ -83,16 +87,66 @@ public interface CouponSettlePartyDailyBillMapper extends BaseMapper<CouponSettl
     List<SettlePartyAgg> aggregateByDate(@Param("start") LocalDateTime start,
                                          @Param("end") LocalDateTime end);
 
-    /** 幂等落账：唯一键冲突整体覆盖最新聚合值 */
+    /** 质量桶计数行：当日被排除的分账/退款明细行数（一条聚合算齐，别在生成循环里 N+1） */
+    class IneligibleAgg {
+        private String appId;
+        private String settlePartyId;
+        private Long templateId;
+        private Long ineligibleShareCount;
+        private Long ineligibleRefundCount;
+
+        public String getAppId() { return appId; }
+        public void setAppId(String appId) { this.appId = appId; }
+        public String getSettlePartyId() { return settlePartyId; }
+        public void setSettlePartyId(String settlePartyId) { this.settlePartyId = settlePartyId; }
+        public Long getTemplateId() { return templateId; }
+        public void setTemplateId(Long templateId) { this.templateId = templateId; }
+        public Long getIneligibleShareCount() { return ineligibleShareCount; }
+        public void setIneligibleShareCount(Long ineligibleShareCount) { this.ineligibleShareCount = ineligibleShareCount; }
+        public Long getIneligibleRefundCount() { return ineligibleRefundCount; }
+        public void setIneligibleRefundCount(Long ineligibleRefundCount) { this.ineligibleRefundCount = ineligibleRefundCount; }
+    }
+
+    /**
+     * 当日质量排除行计数（按 日期+app+主体+模板 分组，与账单行同一粒度）：
+     * 分账表排除行（含旧负行）计入 ineligible_share_count，退款明细排除行计入
+     * ineligible_refund_count；沙箱过滤与聚合口径一致（沙箱本来就不进账单，
+     * 不该在质量桶里制造噪音）。
+     */
+    @Select("SELECT t.app_id COLLATE utf8mb4_bin AS appId, " +
+            "       settle_party_id COLLATE utf8mb4_bin AS settlePartyId, template_id AS templateId, " +
+            "       COALESCE(SUM(shareIneligible), 0) AS ineligibleShareCount, " +
+            "       COALESCE(SUM(refundIneligible), 0) AS ineligibleRefundCount " +
+            "FROM ( " +
+            "  SELECT app_id, settle_party_id, template_id, 1 AS shareIneligible, 0 AS refundIneligible, create_time " +
+            "  FROM coupon_share_detail WHERE settle_eligible = 0 " +
+            "  UNION ALL " +
+            "  SELECT app_id, settle_party_id, template_id, 0, 1, create_time " +
+            "  FROM coupon_refund_detail WHERE settle_eligible = 0 " +
+            ") t LEFT JOIN open_app a ON a.app_id = t.app_id " +
+            "WHERE t.create_time >= #{start} AND t.create_time < #{end} " +
+            "AND COALESCE(a.environment, 'PROD') = 'PROD' " +
+            "GROUP BY t.app_id COLLATE utf8mb4_bin, " +
+            "         settle_party_id COLLATE utf8mb4_bin, template_id")
+    List<IneligibleAgg> countIneligibleByDate(@Param("start") LocalDateTime start,
+                                              @Param("end") LocalDateTime end);
+
+    /** 幂等落账：唯一键冲突整体覆盖最新聚合值（hold/payable/质量桶计数一并重算覆盖——重跑幂等） */
     @Insert("INSERT INTO coupon_settle_party_daily_bill " +
             "(bill_date, app_id, settle_party_id, template_id, confirm_count, refund_count, " +
-            " discount_total, platform_burden, merchant_burden) " +
+            " discount_total, platform_burden, merchant_burden, " +
+            " hold_amount, payable_amount, ineligible_share_count, ineligible_refund_count) " +
             "VALUES (#{billDate}, #{appId}, #{settlePartyId}, #{templateId}, #{confirmCount}, " +
-            "        #{refundCount}, #{discountTotal}, #{platformBurden}, #{merchantBurden}) " +
+            "        #{refundCount}, #{discountTotal}, #{platformBurden}, #{merchantBurden}, " +
+            "        #{holdAmount}, #{payableAmount}, #{ineligibleShareCount}, #{ineligibleRefundCount}) " +
             "ON DUPLICATE KEY UPDATE " +
             "  confirm_count = VALUES(confirm_count), refund_count = VALUES(refund_count), " +
             "  discount_total = VALUES(discount_total), platform_burden = VALUES(platform_burden), " +
-            "  merchant_burden = VALUES(merchant_burden), update_time = CURRENT_TIMESTAMP")
+            "  merchant_burden = VALUES(merchant_burden), " +
+            "  hold_amount = VALUES(hold_amount), payable_amount = VALUES(payable_amount), " +
+            "  ineligible_share_count = VALUES(ineligible_share_count), " +
+            "  ineligible_refund_count = VALUES(ineligible_refund_count), " +
+            "  update_time = CURRENT_TIMESTAMP")
     int upsertBill(CouponSettlePartyDailyBillPO bill);
 
     @Select("<script>SELECT * FROM coupon_settle_party_daily_bill " +

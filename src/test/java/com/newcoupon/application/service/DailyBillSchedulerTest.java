@@ -44,6 +44,10 @@ class DailyBillSchedulerTest {
     @Mock
     private CouponSettlePartyDailyBillMapper settlePartyBillMapper;
     @Mock
+    private com.newcoupon.infrastructure.persistence.mapper.CouponSettlementHoldMapper holdMapper;
+    @Mock
+    private com.newcoupon.infrastructure.persistence.StockDriftLogGateway driftLog;
+    @Mock
     private PlatformTransactionManager transactionManager;
     @Mock
     private RedisScanLock scanLock;
@@ -56,8 +60,9 @@ class DailyBillSchedulerTest {
         // 让路/参数类用例不执行事务；lenient 避免严格 stub 误报
         lenient().when(transactionManager.getTransaction(any()))
                 .thenReturn(new SimpleTransactionStatus());
-        service = new DailyBillService(billMapper, settlePartyBillMapper, transactionManager,
-                true, scanLock, meterRegistry);
+        // V47 起账单服务多了 hold 汇总/漂移日志两个依赖（默认 mock：空聚合/无差异不落表）
+        service = new DailyBillService(billMapper, settlePartyBillMapper, holdMapper, driftLog,
+                transactionManager, true, scanLock, meterRegistry);
     }
 
     @Test

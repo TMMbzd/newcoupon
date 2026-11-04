@@ -49,6 +49,11 @@ public interface CouponDailyBillMapper extends BaseMapper<CouponDailyBillPO> {
      * <p><b>旧负行取 `-ABS(...)`</b>：负行本身的金额已经是负数，直接相加即可净额；
      * 早期写法 `-share_total` 会把负数翻成正数、反而虚增账单。V24 起修正。
      *
+     * <p><b>可结算口径（V47）</b>：三个 UNION 分支都只取 {@code settle_eligible=1}——
+     * 质量排除行（商家钱落 __default__/出资不明）不进任何一张真实账单。
+     * 主体账单（CouponSettlePartyDailyBillMapper）必须同步同过滤，否则 reconcile 对不上。
+     * 被排除行数在主体账单侧进 ineligible_*_count（模板账单不加列——旧表不动）。
+     *
      * <p><b>沙箱过滤（V6 2B）</b>：JOIN open_app 只聚合 PROD 租户的行——沙箱是联调数据，
      * 进账单就是"假钱进真账"。detail 行自带 app_id（V22 起 NOT NULL）；
      * LEFT JOIN + COALESCE 按 PROD 处理"归属行缺失"的边角（open_app 行被物理删之类，
@@ -65,15 +70,15 @@ public interface CouponDailyBillMapper extends BaseMapper<CouponDailyBillPO> {
             "  SELECT app_id, template_id, 1 AS confirmCount, 0 AS refundCount, " +
             "         share_total AS discountTotal, platform_burden AS platformBurden, " +
             "         merchant_burden AS merchantBurden, create_time " +
-            "  FROM coupon_share_detail WHERE share_total > 0 " +
+            "  FROM coupon_share_detail WHERE share_total > 0 AND settle_eligible = 1 " +
             "  UNION ALL " +
             "  SELECT app_id, template_id, 0, 1, " +
             "         -ABS(share_total), -ABS(platform_burden), -ABS(merchant_burden), create_time " +
-            "  FROM coupon_share_detail WHERE share_total < 0 " +
+            "  FROM coupon_share_detail WHERE share_total < 0 AND settle_eligible = 1 " +
             "  UNION ALL " +
             "  SELECT app_id, template_id, 0, 1, -refund_discount_amt, -refund_platform_amt, " +
             "         -refund_merchant_amt, create_time " +
-            "  FROM coupon_refund_detail " +
+            "  FROM coupon_refund_detail WHERE settle_eligible = 1 " +
             ") t LEFT JOIN open_app a ON a.app_id = t.app_id " +
             "WHERE t.create_time >= #{start} AND t.create_time < #{end} " +
             "AND COALESCE(a.environment, 'PROD') = 'PROD' " +
