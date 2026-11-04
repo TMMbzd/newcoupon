@@ -258,6 +258,10 @@ springdoc:
     # 钉住 OAS 3.0 档（springdoc 高版本默认可切 3.1）：基线文件与 live spec 的版本声明
     # 必须可比，不随 springdoc 升级漂移。3.0 档实际渲染 "3.0.1"（springdoc 2.6 的 3.0 常量）。
     version: openapi_3_0
+    # swagger-config 端点（告诉 UI 有哪些分组）一并关闭：UI 已禁用，它只服务 UI，
+    # 留着是多余的暴露面（虽已吃 /api 认证，最小面原则下没有存在理由）。
+    swagger-config:
+      enabled: false
   # Controller 未声明 produces 时 spec 里的响应 media type 用什么。默认 */*——那是
   # "任意类型"的占位，不是真实契约（接口实际只产 JSON）；对外 spec 声明 application/json
   # 才是可消费的契约，黄金样例对拍也按它导航。（键名带 s：default-produces-media-type）
