@@ -29,7 +29,10 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
  *       也不出现在 RequestMappingHandlerMapping 里。</li>
  *   <li><b>结构</b>：遍历当前全部 /api、/console 映射（**含 GET**），任何接口必居
  *       "受保护"或"显式豁免"之一——将来任何人加出第三态（既不受防线也不在豁免里的
- *       /api、/console 接口）测试直接红。</li>
+ *       /api、/console 接口）测试直接红。V6 2D 起 /console 的受保护前缀收窄为
+ *       /console/api/**（静态资源匿名），因此**在 /console/api/ 之外新加 /console
+ *       控制器映射同样会红**——数据接口必须落 /console/api/，静态资源不走控制器
+ *       （classpath 静态托管），两条路不许混。</li>
  * </ol>
  */
 class AdminSurfaceProtectionTest extends ShardedIntegrationTestSupport {
@@ -60,7 +63,13 @@ class AdminSurfaceProtectionTest extends ShardedIntegrationTestSupport {
         assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("GET", "/api/templates")).isTrue();
         assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("GET", "/api/apps")).isTrue();
         assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("GET", "/api/ping")).isTrue();
-        assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("GET", "/console/some/admin-page")).isTrue();
+        assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("GET", "/console/api/anything")).isTrue();
+
+        // V6 2D 裁定：/console 下只有 /console/api/** 是数据面；其余是控制台静态资源
+        // （index.html/js/css），匿名可取是设计——敏感数据全在 API 认证后面
+        assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("GET", "/console/")).isFalse();
+        assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("GET", "/console/index.html")).isFalse();
+        assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("GET", "/console/assets/index-abc.js")).isFalse();
 
         // 业务面写接口白名单（C 端功能口，各有自己的防线）——翻面不动这张表
         assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("POST", "/api/coupons/receive")).isFalse();

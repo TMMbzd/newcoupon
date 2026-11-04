@@ -42,6 +42,20 @@ public interface TemplateMapper extends BaseMapper<CouponTemplatePO> {
     @Select("SELECT * FROM coupon_template WHERE publish_status = 1")
     java.util.List<CouponTemplatePO> selectPublished();
 
+    /**
+     * 控制台列表页（V6 2D）：只取表格八列（id 倒序，新券在前），不带详情的大字段。
+     * 返回的 PO 仅投影列有值——调用方（TemplateQueryService）知道这一点并只读那几列。
+     */
+    @Select("SELECT id, name, coupon_type, face_value, publish_status, "
+            + "total_count, issued_count, create_time "
+            + "FROM coupon_template ORDER BY id DESC LIMIT #{limit} OFFSET #{offset}")
+    java.util.List<CouponTemplatePO> selectPageByIdDesc(@Param("limit") int limit,
+                                                        @Param("offset") long offset);
+
+    /** 控制台列表页的总条数（与 selectPageByIdDesc 同一张表无过滤，COUNT 走主键索引代价可忽略）。 */
+    @Select("SELECT COUNT(*) FROM coupon_template")
+    long countAll();
+
     /** 某接入方名下的模板 id 清单（V6 2B：租户数据导出的模板清单，按 id 升序保证导出可复现） */
     @Select("SELECT id FROM coupon_template WHERE app_id = #{appId} ORDER BY id")
     java.util.List<Long> selectIdsByApp(@Param("appId") String appId);

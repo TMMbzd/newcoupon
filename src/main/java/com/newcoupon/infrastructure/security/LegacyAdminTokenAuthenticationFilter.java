@@ -28,11 +28,13 @@ import org.springframework.web.filter.OncePerRequestFilter;
  *
  * <p><b>本刀改了什么（对外语义，2026-11-03 起）</b>：
  * <ul>
- *   <li><b>删掉了"GET 匿名放行"分支</b>——管理面（/api/**、/console**）的**所有方法**
+ *   <li><b>删掉了"GET 匿名放行"分支</b>——管理面（/api/**、/console/api/**）的**所有方法**
  *       都要求"旧令牌或会话"认证。翻面前 /api 的 GET 是匿名可读的（只读面公开），
  *       翻面后匿名 GET 统一 401 + 7002。C 端业务写口（{@link #BUSINESS_WRITE_PATHS}）
  *       与身份自服务（/console/api/auth/**）豁免不变：前者有自己的防线（风控/幂等/状态机），
  *       后者是登录自举的前提。</li>
+ *   <li><b>/console 前缀收窄为 /console/api/**（V6 2D）</b>——控制台静态资源
+ *       （/console/index.html 等）匿名可取，见 {@link #isProtected} 的裁定。</li>
  *   <li><b>会话即过</b>——带有效控制台会话的请求在本过滤器之前就已持有 Authentication
  *       （HttpSessionSecurityContextRepository 从会话装载），本过滤器直接放行，
  *       会话的四道核对与权限重载由后置的 {@link AdminAuthorityRefreshFilter} 承接。
@@ -181,9 +183,16 @@ public class LegacyAdminTokenAuthenticationFilter extends OncePerRequestFilter {
      * 判据本体（public 供结构性守卫测试直接调用）：管理面前缀 && 非业务白名单 && 非身份自服务。
      * 2A-2 翻面后方法不再参与判据（GET 与 POST 同样要认证）；参数保留是因为
      * 回滚开关在实例层 {@link #requiresAuth} 还要用它区分写方法。
+     *
+     * <p><b>console 前缀的收窄（V6 2D 控制台最小页）</b>：/console 下受本过滤器保护的是
+     * 数据面 {@code /console/api/**}；其余 /console/** 是控制台的静态资源
+     * （index.html/js/css，classpath 托管），**匿名可取是设计**——HTML/JS 无敏感数据，
+     * 全部敏感信息都在 /console/api/** 与 /api/** 的认证后面。挡静态资源只会让
+     * 未登录的人拿不到登录页。结构性守卫（AdminSurfaceProtectionTest）仍遍历全部
+     * /console 控制器映射：将来有人在 /console/api/ 之外加数据接口，测试直接红。
      */
     public static boolean isProtected(String method, String servletPath) {
-        return (servletPath.startsWith("/api/") || servletPath.startsWith("/console"))
+        return (servletPath.startsWith("/api/") || servletPath.startsWith("/console/api/"))
                 && !BUSINESS_WRITE_PATHS.contains(servletPath)
                 && !servletPath.startsWith(AUTH_SERVICE_PREFIX);
     }
