@@ -147,7 +147,11 @@ public class AuditService {
             po.setActorId(ctx.actorId());
             po.setSessionId(ctx.sessionId());
             po.setHashVersion(ctx.hashVersion() != null ? ctx.hashVersion() : HASH_VERSION_CURRENT);
-            po.setCreatedAt(LocalDateTime.now());
+            // createdAt 先截到秒再进哈希：列是 DATETIME（秒精度），JDBC 落库会四舍五入掉
+            // 纳秒——写时用带纳秒的值算哈希、验证时从库里读回秒值重算，永远对不上。
+            // 截断让"写时算的"与"读回复算的"是同一个值（V6 2C 全链 verify 逼出的存量缺陷：
+            // v1 时代无人做过全链重算，这个不可复现性一直潜伏）。
+            po.setCreatedAt(LocalDateTime.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS));
 
             String prev = auditChainHeadMapper.selectLastHashForUpdate();
             po.setPrevHash(prev == null ? GENESIS_HASH : prev);

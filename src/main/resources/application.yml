@@ -198,6 +198,14 @@ coupon:
   # 对外语义不变；RBAC 全面接管后保留一个发布周期即删除（设计裁定）。
   admin:
     token: ${ADMIN_TOKEN:}
+  # 审计查询与导出（V6 2C）。用法矩阵见 docs/runbook/审计查询.md。
+  audit:
+    # 导出任务：文件落 audit_export_job（一次性下载，过期惰性清理——无独立调度，低频不值得）。
+    export:
+      # 任务有效期（小时）：过期后不可下载，下一次受理导出时被清理。
+      expire-hours: ${AUDIT_EXPORT_EXPIRE_HOURS:24}
+      # 行数上限：超限任务落 FAILED（提示缩窗）——LONGTEXT 上界 4GB，先拿行数保护构建时长与库压。
+      max-rows: ${AUDIT_EXPORT_MAX_ROWS:200000}
   # 管理面安全（V6 2A）：种子管理员 / actuator Basic / 登录锁定 / 会话时长 / 2A-2 读面翻面开关。
   # 完整说明见 docs/research-2026-10-21/01 §4 2A 与 SecurityConfig/SessionConfig；
   # 2A-2 破坏性变更公告：docs/runbook/管理面认证翻面.md。
