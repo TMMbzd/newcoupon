@@ -85,6 +85,12 @@ public class AuditService {
      * @param afterSnapshot  后值快照（JSON——操作后的状态或出参）
      * @param ip            来源 IP（可为空——非 HTTP 调用时无 IP）
      * @param resultCode    结果码（0=成功，非零=业务码或 500）
+     * @param actorType     actor 类型（ADMIN/TENANT/USER/SYSTEM；V6 2C）
+     * @param actorId       actor 标识（ADMIN=管理员 userId / TENANT=appId / SYSTEM=SYSTEM）
+     * @param sessionId     管理面会话**指纹**（SHA-256 前 16 hex——审计行可被持 audit:read
+     *                      的低权限角色读到，凭据原值入库=劫持提权链；取值统一过
+     *                      AuditActorResolver.fingerprint，开放面/后台任务为空）
+     * @param hashVersion   哈希算法版本——**服务端裁定=2，不开放给调用方选**（见 {@link #of}）
      */
     public record AuditContext(
             String appId, Long userId, String traceId,

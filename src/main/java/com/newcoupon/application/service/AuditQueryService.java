@@ -192,7 +192,7 @@ public class AuditQueryService {
                     action, "AUDIT", null,
                     null, AuditService.serialize(after),
                     null, 0,
-                    actor.type(), actor.actorId(), actor.sessionId()));
+                    actor.type(), actor.actorId(), actor.sessionFingerprint()));
         } catch (Exception e) {
             log.error("audit self-record failed: action={}", action, e);
         }

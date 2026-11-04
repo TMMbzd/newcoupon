@@ -120,7 +120,10 @@ public class AdminAuthorityRefreshFilter extends OncePerRequestFilter {
                     null, AuditService.serialize(java.util.Map.of("reason", reason)),
                     com.newcoupon.infrastructure.web.RiskControlFilter.clientIp(request),
                     ErrorCode.ADMIN_SESSION_REQUIRED.getCode(),
-                    "ADMIN", String.valueOf(admin.getUserId()), terminatedSessionId));
+                    // 会话列存指纹不存原值（审查 C2）：原值=SESSION Cookie 凭据本身，
+                    // 审计行可被低权限角色查到，原值入库=劫持提权链
+                    "ADMIN", String.valueOf(admin.getUserId()),
+                    com.newcoupon.infrastructure.audit.AuditActorResolver.fingerprint(terminatedSessionId)));
             reject(response);
             return false;
         }

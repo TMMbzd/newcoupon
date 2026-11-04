@@ -34,7 +34,7 @@ class AuditActorResolverTest {
     }
 
     @Test
-    @DisplayName("管理面会话（AdminPrincipal）→ ADMIN + userId + 当前会话 id")
+    @DisplayName("管理面会话（AdminPrincipal）→ ADMIN + userId + 会话指纹（非凭据原值，C2）")
     void adminSessionWins() {
         ServletRequestAttributes attrs = mock(ServletRequestAttributes.class);
         HttpServletRequest request = mock(HttpServletRequest.class);
@@ -50,7 +50,21 @@ class AuditActorResolverTest {
 
         assertThat(actor.type()).isEqualTo("ADMIN");
         assertThat(actor.actorId()).isEqualTo("7");
-        assertThat(actor.sessionId()).isEqualTo("sess-123");
+        // 指纹而非原值：审计行可被低权限角色查到，session 原值=SESSION Cookie 凭据本身
+        assertThat(actor.sessionFingerprint())
+                .isEqualTo(AuditActorResolver.fingerprint("sess-123"))
+                .hasSize(16)
+                .isNotEqualTo("sess-123");
+    }
+
+    @Test
+    @DisplayName("指纹函数：null 透传、同 id 稳定、不同 id 区分、截 16 hex")
+    void fingerprintProperties() {
+        assertThat(AuditActorResolver.fingerprint(null)).isNull();
+        assertThat(AuditActorResolver.fingerprint("sess-1"))
+                .isEqualTo(AuditActorResolver.fingerprint("sess-1"))
+                .isNotEqualTo(AuditActorResolver.fingerprint("sess-2"))
+                .matches("[0-9a-f]{16}");
     }
 
     @Test
@@ -62,7 +76,7 @@ class AuditActorResolverTest {
 
         assertThat(actor.type()).isEqualTo("TENANT");
         assertThat(actor.actorId()).isEqualTo("app-01");
-        assertThat(actor.sessionId()).isNull();
+        assertThat(actor.sessionFingerprint()).isNull();
     }
 
     @Test
@@ -72,7 +86,7 @@ class AuditActorResolverTest {
 
         assertThat(actor.type()).isEqualTo("SYSTEM");
         assertThat(actor.actorId()).isEqualTo("SYSTEM");
-        assertThat(actor.sessionId()).isNull();
+        assertThat(actor.sessionFingerprint()).isNull();
     }
 
     @Test
@@ -102,6 +116,6 @@ class AuditActorResolverTest {
 
         assertThat(actor.type()).isEqualTo("ADMIN");
         assertThat(actor.actorId()).isEqualTo("9");
-        assertThat(actor.sessionId()).isNull();
+        assertThat(actor.sessionFingerprint()).isNull();
     }
 }

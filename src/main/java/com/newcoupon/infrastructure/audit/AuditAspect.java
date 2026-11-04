@@ -85,7 +85,7 @@ public class AuditAspect {
                     annotation.action(), annotation.resourceType(), null,
                     before, after,
                     extractIp(), resultCode,
-                    actor.type(), actor.actorId(), actor.sessionId()));
+                    actor.type(), actor.actorId(), actor.sessionFingerprint()));
         } catch (Exception e) {
             // 审计组装失败不影响业务——只记日志
             log.error("AUDIT ASSEMBLE FAILED: action={}", annotation.action(), e);

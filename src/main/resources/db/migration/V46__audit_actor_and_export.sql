@@ -8,7 +8,10 @@
 --   存量行为 NULL——历史行不回填：回填要么编造（SYSTEM 不一定对），要么逐行考据（做不到），
 --   NULL 本身就是诚实的"此行写入时没有 actor 概念"。
 --   actor_id：ADMIN=AdminPrincipal.userId 字符串 / TENANT=appId / SYSTEM='SYSTEM'。
---   session_id：管理面会话 id（来自请求会话）；开放面与后台任务为空。
+--   session_id：管理面会话**指纹**（SHA-256 前 16 hex，AuditActorResolver.fingerprint 统一转换），
+--   **不是凭据原值**——session 原值就是 SESSION Cookie 本身，审计行可被持 audit:read 的
+--   低权限角色查到，原值入库=把高权限账号的会话凭据递给低权限角色（劫持提权链）；
+--   指纹可关联同会话多行、区分不同会话，还原凭据不可行。开放面与后台任务为空。
 --
 -- hash_version：哈希算法版本。存量行=1（新列不参与哈希拼接，链不重算——重算等于
 -- 平台自己改写全部历史哈希，恰好毁掉哈希链要防的东西）；新写入=2（actor 三列参与
@@ -22,7 +25,7 @@
 ALTER TABLE audit_log
     ADD COLUMN actor_type   VARCHAR(16) DEFAULT NULL COMMENT 'actor 类型：ADMIN/TENANT/USER(预留)/SYSTEM；存量行为 NULL（写入时无 actor 概念）',
     ADD COLUMN actor_id     VARCHAR(64) DEFAULT NULL COMMENT 'actor 标识：ADMIN=管理员 userId / TENANT=appId / SYSTEM=SYSTEM',
-    ADD COLUMN session_id   VARCHAR(64) DEFAULT NULL COMMENT '管理面会话 id（开放面/后台任务为空）',
+    ADD COLUMN session_id   VARCHAR(64) DEFAULT NULL COMMENT '管理面会话指纹（SHA-256 前 16 hex，非凭据原值；开放面/后台任务为空）',
     ADD COLUMN hash_version TINYINT     NOT NULL DEFAULT 1 COMMENT 'record_hash 算法版本：1=不含 actor 列（存量），2=含 actor 列（V46 起）',
     ADD KEY idx_actor_time (actor_type, actor_id, created_at);
 

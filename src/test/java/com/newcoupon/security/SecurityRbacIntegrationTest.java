@@ -361,6 +361,48 @@ class SecurityRbacIntegrationTest extends ShardedIntegrationTestSupport {
                 .isEqualTo(401);
     }
 
+    @Test
+    @DisplayName("⑧b 强制下线审计（m2）：actor=执行操作的管理员，被下线者是操作对象")
+    void forceLogout_auditRecordsOperatorAsActor() throws Exception {
+        // 操作者 A（具名管理员）在会话里把 B 踢下线——审计必须记"谁干的"（A），
+        // 不是"被干的"（B）；B 进 resourceId/user_id/detail（操作对象维度）
+        AdminUserPO operator = createUser("it-force-op", null);
+        AdminUserPO target = createUser("it-force-tgt", "PLATFORM_OPERATOR");
+        login(target.getUsername(), USER_PASSWORD);   // B 有一个在线会话（踢下线的对象）
+
+        org.springframework.security.core.context.SecurityContextHolder.getContext()
+                .setAuthentication(new org.springframework.security.authentication
+                        .UsernamePasswordAuthenticationToken(
+                        new com.newcoupon.infrastructure.security.AdminPrincipal(
+                        operator.getId(), operator.getUsername()), null, java.util.List.of()));
+        try {
+            adminSessionService.forceLogout(target.getUsername(), "it-force-logout-m2");
+        } finally {
+            org.springframework.security.core.context.SecurityContextHolder.clearContext();
+        }
+
+        // 轮询等审计落库，取本目标用户名对应的那条 FORCE_LOGOUT
+        AuditLogPO row = null;
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (System.currentTimeMillis() < deadline) {
+            List<AuditLogPO> rows = auditLogMapper.selectList(new LambdaQueryWrapper<AuditLogPO>()
+                    .eq(AuditLogPO::getResourceId, target.getUsername())
+                    .eq(AuditLogPO::getAction, AdminSessionService.AUDIT_FORCE_LOGOUT));
+            if (!rows.isEmpty()) {
+                row = rows.get(rows.size() - 1);
+                break;
+            }
+            Thread.sleep(150);
+        }
+        assertThat(row).as("强制下线必须留痕").isNotNull();
+        assertThat(row.getActorType()).isEqualTo("ADMIN");
+        assertThat(row.getActorId())
+                .as("actor=操作者 A（此前错记成被下线者 B）")
+                .isEqualTo(String.valueOf(operator.getId()));
+        assertThat(row.getUserId()).as("操作对象维度=被下线者 B").isEqualTo(target.getId());
+        assertThat(row.getAfterSnapshot()).contains(target.getUsername()).contains("it-force-logout-m2");
+    }
+
     // ------------------------------------------------------------------
     // ⑨ actuator 链
     // ------------------------------------------------------------------
@@ -485,20 +527,24 @@ class SecurityRbacIntegrationTest extends ShardedIntegrationTestSupport {
         }
         assertThat(found.get()).as("登录成功与失败各一条审计").hasSizeGreaterThanOrEqualTo(2);
 
-        // V6 2C：会话审计带 actor 三列——ADMIN + userId + 登录会话 id
-        // （会话 id 与响应 Cookie 里的 SESSION 值一致：登录成功记的是轮换后的新会话）
+        // V6 2C：会话审计带 actor 三列——ADMIN + userId + 登录会话**指纹**（C2：
+        // 原值=SESSION Cookie 凭据本身，审计行可被低权限角色查到，原值入库=劫持提权链）
         AuditLogPO successRow = found.get().stream()
                 .filter(r -> AdminSessionService.AUDIT_LOGIN_SUCCESS.equals(r.getAction()))
                 .findFirst().orElseThrow();
         assertThat(successRow.getActorType()).as("会话动作 actor 类型").isEqualTo("ADMIN");
         assertThat(successRow.getActorId()).as("会话动作 actor 标识=管理员 userId")
                 .isEqualTo(String.valueOf(user.getId()));
-        assertThat(okLogin.sessionCookie()).as("登录审计的 session_id=轮换后的会话 id").isNotNull();
-        // SESSION Cookie 是 Base64(会话 id)（Spring Session 默认编码），库里存的是原始 id
+        assertThat(okLogin.sessionCookie()).as("登录审计有会话可指").isNotNull();
+        // SESSION Cookie 是 Base64(会话 id)（Spring Session 默认编码）；库里存的必须是指纹
         String rawSessionId = new String(
                 java.util.Base64.getDecoder().decode(okLogin.sessionCookie()),
                 java.nio.charset.StandardCharsets.UTF_8);
-        assertThat(successRow.getSessionId()).isEqualTo(rawSessionId);
+        assertThat(successRow.getSessionId())
+                .as("session_id 列=会话指纹（SHA-256 前 16 hex），凭据原值不得入库")
+                .isEqualTo(com.newcoupon.infrastructure.audit.AuditActorResolver.fingerprint(rawSessionId))
+                .isNotEqualTo(rawSessionId)
+                .isNotEqualTo(okLogin.sessionCookie());
         assertThat(successRow.getHashVersion()).isEqualTo(AuditService.HASH_VERSION_CURRENT);
         // 失败审计发生在建会话之前：actor 仍是 ADMIN 域动作（谁在试密码），但身份未知——
         // actorId 与会话 id 都为空（试密码的人尚未证明自己是任何人），被冒名的用户名在 resourceId

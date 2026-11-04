@@ -60,6 +60,7 @@ public class AdminSessionService {
     private final PasswordEncoder passwordEncoder;
     private final StringRedisTemplate redis;
     private final AuditService auditService;
+    private final com.newcoupon.infrastructure.audit.AuditActorResolver actorResolver;
     private final SpringSessionBackedSessionRegistry<? extends Session> sessionRegistry;
     private final RedisIndexedSessionRepository sessionRepository;
     private final SecurityContextRepository securityContextRepository =
@@ -78,6 +79,7 @@ public class AdminSessionService {
                                PasswordEncoder passwordEncoder,
                                StringRedisTemplate redis,
                                AuditService auditService,
+                               com.newcoupon.infrastructure.audit.AuditActorResolver actorResolver,
                                SpringSessionBackedSessionRegistry<? extends Session> sessionRegistry,
                                RedisIndexedSessionRepository sessionRepository,
                                @Value("${coupon.security.login.max-attempts:5}") int maxAttempts,
@@ -89,6 +91,7 @@ public class AdminSessionService {
         this.passwordEncoder = passwordEncoder;
         this.redis = redis;
         this.auditService = auditService;
+        this.actorResolver = actorResolver;
         this.sessionRegistry = sessionRegistry;
         this.sessionRepository = sessionRepository;
         this.maxAttempts = maxAttempts;
@@ -115,7 +118,7 @@ public class AdminSessionService {
             throw new AdminLoginException();
         }
         if (overIpThrottle(request)) {
-            audit(request, username, null, null, AUDIT_LOGIN_FAILED, Map.of("reason", "IP_THROTTLED"));
+            audit(request, username, null, null, null, AUDIT_LOGIN_FAILED, Map.of("reason", "IP_THROTTLED"));
             throw new AdminLoginException();
         }
         AdminUserPO user = rbacService.findUser(username);
@@ -134,7 +137,7 @@ public class AdminSessionService {
             long after = registerFailure(username, request);
             if (after >= maxAttempts) {
                 // 恰好在本次跨过阈值：单独记一条锁定审计（运维要能回答"谁被锁了、何时能解"）
-                audit(request, username, null, null, AUDIT_LOCKED,
+                audit(request, username, null, null, null, AUDIT_LOCKED,
                         Map.of("failures", after, "lockWindowMs", lockWindow.toMillis()));
             }
             failReason = "BAD_PASSWORD";
@@ -147,7 +150,7 @@ public class AdminSessionService {
         }
 
         if (failReason != null) {
-            audit(request, username, null, null, AUDIT_LOGIN_FAILED, Map.of("reason", failReason));
+            audit(request, username, null, null, null, AUDIT_LOGIN_FAILED, Map.of("reason", failReason));
             throw new AdminLoginException();
         }
 
@@ -172,7 +175,7 @@ public class AdminSessionService {
         // 成功即清失败计数：锁定只累计"连续"失败
         redis.delete(FAIL_KEY_PREFIX + username);
 
-        audit(request, username, user.getId(), session.getId(), AUDIT_LOGIN_SUCCESS, null);
+        audit(request, username, user.getId(), String.valueOf(user.getId()), session.getId(), AUDIT_LOGIN_SUCCESS, null);
         return profileOf(user);
     }
 
@@ -188,7 +191,7 @@ public class AdminSessionService {
         }
         SecurityContextHolder.clearContext();
         if (principal instanceof AdminPrincipal admin) {
-            audit(request, admin.getUsername(), admin.getUserId(), sessionId, AUDIT_LOGOUT, null);
+            audit(request, admin.getUsername(), admin.getUserId(), String.valueOf(admin.getUserId()), sessionId, AUDIT_LOGOUT, null);
         }
     }
 
@@ -222,26 +225,34 @@ public class AdminSessionService {
         rbacMapper.bumpAuthVersion(target.getId());
         log.warn("ADMIN FORCE LOGOUT: username={} 删除会话 {} 个（{}）",
                 targetUsername, removed, operatorNote);
-        audit(null, targetUsername, target.getId(), null, AUDIT_FORCE_LOGOUT,
-                Map.of("removedSessions", removed, "note", String.valueOf(operatorNote)));
+        // actor=执行操作的管理员（审查 m2：此前记成被下线者——"谁把谁踢下线"只答了一半）；
+        // 被下线目标进 resourceId 与 user_id（操作对象维度），detail 带目标用户名便于 grep
+        com.newcoupon.infrastructure.audit.AuditActorResolver.Actor operator = actorResolver.resolve();
+        audit(null, targetUsername, target.getId(), operator.actorId(), operator.sessionFingerprint(),
+                AUDIT_FORCE_LOGOUT,
+                Map.of("removedSessions", removed,
+                        "note", String.valueOf(operatorNote),
+                        "target", targetUsername));
         return removed;
     }
 
     /**
      * 会话动作审计的统一出口（V6 2C 起带 actor 三列）。
      *
-     * <p>actor 口径：ADMIN + userId；sessionId=当前请求会话 id（登录前/非 HTTP 调用为空）。
-     * 注意 userId 与 resourceId 的分工——resourceId 放 username（人会读），
-     * actorId 放 userId（程序 join admin_user 用），两个维度都要能查。
+     * <p>actor 口径：ADMIN + **执行动作的管理员** userId（登录/登出=本人；强制下线=操作者，
+     * 见 {@link #forceLogout}）；sessionId=会话**指纹**（原值是 SESSION Cookie 凭据本身，
+     * 审计行可被低权限角色查到——原值入库=劫持提权链，审查 C2；指纹在本出口统一转换，
+     * 调用方传原值也不会落库）。resourceId 放 username（人会读），actorId 放 userId
+     * （程序 join admin_user 用），两个维度都要能查。
      */
-    private void audit(HttpServletRequest request, String username, Long userId,
-                       String sessionId, String action, Map<String, ?> detail) {
+    private void audit(HttpServletRequest request, String resourceId, Long userId,
+                       String actorId, String sessionId, String action, Map<String, ?> detail) {
         auditService.record(AuditService.AuditContext.of(
                 "SYSTEM", userId, MDC.get(TraceIdFilter.TRACE_ID),
-                action, "ADMIN_AUTH", username,
+                action, "ADMIN_AUTH", resourceId,
                 null, detail == null ? null : AuditService.serialize(detail),
                 request == null ? null : RiskControlFilter.clientIp(request), 0,
-                "ADMIN", userId == null ? null : String.valueOf(userId), sessionId));
+                "ADMIN", actorId, com.newcoupon.infrastructure.audit.AuditActorResolver.fingerprint(sessionId)));
     }
 
     /** 会话里重建 Authentication 用（登录时）；之后每请求由 Refresh 过滤器按 DB 重载。 */
