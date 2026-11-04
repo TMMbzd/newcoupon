@@ -40,17 +40,23 @@ ADR-0016 定了框架（路径版本、只增不改、错误码稳定、废弃�
 - 引入 `springdoc-openapi-starter-webmvc-ui:2.6.0`（版本显式声明，Boot BOM 不纳管 springdoc）；
 - `GroupedOpenApi` 分组 `open-v1`，`pathsToMatch("/open/v1/**")`——Controller 双前缀映射意味着不分组会把 /api 管理端点泄进对外契约；
 - spec 端点挪 `/api/api-docs`：springdoc 默认路径 `/v3/api-docs` 不在任何安全链的受保护前缀里，等于把整个 API 面拓扑匿名裸奔；挪进 /api 后自动落进 V6 2A-2 的管理面认证（旧令牌或会话），匿名 401 有测试钉住；
+- **多余端点的裁定（2026-11-04 对抗审查后补）**：
+  - 默认未分组端点 `/api/api-docs`、`/api/api-docs.yaml` 输出**未过滤的全量 spec**（/api 管理端点、/console 路径、schema 约束），任何控制台会话无视 RBAC 细粒度都能拉——`springdoc.enable-default-api-docs: false` 关闭，契约测试钉住不复活；
+  - `/api/api-docs/swagger-config`（UI 分组索引）随 `springdoc.swagger-ui.enabled: false` 消失——**不存在** `springdoc.api-docs.swagger-config.enabled` 键（实测：有无该键行为相同；springdoc 2.6.0 字节码亦无此属性名，曾误配为死键已删，归因写进 swagger-ui.enabled 的注释）；
+  - 端点"不存在"的可观测形态是 HTTP 200 + Result(5000)（NoResourceFoundException 被 GlobalExceptionHandler 兜底收敛），安全用例以"响应不是 OpenAPI 文档"为判据；
 - swagger-ui 关闭（生产不需要交互 UI）；响应 media type 钉 `application/json`（默认 `*/*` 是占位不是契约）；OAS 档位钉 3.0（实际渲染 3.0.1——springdoc 2.6 的 3.0 档常量）。
 
 ### 2.4 黄金 spec + 手写比较器（门禁裁剪）
 
 - **基线** `docs/open-api/openapi-v1.json`：机器生成（25 path），纪律见 docs/open-api/README.md（改契约=先红后绿更新基线、破坏性变更禁止、基线禁止手改）；
-- **门禁** `OpenApiContractIntegrationTest` 四守卫：泄漏防守（spec 所有 path 以 `/open/v1/` 开头）、防漂移（live 对基线只增不改）、黄金样例（GET `/open/v1/templates/{id}` 真实响应关键字段级对拍 + 6010 形状 + X-API-Version 头）、安全面（匿名拉 spec 401）；
-- **比较器** `OpenApiDriftComparator`：手写显式规则集（14 条规则，每条一个枚举/方法），**不引第三方**。规则集对齐 openapi-diff 的 breaking 默认集与 Stripe（"non-breaking version 只允许 additive"）/GitHub（"新增可选字段/端点不算 breaking"）的公开口径：
-  - 破坏：删 path / 删 method / 删参数 / 参数类型变化 / 参数可选变必填 / 新增必填参数 / 请求体变必填 / 请求体字段删除·类型变化·新增必填 / 删响应码 / 响应字段删除·类型变化 / 枚举收窄；
-  - 允许：新增 path / method / 可选参数 / 可选字段 / 枚举值 / 响应码 / 描述变化 / **响应侧 required 新增**（服务端多保证一个字段不伤害客户端；请求侧新增必填才是破坏）。
+- **门禁** `OpenApiContractIntegrationTest` 四守卫：泄漏防守（spec 所有 path 以 `/open/v1/` 开头）、防漂移（live 对基线只增不改）、黄金样例（GET `/open/v1/templates/{id}` 真实响应关键字段级对拍 + 6010 形状 + X-API-Version 头）、安全面（匿名拉 spec 401；默认组/swagger-config 端点不复活）；
+- **比较器** `OpenApiDriftComparator`：手写显式规则集（**18 条规则**，每条一个枚举/方法），**不引第三方**。规则集对齐 openapi-diff 的 breaking 默认集（含请求-响应镜像方向）与 Stripe（"non-breaking version 只允许 additive"）/GitHub（"新增可选字段/端点不算 breaking"）的公开口径：
+  - 破坏：删 path / 删 method / 删参数 / 参数类型变化 / 参数可选变必填 / 新增必填参数 / 请求体变必填 / 请求体字段·**数组元素**·**Map 值**删除·类型变化·新增必填 / 删响应码 / 响应字段删除·类型变化 / 请求侧枚举收窄（ENUM_NARROWED）与**裸值新增枚举约束**（ENUM_ADDED_CONSTRAINT）/ 响应侧枚举扩值（ENUM_EXTENDED）与**枚举声明整删**（ENUM_REMOVED）/ **校验约束收紧**（CONSTRAINT_TIGHTENED：maxLength/maxItems/maximum 变小、minimum/minLength/minItems 变大、从无到有、pattern 新增或变化——javax.validation 注解的渲染，收紧即拒存量合法请求）；
+  - 允许（additive/放宽）：新增 path / method / 可选参数 / 可选字段 / 枚举值 / 响应码 / 描述变化 / **响应侧 required 新增**（服务端多保证一个字段不伤害客户端）/ **请求侧枚举整删与扩值** / **约束放宽或删除** / **响应侧枚举值删除**（服务端不再发它）——镜像方向见比较器类注释的规则总表与"已知不比"清单；
+  - **下钻覆盖**（2026-11-04 对抗审查修复：原实现只走 properties，数组元素等 7/55 组件不受保护）：`items`（数组元素）、`additionalProperties` 为对象时（Map 值）、组合 schema（allOf/anyOf/oneOf 成员按规范化序列化串**排序配对**再递归——成员渲染顺序漂移不再假红）、pathItem 级共享参数、参数 schema 内部（枚举+约束）。
+- **再生成自带前置门禁**（对抗审查修复项 2）：`-Dopenapi.baseline.update=true` 的那一轮在覆写基线前先对现有基线跑破坏性 diff，发现破坏性变更红并**拒绝写文件**——"先红后绿"由机制保证而不是 README 自律；确属人工裁定接受时删除基线文件再跑（= 显式承认重置）。
 - **为什么手写而不用 openapi-diff CLI / Pact / Spectral**：本刀判据只有"只增不改"一条，写成显式规则表比引一个通用工具更可防守（每条规则可独立变异取证，绿灯输出可读）；与 V6 计划 L208 的裁剪一致——外部消费方（openapi-diff CLI 进 CI、Spectral lint、前端 openapi-typescript 生成类型）出现时再换/再叠加。同理，swagger-request-validator 的"真实请求/响应校验"这刀只做黄金样例两点采样（模板查询 + 6010），不全量铺。
-- **取证**：比较器自检用例（15 类破坏性变异逐条命中 + 9 类 additive 变异全部放行）常驻测试套件；基线注入假响应字段（模拟 live 删字段）红灯输出单行清单 `[RESPONSE_FIELD_REMOVED…] GET /open/v1/templates/{id} → 200 application/json.data → faceValueMutant`。
+- **取证**：比较器自检用例常驻测试套件（**33 类破坏性变异逐条命中 + 17 类 additive/放宽变异全部放行**，含数组元素/Map 值/组合成员/约束/枚举镜像全部新规则）；基线注入假字段（模拟 live 删 `GET /open/v1/coupons` 的 items 元素字段）红灯输出 `…data.coupons[] → l73mutant`——items 下钻在真实 spec 上的实证；再生成前置门禁的红灯取证见工作记录。
 
 ### 2.5 L73 复核结论
 
@@ -73,9 +79,9 @@ ADR-0016 定了框架（路径版本、只增不改、错误码稳定、废弃�
 - 比较器是自家维护的规则集：新场景（如 webhooks/hooks、cookie 参数）出现时要扩规则，openapi-diff 的覆盖面更全——换工具的触发条件写在 2.4；
 - `servers` 字段在生成与对比时剥掉（host:port 是环境不是契约）——若未来 spec 需要固定 server 描述，要改基线纪律。
 
-## 4. 验收（已达成，2026-11-04）
+## 4. 验收（已达成，2026-11-04；同日对抗审查修复后复验）
 
 - ApiVersionRegistryTest 9 例（边界语义/supportedVersions/废弃头格式）全绿；
-- OpenApiContractIntegrationTest 9 例 + 1 例门控（基线再生成）全绿；
-- 变异取证：破坏性（基线+假字段）红、additive（基线-可选字段）绿，输出已贴工作记录；
+- OpenApiContractIntegrationTest 10 例 + 1 例门控（基线再生成）全绿（含默认组/swagger-config 端点不复活的新用例）；
+- 变异取证：破坏性（基线+items 元素假字段）红且再生成拒绝覆写、additive（基线-可选字段）绿、再生成前置门禁红→还原→绿，输出已贴工作记录；
 - 回归：OpenApiAuthIntegrationTest（6010 含 supportedVersions）、OpenApiContextIntegrationTest（resource 口径零回归）、OpenApiOwnershipIntegrationTest（含 L73 新例）、AdminSurfaceProtectionTest（springdoc 端点落 /api 受保护面）全绿。
