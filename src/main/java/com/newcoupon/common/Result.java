@@ -45,6 +45,19 @@ public final class Result<T> {
         return new Result<>(errorCode.getCode(), errorCode.getMessage() + ": " + detail, null);
     }
 
+    /**
+     * 带结构化 data 的失败（V6 2B-2）：错误本体不变，但 data 携带**程序化可读的引导信息**——
+     * 首个使用方是 6010 的 {@code data.supportedVersions}（告诉接入方当前有哪些版本可用）。
+     *
+     * <p>与 {@link #fail(ErrorCode, String)} 的分工：那个的 detail 拼进 message，是给人看的补充文案；
+     * 这个的 data 原样放进 data 段，是给调用方代码分支用的结构化字段。
+     * 传 String 实参时仍优先绑定 detail 版本（更具体的重载），不受本方法影响。
+     */
+    public static <T> Result<T> fail(ErrorCode errorCode, T data) {
+        com.newcoupon.common.context.RequestContext.current().resultCode(errorCode.getCode());
+        return new Result<>(errorCode.getCode(), errorCode.getMessage(), data);
+    }
+
     public int getCode() {
         return code;
     }

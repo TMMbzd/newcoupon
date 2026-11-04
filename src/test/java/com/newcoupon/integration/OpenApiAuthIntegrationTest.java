@@ -276,6 +276,8 @@ class OpenApiAuthIntegrationTest extends ShardedIntegrationTestSupport {
                 .as("404 无法区分'版本不存在'和'接口写错'，所以由入口直接拒")
                 .isEqualTo(400);
         assertThat(r.getBody()).contains("6010");
+        // V6 2B-2：6010 的 data 带引导信息——接入方代码据此知道往哪个版本迁
+        assertThat(r.getBody()).contains("\"supportedVersions\":[\"v1\"]");
     }
 
     // ------------------------------------------------------------------

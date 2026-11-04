@@ -9,6 +9,7 @@ import com.newcoupon.application.service.TenantConfigKey;
 import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.common.crypto.OpenApiAuthHeader;
 import com.newcoupon.common.crypto.OpenApiSignature;
+import com.newcoupon.common.web.ApiVersionRegistry;
 import com.newcoupon.infrastructure.persistence.OpenApiAuditRecorder;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -16,6 +17,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.Map;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,7 +34,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
  *
  * <p><b>六步认证链</b>（任一失败即拒，且**每一步有自己的错误码**——排查时能直接定位到哪一环）：
  * <pre>
- *   1. 版本前缀      /open/v1/** 之外 → 6010（400）
+ *   1. 版本注册表    ApiVersionRegistry 未登记的版本段（含 v2、/open/v1 无尾斜杠）→ 6010（400，
+ *                   data.supportedVersions 引导）；当前登记：v1/ACTIVE（V6 2B-2）
  *   2. 解析签名头    → 6001（401）
  *   3. 查应用+密钥   → 6002（401）
  *   3.5 生命周期     非 ACTIVE/SANDBOX_ACTIVE → 6013（403，V6 2B：平台停用语义）
@@ -67,7 +70,6 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
     private static final Logger log = LoggerFactory.getLogger(OpenApiAuthFilter.class);
 
     private static final String OPEN_PREFIX = "/open/";
-    private static final String V1_PREFIX = "/open/v1/";
     private static final String AUTH_HEADER = "Authorization";
     private static final String TIMEOUT_HEADER = "X-Timeout-Ms";
     private static final String NONCE_KEY_PREFIX = "c:open:nonce:";
@@ -87,19 +89,23 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
     /** 治理指标（S2 第 11 步） */
     private final com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics;
     private final com.newcoupon.application.service.TenantConfigService tenantConfigService;
+    /** 版本注册表（V6 2B-2）：第 1 步的判据来源，替代原先硬编码的 V1_PREFIX */
+    private final ApiVersionRegistry versionRegistry;
 
     public OpenApiAuthFilter(CachedOpenAppReader appReader,
                              StringRedisTemplate redis,
                              ObjectMapper objectMapper,
                              OpenApiAuditRecorder auditRecorder,
                              com.newcoupon.infrastructure.metrics.GovernanceMetrics governanceMetrics,
-                             com.newcoupon.application.service.TenantConfigService tenantConfigService) {
+                             com.newcoupon.application.service.TenantConfigService tenantConfigService,
+                             ApiVersionRegistry versionRegistry) {
         this.appReader = appReader;
         this.redis = redis;
         this.objectMapper = objectMapper;
         this.auditRecorder = auditRecorder;
         this.governanceMetrics = governanceMetrics;
         this.tenantConfigService = tenantConfigService;
+        this.versionRegistry = versionRegistry;
     }
 
     @Override
@@ -117,11 +123,15 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
         Integer rejectedCode = null;     // 被接入层拦下时的错误码（审计用）
 
         try {
-            // 第 1 步：版本（未实现的版本直接拒——404 无法区分"版本不存在"和"接口写错"）
-            if (!path.startsWith(V1_PREFIX)) {
-                rejectedCode = reject(response, 400, ErrorCode.API_VERSION_UNSUPPORTED);
+            // 第 1 步：版本注册表（未登记的版本直接拒——404 无法区分"版本不存在"和"接口写错"）。
+            // data.supportedVersions 是给接入方代码用的引导信息：拿到 6010 就知道该往哪个版本迁。
+            Optional<ApiVersionRegistry.ResolvedVersion> resolved = versionRegistry.resolve(path);
+            if (resolved.isEmpty()) {
+                rejectedCode = reject(response, 400, ErrorCode.API_VERSION_UNSUPPORTED,
+                        Map.of("supportedVersions", versionRegistry.supportedVersions()));
                 return;
             }
+            ApiVersionRegistry.ResolvedVersion rv = resolved.get();
 
             // body 一次性读入内存：验签要算它的哈希，而 Servlet 的流只能读一次（读完了 Controller 就没得读）
             CachedBodyRequestWrapper wrapped = new CachedBodyRequestWrapper(request);
@@ -191,8 +201,17 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
             RequestContext ctx = new RequestContext(
                     header.appId(), MDC.get(TraceIdFilter.TRACE_ID),
                     deadline(request, header.appId()), hasTimeoutHeader(request));
-            ctx.resource(path.substring(V1_PREFIX.length()));   // 如 coupons/receive（维度由应用服务补）
+            // restPath 来自注册表解析（如 coupons/receive），与旧 V1_PREFIX 截取的输出逐字节一致——
+            // 这是审计/指标标签的既有口径，零回归（OpenApiContextIntegrationTest 钉住）。
+            ctx.resource(rv.restPath());   // 维度由应用服务补
             RequestContext.set(ctx);
+
+            // 响应头必须在 chain.doFilter **之前**设置：doFilter 返回时消息转换器已写完响应体、
+            // Tomcat 已 flush（本类 exposeContext 的注释里记着"提交后 setHeader 无效"的实测教训）。
+            // X-API-Version：告诉接入方"这次调用按哪个版本执行的"——6010 是反方向（有哪些版本可用）。
+            response.setHeader("X-API-Version", rv.version().segment());
+            // DEPRECATED 版本追加 Deprecation/Sunset/Link 三件套（RFC 9745/8594）；v1=ACTIVE 时空 Map
+            ApiVersionRegistry.deprecationHeaders(rv.version()).forEach(response::setHeader);
 
             chain.doFilter(wrapped, response);
         } finally {
@@ -315,10 +334,19 @@ public class OpenApiAuthFilter extends OncePerRequestFilter {
 
     /** @return 该错误码——调用方带回去记进审计（接入层的拒绝也要留痕） */
     private int reject(HttpServletResponse response, int httpStatus, ErrorCode code) throws IOException {
+        return reject(response, httpStatus, code, null);
+    }
+
+    /**
+     * 带 data 的拒绝（V6 2B-2）：data 放程序化引导信息（首个使用方：6010 的 supportedVersions）。
+     * data=null 时序列化结果与无 data 版本完全一致（"data":null），既有调用方零感知。
+     */
+    private int reject(HttpServletResponse response, int httpStatus, ErrorCode code, Object data)
+            throws IOException {
         response.setStatus(httpStatus);
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.setCharacterEncoding("UTF-8");   // L43：不声明则中文提示变乱码
-        response.getWriter().write(objectMapper.writeValueAsString(Result.fail(code)));
+        response.getWriter().write(objectMapper.writeValueAsString(Result.fail(code, data)));
         return code.getCode();
     }
 }
