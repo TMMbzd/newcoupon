@@ -1,0 +1,2009 @@
+{
+  "openapi" : "3.0.1",
+  "info" : {
+    "title" : "OpenAPI definition",
+    "version" : "v0"
+  },
+  "paths" : {
+    "/open/v1/templates/{id}/unfreeze" : {
+      "post" : {
+        "tags" : [ "template-controller" ],
+        "operationId" : "unfreeze",
+        "parameters" : [ {
+          "name" : "id",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int64"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/templates/{id}/stock-adjust" : {
+      "post" : {
+        "tags" : [ "template-controller" ],
+        "operationId" : "adjustStock",
+        "parameters" : [ {
+          "name" : "id",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int64"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/StockAdjustRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultStockAdjustResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/templates/{id}/reonline" : {
+      "post" : {
+        "tags" : [ "template-controller" ],
+        "operationId" : "reonline",
+        "parameters" : [ {
+          "name" : "id",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int64"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/templates/{id}/publish" : {
+      "post" : {
+        "tags" : [ "template-controller" ],
+        "operationId" : "publish",
+        "parameters" : [ {
+          "name" : "id",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int64"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/templates/{id}/offline" : {
+      "post" : {
+        "tags" : [ "template-controller" ],
+        "operationId" : "offline",
+        "parameters" : [ {
+          "name" : "id",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int64"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/templates/{id}/freeze" : {
+      "post" : {
+        "tags" : [ "template-controller" ],
+        "operationId" : "freeze",
+        "parameters" : [ {
+          "name" : "id",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int64"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultVoid"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/templates" : {
+      "post" : {
+        "tags" : [ "template-controller" ],
+        "operationId" : "create",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/TemplateCreateRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultCreatedTemplate"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/grant/tasks/{taskNo}/retry-failed" : {
+      "post" : {
+        "tags" : [ "grant-task-controller" ],
+        "operationId" : "retryFailed",
+        "parameters" : [ {
+          "name" : "taskNo",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultGrantTaskRetryResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/grant/tasks/{taskNo}/cancel" : {
+      "post" : {
+        "tags" : [ "grant-task-controller" ],
+        "operationId" : "cancel",
+        "parameters" : [ {
+          "name" : "taskNo",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultGrantTaskCancelResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/grant/tasks" : {
+      "post" : {
+        "tags" : [ "grant-task-controller" ],
+        "operationId" : "create_1",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/GrantTaskCreateRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultGrantTaskCreateResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/coupons/release" : {
+      "post" : {
+        "tags" : [ "trade-controller" ],
+        "operationId" : "release",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/ReleaseRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultReleaseResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/coupons/refund" : {
+      "post" : {
+        "tags" : [ "trade-controller" ],
+        "operationId" : "refund",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/RefundRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultRefundResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/coupons/receive-async" : {
+      "post" : {
+        "tags" : [ "receive-controller" ],
+        "operationId" : "receiveAsync",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/ReceiveRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultReceiveAsyncResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/coupons/receive" : {
+      "post" : {
+        "tags" : [ "receive-controller" ],
+        "operationId" : "receive",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/ReceiveRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultReceiveResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/coupons/lock" : {
+      "post" : {
+        "tags" : [ "trade-controller" ],
+        "operationId" : "lock",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/LockRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultLockResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/coupons/confirm" : {
+      "post" : {
+        "tags" : [ "trade-controller" ],
+        "operationId" : "confirm",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/ConfirmRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultConfirmResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/codes/redeem" : {
+      "post" : {
+        "tags" : [ "coupon-code-controller" ],
+        "operationId" : "redeem",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/CouponCodeRedeemRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultCouponCodeRedeemResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/codes/batches/{batchNo}/codes" : {
+      "post" : {
+        "tags" : [ "coupon-code-controller" ],
+        "operationId" : "exportCodes",
+        "parameters" : [ {
+          "name" : "batchNo",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "type" : "string",
+                  "format" : "byte"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/codes/batches" : {
+      "post" : {
+        "tags" : [ "coupon-code-controller" ],
+        "operationId" : "createBatch",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/CouponCodeBatchCreateRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultCouponCodeBatchCreateResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/calculate" : {
+      "post" : {
+        "tags" : [ "coupon-calculate-controller" ],
+        "operationId" : "calculate",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/CalculateRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultCalculateResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/templates/{id}" : {
+      "get" : {
+        "tags" : [ "template-controller" ],
+        "operationId" : "get",
+        "parameters" : [ {
+          "name" : "id",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int64"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultTemplateResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/grant/tasks/{taskNo}/failures" : {
+      "get" : {
+        "tags" : [ "grant-task-controller" ],
+        "operationId" : "failures",
+        "parameters" : [ {
+          "name" : "taskNo",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "type" : "string",
+                  "format" : "byte"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/grant/tasks/{taskNo}" : {
+      "get" : {
+        "tags" : [ "grant-task-controller" ],
+        "operationId" : "get_1",
+        "parameters" : [ {
+          "name" : "taskNo",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultGrantTaskStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/coupons/receive-async/{requestId}" : {
+      "get" : {
+        "tags" : [ "receive-controller" ],
+        "operationId" : "receiveAsyncStatus",
+        "parameters" : [ {
+          "name" : "requestId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "userId",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int64"
+          }
+        }, {
+          "name" : "appId",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultReceiveAsyncStatusResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/coupons" : {
+      "get" : {
+        "tags" : [ "trade-controller" ],
+        "operationId" : "myCoupons",
+        "parameters" : [ {
+          "name" : "userId",
+          "in" : "query",
+          "required" : true,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int64"
+          }
+        }, {
+          "name" : "status",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int32"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultMyCouponList"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components" : {
+    "schemas" : {
+      "ResultVoid" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "type" : "object"
+          }
+        }
+      },
+      "StockAdjustRequest" : {
+        "required" : [ "expectedTotalCount", "requestId", "targetTotalCount" ],
+        "type" : "object",
+        "properties" : {
+          "requestId" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "expectedTotalCount" : {
+            "minimum" : 0,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "targetTotalCount" : {
+            "minimum" : 0,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "reason" : {
+            "maxLength" : 255,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "operator" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          }
+        }
+      },
+      "ResultStockAdjustResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/StockAdjustResult"
+          }
+        }
+      },
+      "StockAdjustResult" : {
+        "type" : "object",
+        "properties" : {
+          "templateId" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "totalCount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "usedCount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "idempotent" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "TemplateCreateRequest" : {
+        "required" : [ "activityId", "couponType", "faceValue", "name", "perUserLimit", "totalCount", "validType" ],
+        "type" : "object",
+        "properties" : {
+          "name" : {
+            "maxLength" : 128,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "activityId" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "couponType" : {
+            "maximum" : 3,
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "faceValue" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "discountCap" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "threshold" : {
+            "minimum" : 0,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "totalCount" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "perUserLimit" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "validType" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "validStart" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "validEnd" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "validDays" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "dailyLimit" : {
+            "minimum" : 0,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "perUserDailyLimit" : {
+            "minimum" : 0,
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "applicableScope" : {
+            "maximum" : 2,
+            "minimum" : 0,
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "scopeIds" : {
+            "maxLength" : 512,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "stackingLayer" : {
+            "maximum" : 1,
+            "minimum" : 0,
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "exclusionGroup" : {
+            "maxLength" : 32,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "budgetOwner" : {
+            "maximum" : 3,
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "budgetRatio" : {
+            "maximum" : 99,
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "settlePartyId" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          }
+        }
+      },
+      "CreatedTemplate" : {
+        "type" : "object",
+        "properties" : {
+          "id" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "templateCode" : {
+            "type" : "string"
+          }
+        }
+      },
+      "ResultCreatedTemplate" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/CreatedTemplate"
+          }
+        }
+      },
+      "GrantTaskRetryResult" : {
+        "type" : "object",
+        "properties" : {
+          "taskNo" : {
+            "type" : "string"
+          },
+          "status" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "accepted" : {
+            "type" : "boolean"
+          },
+          "retried" : {
+            "type" : "integer",
+            "format" : "int32"
+          }
+        }
+      },
+      "ResultGrantTaskRetryResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/GrantTaskRetryResult"
+          }
+        }
+      },
+      "GrantTaskCancelResult" : {
+        "type" : "object",
+        "properties" : {
+          "taskNo" : {
+            "type" : "string"
+          },
+          "status" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "accepted" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "ResultGrantTaskCancelResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/GrantTaskCancelResult"
+          }
+        }
+      },
+      "GrantTaskCreateRequest" : {
+        "required" : [ "requestId", "templateId", "userIds" ],
+        "type" : "object",
+        "properties" : {
+          "requestId" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "pattern" : "[A-Za-z0-9_\\-]{1,64}",
+            "type" : "string"
+          },
+          "templateId" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "userIds" : {
+            "type" : "array",
+            "items" : {
+              "type" : "integer",
+              "format" : "int64"
+            }
+          },
+          "operator" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "scheduleTime" : {
+            "type" : "string",
+            "format" : "date-time"
+          }
+        }
+      },
+      "GrantTaskCreateResult" : {
+        "type" : "object",
+        "properties" : {
+          "taskNo" : {
+            "type" : "string"
+          },
+          "status" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "totalCount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "idempotent" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "ResultGrantTaskCreateResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/GrantTaskCreateResult"
+          }
+        }
+      },
+      "ReleaseRequest" : {
+        "required" : [ "usageNo" ],
+        "type" : "object",
+        "properties" : {
+          "usageNo" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "reason" : {
+            "maxLength" : 128,
+            "minLength" : 0,
+            "type" : "string"
+          }
+        }
+      },
+      "ReleaseResult" : {
+        "type" : "object",
+        "properties" : {
+          "usageNo" : {
+            "type" : "string"
+          },
+          "couponStatus" : {
+            "type" : "string"
+          },
+          "duplicated" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "ResultReleaseResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/ReleaseResult"
+          }
+        }
+      },
+      "RefundItem" : {
+        "required" : [ "lineNo", "quantity" ],
+        "type" : "object",
+        "properties" : {
+          "lineNo" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "quantity" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int32"
+          }
+        }
+      },
+      "RefundRequest" : {
+        "required" : [ "usageNo" ],
+        "type" : "object",
+        "properties" : {
+          "usageNo" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "refundNo" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "items" : {
+            "maxItems" : 100,
+            "minItems" : 0,
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/RefundItem"
+            }
+          }
+        }
+      },
+      "RefundResult" : {
+        "type" : "object",
+        "properties" : {
+          "usageNo" : {
+            "type" : "string"
+          },
+          "refundNo" : {
+            "type" : "string"
+          },
+          "refundType" : {
+            "type" : "string"
+          },
+          "couponStatus" : {
+            "type" : "string"
+          },
+          "usageStatus" : {
+            "type" : "string"
+          },
+          "discountAmt" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "duplicated" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "ResultRefundResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/RefundResult"
+          }
+        }
+      },
+      "ReceiveRequest" : {
+        "required" : [ "requestId", "templateId", "userId" ],
+        "type" : "object",
+        "properties" : {
+          "requestId" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "pattern" : "[A-Za-z0-9_\\-]{1,64}",
+            "type" : "string"
+          },
+          "userId" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "templateId" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "source" : {
+            "type" : "string"
+          },
+          "bizType" : {
+            "type" : "string"
+          },
+          "bizId" : {
+            "type" : "string"
+          }
+        }
+      },
+      "ReceiveAsyncResult" : {
+        "type" : "object",
+        "properties" : {
+          "requestId" : {
+            "type" : "string"
+          },
+          "taskId" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "status" : {
+            "type" : "string"
+          }
+        }
+      },
+      "ResultReceiveAsyncResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/ReceiveAsyncResult"
+          }
+        }
+      },
+      "ReceiveResult" : {
+        "type" : "object",
+        "properties" : {
+          "couponId" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "templateCode" : {
+            "type" : "string"
+          },
+          "faceValue" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "validEnd" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "duplicated" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "ResultReceiveResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/ReceiveResult"
+          }
+        }
+      },
+      "LockRequest" : {
+        "required" : [ "couponId", "orderNo", "userId" ],
+        "type" : "object",
+        "properties" : {
+          "orderNo" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "userId" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "couponId" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "pricingId" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          }
+        }
+      },
+      "LockResult" : {
+        "type" : "object",
+        "properties" : {
+          "usageNo" : {
+            "type" : "string"
+          },
+          "couponId" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "couponStatus" : {
+            "type" : "string"
+          },
+          "duplicated" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "ResultLockResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/LockResult"
+          }
+        }
+      },
+      "ConfirmRequest" : {
+        "required" : [ "usageNo" ],
+        "type" : "object",
+        "properties" : {
+          "usageNo" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "discountAmt" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "items" : {
+            "maxItems" : 100,
+            "minItems" : 0,
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/OrderItem"
+            }
+          },
+          "pricingId" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          }
+        }
+      },
+      "OrderItem" : {
+        "required" : [ "categoryId", "price", "quantity", "skuId" ],
+        "type" : "object",
+        "properties" : {
+          "skuId" : {
+            "type" : "string"
+          },
+          "categoryId" : {
+            "type" : "string"
+          },
+          "price" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "quantity" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "lineNo" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "settlePartyId" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          }
+        }
+      },
+      "ConfirmResult" : {
+        "type" : "object",
+        "properties" : {
+          "usageNo" : {
+            "type" : "string"
+          },
+          "couponStatus" : {
+            "type" : "string"
+          },
+          "discountAmt" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "duplicated" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "ResultConfirmResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/ConfirmResult"
+          }
+        }
+      },
+      "CouponCodeRedeemRequest" : {
+        "required" : [ "code", "requestId", "userId" ],
+        "type" : "object",
+        "properties" : {
+          "requestId" : {
+            "maxLength" : 50,
+            "minLength" : 0,
+            "pattern" : "[A-Za-z0-9_\\-]{1,50}",
+            "type" : "string"
+          },
+          "code" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          },
+          "userId" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          }
+        }
+      },
+      "CouponCodeRedeemResult" : {
+        "type" : "object",
+        "properties" : {
+          "batchNo" : {
+            "type" : "string"
+          },
+          "couponId" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "templateCode" : {
+            "type" : "string"
+          },
+          "faceValue" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "validEnd" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "duplicated" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "ResultCouponCodeRedeemResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/CouponCodeRedeemResult"
+          }
+        }
+      },
+      "CouponCodeBatchCreateRequest" : {
+        "required" : [ "codeType", "count", "requestId", "templateId" ],
+        "type" : "object",
+        "properties" : {
+          "requestId" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "pattern" : "[A-Za-z0-9_\\-]{1,64}",
+            "type" : "string"
+          },
+          "templateId" : {
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "count" : {
+            "maximum" : 100000,
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "codeType" : {
+            "maximum" : 2,
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "operator" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          }
+        }
+      },
+      "CouponCodeBatchCreateResult" : {
+        "type" : "object",
+        "properties" : {
+          "batchNo" : {
+            "type" : "string"
+          },
+          "total" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "codes" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            }
+          },
+          "idempotent" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "ResultCouponCodeBatchCreateResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/CouponCodeBatchCreateResult"
+          }
+        }
+      },
+      "CalculateRequest" : {
+        "required" : [ "couponIds", "items", "userId" ],
+        "type" : "object",
+        "properties" : {
+          "userId" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "items" : {
+            "maxItems" : 100,
+            "minItems" : 0,
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/OrderItem"
+            }
+          },
+          "couponIds" : {
+            "maxItems" : 10,
+            "minItems" : 0,
+            "type" : "array",
+            "items" : {
+              "type" : "integer",
+              "format" : "int64"
+            }
+          },
+          "orderNo" : {
+            "maxLength" : 64,
+            "minLength" : 0,
+            "type" : "string"
+          }
+        }
+      },
+      "CalculateResponse" : {
+        "type" : "object",
+        "properties" : {
+          "originalPrice" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "discountAmount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "finalPrice" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "usedCoupons" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/CouponUsage"
+            }
+          },
+          "allocations" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/LineAllocation"
+            }
+          },
+          "unusableCoupons" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/CouponReason"
+            }
+          },
+          "pricingId" : {
+            "type" : "string"
+          }
+        }
+      },
+      "CouponLineShare" : {
+        "type" : "object",
+        "properties" : {
+          "couponId" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "amount" : {
+            "type" : "integer",
+            "format" : "int64"
+          }
+        }
+      },
+      "CouponReason" : {
+        "type" : "object",
+        "properties" : {
+          "couponId" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "reason" : {
+            "type" : "string"
+          }
+        }
+      },
+      "CouponUsage" : {
+        "type" : "object",
+        "properties" : {
+          "couponId" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "templateName" : {
+            "type" : "string"
+          },
+          "layer" : {
+            "type" : "string"
+          },
+          "discountAmount" : {
+            "type" : "integer",
+            "format" : "int64"
+          }
+        }
+      },
+      "LineAllocation" : {
+        "type" : "object",
+        "properties" : {
+          "lineNo" : {
+            "type" : "string"
+          },
+          "skuId" : {
+            "type" : "string"
+          },
+          "lineAmount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "allocatedDiscount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "couponShares" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/CouponLineShare"
+            }
+          }
+        }
+      },
+      "ResultCalculateResponse" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/CalculateResponse"
+          }
+        }
+      },
+      "ResultTemplateResponse" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/TemplateResponse"
+          }
+        }
+      },
+      "TemplateResponse" : {
+        "type" : "object",
+        "properties" : {
+          "id" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "templateCode" : {
+            "type" : "string"
+          },
+          "name" : {
+            "type" : "string"
+          },
+          "couponType" : {
+            "type" : "string"
+          },
+          "faceValue" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "discountCap" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "threshold" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "totalCount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "issuedCount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "perUserLimit" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "dailyLimit" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "perUserDailyLimit" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "validType" : {
+            "type" : "string"
+          },
+          "validStart" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "validEnd" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "validDays" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "approveStatus" : {
+            "type" : "string"
+          },
+          "publishStatus" : {
+            "type" : "string"
+          },
+          "createTime" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "applicableScope" : {
+            "type" : "string"
+          },
+          "scopeIds" : {
+            "type" : "string"
+          },
+          "stackingLayer" : {
+            "type" : "string"
+          },
+          "exclusionGroup" : {
+            "type" : "string"
+          },
+          "budgetOwner" : {
+            "type" : "string"
+          },
+          "budgetRatio" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "settlePartyId" : {
+            "type" : "string"
+          },
+          "stockShardCount" : {
+            "type" : "integer",
+            "format" : "int32"
+          }
+        }
+      },
+      "GrantTaskStatus" : {
+        "type" : "object",
+        "properties" : {
+          "taskNo" : {
+            "type" : "string"
+          },
+          "status" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "totalCount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "successCount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "failCount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "skipCount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "pendingCount" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "percent" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "scheduleTime" : {
+            "type" : "string",
+            "format" : "date-time"
+          }
+        }
+      },
+      "ResultGrantTaskStatus" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/GrantTaskStatus"
+          }
+        }
+      },
+      "ReceiveAsyncStatusResult" : {
+        "type" : "object",
+        "properties" : {
+          "requestId" : {
+            "type" : "string"
+          },
+          "status" : {
+            "type" : "string"
+          },
+          "couponId" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "errorCode" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "errorMsg" : {
+            "type" : "string"
+          }
+        }
+      },
+      "ResultReceiveAsyncStatusResult" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/ReceiveAsyncStatusResult"
+          }
+        }
+      },
+      "MyCoupon" : {
+        "type" : "object",
+        "properties" : {
+          "id" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "templateCode" : {
+            "type" : "string"
+          },
+          "faceValue" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "threshold" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "discountCap" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "validEnd" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "status" : {
+            "type" : "string"
+          }
+        }
+      },
+      "MyCouponList" : {
+        "type" : "object",
+        "properties" : {
+          "coupons" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/MyCoupon"
+            }
+          }
+        }
+      },
+      "ResultMyCouponList" : {
+        "type" : "object",
+        "properties" : {
+          "code" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "data" : {
+            "$ref" : "#/components/schemas/MyCouponList"
+          }
+        }
+      }
+    }
+  }
+}

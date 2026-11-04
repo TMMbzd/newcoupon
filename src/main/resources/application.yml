@@ -246,6 +246,26 @@ mybatis-plus:
   global-config:
     banner: false
 
+# OpenAPI 契约生成（V6 2B-2，ADR-0022）：live spec 由 springdoc 从 Controller 注解生成，
+# 契约测试用它对基线 docs/open-api/openapi-v1.json 做"只增不改"门禁。
+springdoc:
+  api-docs:
+    # spec 端点挪进 /api 前缀：兜底安全链里 /api/** 的所有方法都要"旧令牌或会话"
+    # （LegacyAdminTokenAuthenticationFilter，V6 2A-2 翻面）。默认路径 /v3/api-docs
+    # 不属于任何安全链的受保护前缀，等于把整个 API 面的拓扑匿名裸奔。
+    # 挪进来后：匿名 GET /api/api-docs/** → 401（有契约测试钉住）。
+    path: /api/api-docs
+    # 钉住 OAS 3.0 档（springdoc 高版本默认可切 3.1）：基线文件与 live spec 的版本声明
+    # 必须可比，不随 springdoc 升级漂移。3.0 档实际渲染 "3.0.1"（springdoc 2.6 的 3.0 常量）。
+    version: openapi_3_0
+  # Controller 未声明 produces 时 spec 里的响应 media type 用什么。默认 */*——那是
+  # "任意类型"的占位，不是真实契约（接口实际只产 JSON）；对外 spec 声明 application/json
+  # 才是可消费的契约，黄金样例对拍也按它导航。（键名带 s：default-produces-media-type）
+  default-produces-media-type: application/json
+  swagger-ui:
+    # 生产不需要交互 UI（spec 以基线文件为准）；关掉后 swagger-ui 的全部路径不注册。
+    enabled: false
+
 management:
   endpoints:
     web:

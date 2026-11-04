@@ -37,6 +37,9 @@
     <bucket4j.version>8.21.0</bucket4j.version>
     <!-- Sentine 版本：1.8.10 是当前最新 GA（2.0.0-alpha 自 2023 起未 GA） -->
     <sentinel.version>1.8.10</sentinel.version>
+    <!-- springdoc 版本（V6 2B-2 契约测试）：Boot BOM 不纳管 springdoc，必须显式声明。
+         2.6.0 与 Boot 3.3.x 适配（springdoc 官方兼容矩阵），随 Boot 大版本升级时复核。 -->
+    <springdoc.version>2.6.0</springdoc.version>
   </properties>
 
   <dependencies>
@@ -192,6 +195,18 @@
       <groupId>com.baomidou</groupId>
       <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
       <version>${mybatis-plus.version}</version>
+    </dependency>
+
+    <!-- OpenAPI 契约生成（V6 2B-2，ADR-0022）：运行期从 Controller 注解生成 /open/v1 的
+         OpenAPI 3.0.3 spec，作为"只增不改"门禁的 live 侧输入（基线 docs/open-api/openapi-v1.json）。
+         选 webmvc-ui 而非最小件 swagger-models：需要 GroupedOpenApi 的 pathsToMatch 分组
+         （只把 /open/v1/** 收进对外契约，管理面端点不进 spec）。
+         swagger-ui 本身在 application.yml 关掉——生产不需要交互 UI，机器契约才是事实源；
+         代价：依赖进生产 classpath（仅生成 spec，无 UI 静态资源）。 -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+      <version>${springdoc.version}</version>
     </dependency>
 
     <!-- SQL 版本化管理：所有建表/变更必须走 Flyway 迁移脚本，禁止手工改库（大厂 DBA 红线） -->
