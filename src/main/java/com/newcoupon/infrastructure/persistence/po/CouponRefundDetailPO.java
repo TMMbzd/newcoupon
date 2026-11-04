@@ -25,6 +25,10 @@ public class CouponRefundDetailPO {
     private Long refundDiscountAmt;
     private Long refundPlatformAmt;
     private Long refundMerchantAmt;
+    /** V47：质量位掩码（SettleQualityFlags；0=干净） */
+    private Integer qualityFlags;
+    /** V47：1=进真实结算口径；0=质量排除（出资不明/商家钱落 __default__） */
+    private Integer settleEligible;
     private LocalDateTime createTime;
 
     public Long getId() { return id; }
@@ -53,6 +57,10 @@ public class CouponRefundDetailPO {
     public void setRefundPlatformAmt(Long refundPlatformAmt) { this.refundPlatformAmt = refundPlatformAmt; }
     public Long getRefundMerchantAmt() { return refundMerchantAmt; }
     public void setRefundMerchantAmt(Long refundMerchantAmt) { this.refundMerchantAmt = refundMerchantAmt; }
+    public Integer getQualityFlags() { return qualityFlags; }
+    public void setQualityFlags(Integer qualityFlags) { this.qualityFlags = qualityFlags; }
+    public Integer getSettleEligible() { return settleEligible; }
+    public void setSettleEligible(Integer settleEligible) { this.settleEligible = settleEligible; }
     public LocalDateTime getCreateTime() { return createTime; }
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }
 }

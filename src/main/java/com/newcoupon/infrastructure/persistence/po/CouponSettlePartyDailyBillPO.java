@@ -28,6 +28,14 @@ public class CouponSettlePartyDailyBillPO {
     private Long discountTotal;
     private Long platformBurden;
     private Long merchantBurden;
+    /** V47：生成时命中的 ACTIVE hold 扣减额（分）——主体级 hold 对每个模板行全额扣减 */
+    private Long holdAmount;
+    /** V47：应付=discount_total-hold_amount；负数如实展示=未释放 hold 超当期净额 */
+    private Long payableAmount;
+    /** V47：当日质量排除的分账行数（可观测；金额不计入本行） */
+    private Integer ineligibleShareCount;
+    /** V47：当日质量排除的退款明细行数（可观测） */
+    private Integer ineligibleRefundCount;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 
@@ -51,6 +59,14 @@ public class CouponSettlePartyDailyBillPO {
     public void setPlatformBurden(Long platformBurden) { this.platformBurden = platformBurden; }
     public Long getMerchantBurden() { return merchantBurden; }
     public void setMerchantBurden(Long merchantBurden) { this.merchantBurden = merchantBurden; }
+    public Long getHoldAmount() { return holdAmount; }
+    public void setHoldAmount(Long holdAmount) { this.holdAmount = holdAmount; }
+    public Long getPayableAmount() { return payableAmount; }
+    public void setPayableAmount(Long payableAmount) { this.payableAmount = payableAmount; }
+    public Integer getIneligibleShareCount() { return ineligibleShareCount; }
+    public void setIneligibleShareCount(Integer ineligibleShareCount) { this.ineligibleShareCount = ineligibleShareCount; }
+    public Integer getIneligibleRefundCount() { return ineligibleRefundCount; }
+    public void setIneligibleRefundCount(Integer ineligibleRefundCount) { this.ineligibleRefundCount = ineligibleRefundCount; }
     public LocalDateTime getCreateTime() { return createTime; }
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }
     public LocalDateTime getUpdateTime() { return updateTime; }

@@ -35,6 +35,10 @@ public class CouponShareDetailPO {
     private Long platformBurden;   // 平台承担金额（分）
     private Long merchantBurden;   // 商家承担金额（分）
     private Long shareTotal;       // = platform + merchant
+    /** V47：质量位掩码（SettleQualityFlags；0=干净） */
+    private Integer qualityFlags;
+    /** V47：1=进真实结算口径（日账单聚合）；0=质量排除（商家钱落 __default__ 等） */
+    private Integer settleEligible;
     private LocalDateTime createTime;
 
     public Long getId() { return id; }
@@ -67,6 +71,10 @@ public class CouponShareDetailPO {
     public void setMerchantBurden(Long merchantBurden) { this.merchantBurden = merchantBurden; }
     public Long getShareTotal() { return shareTotal; }
     public void setShareTotal(Long shareTotal) { this.shareTotal = shareTotal; }
+    public Integer getQualityFlags() { return qualityFlags; }
+    public void setQualityFlags(Integer qualityFlags) { this.qualityFlags = qualityFlags; }
+    public Integer getSettleEligible() { return settleEligible; }
+    public void setSettleEligible(Integer settleEligible) { this.settleEligible = settleEligible; }
     public LocalDateTime getCreateTime() { return createTime; }
     public void setCreateTime(LocalDateTime createTime) { this.createTime = createTime; }
 }
