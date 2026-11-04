@@ -526,14 +526,30 @@ class OpenApiContractIntegrationTest extends ShardedIntegrationTestSupport {
 
     @Test
     @EnabledIfSystemProperty(named = "openapi.baseline.update", matches = "true")
-    @DisplayName("基线再生成：拉 live spec 归一化后重写 docs/open-api/openapi-v1.json（改契约=先红后绿）")
+    @DisplayName("基线再生成：先过一遍破坏性门禁（红则拒写基线），绿才重写 docs/open-api/openapi-v1.json")
     void regenerateBaseline() throws Exception {
-        JsonNode normalized = fetchLiveSpec();
+        JsonNode live = fetchLiveSpec();
+
+        // 覆写前强制门禁（对抗审查修复项 2）：再生成那一轮跳过了常规门禁用例，
+        // 这里必须自己跑一遍 diff——否则破坏性变更可以借 -Dopenapi.baseline.update=true
+        // 一路绿灯地写进基线，"先红后绿"就只剩 README 里的自律。属性泄漏进 CI 环境变量
+        // 也一样会被这道前置检查拦住。
+        if (Files.exists(BASELINE)) {
+            JsonNode existing = normalize(JSON.readTree(Files.readString(BASELINE, StandardCharsets.UTF_8)));
+            List<String> violations = OpenApiDriftComparator.diff(existing, live);
+            assertThat(violations)
+                    .as("基线再生成的前置门禁发现破坏性变更——拒绝覆写基线。变更清单：\n%s\n"
+                            + "处理：破坏性变更走 /open/v2 新版本；若确属误报/人工裁定接受，"
+                            + "先删除基线文件再跑再生成（= 显式承认这次重置），并把裁定记录进 PR",
+                            String.join("\n", violations))
+                    .isEmpty();
+        }
+
         Files.createDirectories(BASELINE.getParent());
         Files.writeString(BASELINE, JSON.writerWithDefaultPrettyPrinter()
-                .writeValueAsString(normalized) + "\n", StandardCharsets.UTF_8);
+                .writeValueAsString(live) + "\n", StandardCharsets.UTF_8);
         System.out.println("openapi 基线已再生成：" + BASELINE.toAbsolutePath()
-                + "（paths=" + normalized.path("paths").size() + "）——请 git diff 审查后提交");
+                + "（paths=" + live.path("paths").size() + "）——请 git diff 审查后提交");
     }
 
     // ------------------------------------------------------------------
