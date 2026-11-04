@@ -28,7 +28,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       的 @PreAuthorize：无角色用户 403；</li>
  *   <li><b>分页边界不炸</b>：page 超界返回空 rows 而非报错；page&lt;1 / size&gt;100 拒绝；</li>
  *   <li><b>静态资源可服务</b>：GET /console/ 返回 HTML 且其引用的 js 真实存在——
- *       防"index.html 在、构建产物丢"的假绿（Vite 与降级静态版同判据）。</li>
+ *       防"index.html 在、构建产物丢"的假绿（Vite 与降级静态版同判据）；</li>
+ *   <li><b>会话 Cookie 属性</b>（审查 Ma1）：登录下发的 SESSION 带 SameSite=Lax——
+ *       /api 也认会话（ambient Cookie），跨站携带必须挡。</li>
  * </ol>
  *
  * <p>数据纪律（共享库基座）：模板走真实 API 建（旧令牌 + template:write），
@@ -213,6 +215,36 @@ class ConsoleTemplateListIntegrationTest extends ShardedIntegrationTestSupport {
         ResponseEntity<String> bigSize = getWithSession("/api/templates?page=1&size=101", session);
         assertThat(bigSize.getStatusCode().value()).isEqualTo(400);
         assertThat(JSON.readTree(bigSize.getBody()).path("code").asInt()).isEqualTo(1000);
+    }
+
+    // ------------------------------------------------------------------
+    // ④' 会话 Cookie 属性（审查 Ma1）：SESSION 是 ambient 凭证且 /api 也认它，
+    //    跨站携带必须被 SameSite=Lax 挡住（CSRF 令牌只护 /console/api/**）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("④' 登录下发的 SESSION Cookie 带 SameSite=Lax（/api 会话凭证的跨站防线）")
+    void loginSessionCookie_sameSiteLax() {
+        String csrf = fetchCsrfToken();
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("X-CSRF-TOKEN", csrf);
+        headers.set(HttpHeaders.COOKIE, "XSRF-TOKEN=" + csrf);
+        ResponseEntity<String> resp = rest.exchange(
+                "/console/api/auth/login", HttpMethod.POST,
+                new HttpEntity<>("{\"username\":\"admin\",\"password\":\"" + SEED_ADMIN_PASSWORD + "\"}",
+                        headers),
+                String.class);
+        assertThat(resp.getStatusCode().value()).isEqualTo(200);
+        List<String> setCookies = resp.getHeaders().get(HttpHeaders.SET_COOKIE);
+        assertThat(setCookies).as("登录应下发会话 Cookie").isNotNull();
+        String sessionCookie = setCookies.stream()
+                .filter(c -> c.startsWith("SESSION="))
+                .findFirst().orElseThrow();
+        assertThat(sessionCookie)
+                .as("SameSite=Lax 是 /api 会话凭证的跨站防线（跨站 POST 不带 Cookie），"
+                        + "缺了它 /api 的无 JSON 体端点可被跨站表单打。cookie=" + sessionCookie)
+                .contains("SameSite=Lax");
     }
 
     // ------------------------------------------------------------------

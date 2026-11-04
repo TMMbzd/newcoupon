@@ -6,6 +6,8 @@ import org.springframework.session.Session;
 import org.springframework.session.data.redis.RedisIndexedSessionRepository;
 import org.springframework.session.data.redis.config.annotation.web.http.EnableRedisIndexedHttpSession;
 import org.springframework.session.security.SpringSessionBackedSessionRegistry;
+import org.springframework.session.web.http.CookieSerializer;
+import org.springframework.session.web.http.DefaultCookieSerializer;
 
 /**
  * 管理面会话装配（V6 2A）：Redis 会话 + 按用户名索引。
@@ -34,5 +36,28 @@ public class SessionConfig {
     public SpringSessionBackedSessionRegistry<? extends Session> sessionRegistry(
             RedisIndexedSessionRepository sessionRepository) {
         return new SpringSessionBackedSessionRegistry<>(sessionRepository);
+    }
+
+    /**
+     * SESSION Cookie 显式 SameSite=Lax（V6 2D 审查 Ma1）。
+     *
+     * <p><b>为什么必须显式设</b>：LegacyAdminTokenAuthenticationFilter 对 /api/** 同样
+     * 接受控制台会话——SESSION 是 ambient Cookie 凭证（浏览器自动带），而 CSRF 校验只
+     * 覆盖 /console/api/**（见 SecurityConfig 的 csrf 装配），于是"/api 机器面不设 CSRF"
+     * 的旧注释在会话凭证面前不成立：攻击页可以让浏览器跨站 POST /api 的端点
+     * （如 /api/audit/verify 的同步全表重算）。SameSite=Lax 正好补这条缝——
+     * 跨站 POST/PUT/DELETE 不携带 Cookie，同站导航（点链接进来）照常携带，
+     * 控制台正常使用（同源 fetch）不受影响。X-Admin-Token 是请求头凭证、非 ambient，
+     * 无 CSRF 面，不需要这层防线。
+     *
+     * <p><b>为什么不设 Secure</b>：secure 跟随请求协议（本地产能 http 调试）；
+     * 生产在 TLS 终结点后面部署时由运维按需加（改动此处并回归登录链）。
+     */
+    @Bean
+    public CookieSerializer cookieSerializer() {
+        DefaultCookieSerializer serializer = new DefaultCookieSerializer();
+        serializer.setCookieName("SESSION");
+        serializer.setSameSite("Lax");
+        return serializer;
     }
 }

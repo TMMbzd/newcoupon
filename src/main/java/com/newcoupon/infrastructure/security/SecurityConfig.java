@@ -148,7 +148,12 @@ public class SecurityConfig {
                 // /api 业务调用全程不碰 session，不会凭空多出 Redis 会话与 Set-Cookie
                 .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
                 // CSRF：Cookie 仓（SPA 可读）+ 自定义头回传；**只保护 /console/api/** 的不安全方法**。
-                // /api 机器面不设 CSRF——那里的写操作凭 X-Admin-Token（非 ambient 凭据，无 CSRF 面）。
+                // /api 不设 CSRF 令牌——但注意（2D 审查 Ma1 修正）：这不等于 /api 没有 CSRF 面，
+                // 因为 LegacyAdminTokenAuthenticationFilter 对 /api/** 同样接受**控制台会话**
+                // （SESSION 是 ambient Cookie）。分层防线：/console/api/** 的写靠 CSRF 令牌；
+                // 会话凭证本身的跨站携带由 SESSION Cookie 的 SameSite=Lax 挡（SessionConfig
+                // 的 CookieSerializer——跨站 POST 不带 Cookie，/api 那些无 JSON 体的端点
+                // 如 audit/verify 攻不进来）；纯 X-Admin-Token 调用方非 ambient，本就无 CSRF 面。
                 .csrf(csrf -> csrf
                         .csrfTokenRepository(csrfCookieRepository())
                         .csrfTokenRequestHandler(spaCsrfRequestHandler())
