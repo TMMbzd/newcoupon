@@ -20,7 +20,11 @@ public final class TemplateQueryDtos {
     public record TemplatePage(long total, int page, int size, List<TemplateListItem> rows) {
     }
 
-    /** 表格一行：id/名称/券类型/面额/状态/总量/已领/创建时间。 */
+    /**
+     * 表格一行：id/名称/券类型/面额/状态/总量/已领/创建时间。
+     * issuedCount 是**分片真实口径** Σcoupon_stock_shard.used（审查 Ma2）——
+     * coupon_template.issued_count 是 V10 冻结快照、C1 下恒 0，不能当"已领"展示。
+     */
     public record TemplateListItem(
             Long id,
             String name,

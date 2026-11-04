@@ -80,6 +80,19 @@ public interface CouponStockShardMapper extends BaseMapper<CouponStockShardPO> {
     @Select("SELECT COALESCE(SUM(used), 0) FROM coupon_stock_shard WHERE template_id = #{templateId}")
     long sumUsed(@Param("templateId") long templateId);
 
+    /**
+     * 批量全局合计（V6 2D 控制台列表）：一次 IN 聚合取一批模板各自的 Σused（全版本）。
+     * 控制台列表页"已领"列用真实口径（coupon_template.issued_count 是 V10 冻结快照，
+     * C1 下恒 0——ADR-0018 §3.1）。一条 IN 聚合而不是逐行 SUM：size 上限 100 →
+     * IN 集合 ≤ 100，主键索引 (template_id, ...) 走 100 次范围扫，没有 N+1。
+     * 返回的 PO 只填 templateId + used 两列。
+     */
+    @Select("<script>SELECT template_id AS templateId, SUM(used) AS used "
+            + "FROM coupon_stock_shard WHERE template_id IN "
+            + "<foreach collection='templateIds' item='id' open='(' separator=',' close=')'>#{id}</foreach> "
+            + "GROUP BY template_id</script>")
+    List<CouponStockShardPO> sumUsedBatch(@Param("templateIds") java.util.Collection<Long> templateIds);
+
     @Select("SELECT COALESCE(SUM(quota), 0) FROM coupon_stock_shard "
             + "WHERE template_id = #{templateId} AND layout_version = #{layoutVersion}")
     long sumQuotaVersion(@Param("templateId") long templateId,

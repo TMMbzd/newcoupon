@@ -63,6 +63,12 @@ class ConsoleTemplateListIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired
     private org.springframework.security.crypto.password.PasswordEncoder passwordEncoder;
 
+    @Autowired
+    private com.newcoupon.application.service.TemplateAppService templateAppService;
+
+    @Autowired
+    private com.newcoupon.application.service.ReceiveAppService receiveAppService;
+
     // ------------------------------------------------------------------
     // HTTP 小工具：与 SecurityRbacIntegrationTest 同款（手工管 Cookie，
     // 每一步带什么凭据写清楚——这正是本类要钉的语义）
@@ -108,6 +114,16 @@ class ConsoleTemplateListIntegrationTest extends ShardedIntegrationTestSupport {
         return rest.exchange(path, HttpMethod.GET, new HttpEntity<>(headers), String.class);
     }
 
+    /** 从 rows 里按 id 找行（测试造的两张必在第一页）。 */
+    private static JsonNode findRow(JsonNode rows, long id) {
+        for (JsonNode row : rows) {
+            if (row.path("id").asLong() == id) {
+                return row;
+            }
+        }
+        throw new AssertionError("rows 里没有 id=" + id);
+    }
+
     /** 走真实链路建一张模板（旧令牌 dev-admin-token，dev profile 便利值），返回自增 id。 */
     private long createTemplateViaApi(String name) throws Exception {
         HttpHeaders headers = new HttpHeaders();
@@ -141,10 +157,17 @@ class ConsoleTemplateListIntegrationTest extends ShardedIntegrationTestSupport {
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("② 登录后 GET 列表 200：total/rows 形状对、id 倒序；无角色用户 403")
+    @DisplayName("② 登录后 GET 列表 200：total/rows 形状对、id 倒序、已领=分片真实口径；无角色 403")
     void loggedIn_listShapeOk() throws Exception {
         long idA = createTemplateViaApi("2D控制台列表A-" + UUID.randomUUID().toString().substring(0, 8));
         long idB = createTemplateViaApi("2D控制台列表B-" + UUID.randomUUID().toString().substring(0, 8));
+
+        // idA 走完整发券链（建→发布→领一张）：列表"已领"必须是分片真实口径 1
+        // （coupon_template.issued_count 是 V10 冻结快照、C1 下恒 0——ADR-0018 §3.1）
+        templateAppService.publish(idA);
+        long userId = 70_000 + (System.currentTimeMillis() % 10_000);
+        receiveAppService.receive(
+                new com.newcoupon.application.dto.ReceiveRequest("2d-list-" + userId, userId, idA));
 
         String session = login("admin", SEED_ADMIN_PASSWORD);
         ResponseEntity<String> resp =
@@ -162,18 +185,23 @@ class ConsoleTemplateListIntegrationTest extends ShardedIntegrationTestSupport {
         JsonNode rows = data.path("rows");
         assertThat(rows.isArray()).isTrue();
         // 首页按 id 倒序：刚造的两张（全库最大 id）必须出现在第一页，且大 id 在前
-        long firstId = rows.get(0).path("id").asLong();
-        assertThat(firstId).isEqualTo(Math.max(idA, idB));
-        JsonNode second = rows.get(1);
-        assertThat(second.path("id").asLong()).isEqualTo(Math.min(idA, idB));
+        assertThat(rows.get(0).path("id").asLong()).isEqualTo(Math.max(idA, idB));
+        JsonNode untouched = findRow(rows, Math.max(idA, idB));   // 未动过的那张（造后没发布）
+        JsonNode issued = findRow(rows, Math.min(idA, idB));      // 发了一张的那张（idA 先建 id 更小）
         // 行形状：控制台表格的八列逐一非空（createTime 由 DB 生成、列表 SQL 显式带出）
-        assertThat(second.path("name").asText()).startsWith("2D控制台列表");
-        assertThat(second.path("couponType").asText()).isEqualTo("满减");
-        assertThat(second.path("faceValue").asLong()).isEqualTo(100);
-        assertThat(second.path("publishStatus").asText()).isEqualTo("未发布");
-        assertThat(second.path("totalCount").asLong()).isEqualTo(10);
-        assertThat(second.path("issuedCount").asLong()).isZero();
-        assertThat(second.path("createTime").isTextual()).isTrue();
+        assertThat(untouched.path("name").asText()).startsWith("2D控制台列表");
+        assertThat(untouched.path("couponType").asText()).isEqualTo("满减");
+        assertThat(untouched.path("faceValue").asLong()).isEqualTo(100);
+        assertThat(untouched.path("publishStatus").asText()).isEqualTo("未发布");
+        assertThat(untouched.path("totalCount").asLong()).isEqualTo(10);
+        assertThat(untouched.path("issuedCount").asLong()).isZero();
+        assertThat(untouched.path("createTime").isTextual()).isTrue();
+        // idA：发了一张 → 已领=1（真实口径 SUM(coupon_stock_shard.used)；冻结列会给 0——
+        // 这条断言在改口径前就是红的，先红后绿的取证点）
+        assertThat(issued.path("publishStatus").asText()).isEqualTo("已发布");
+        assertThat(issued.path("issuedCount").asLong())
+                .as("已领列=分片真实口径（发过 1 张），不是 V10 冻结快照列")
+                .isEqualTo(1);
 
         // template:read 在 @PreAuthorize 上真实生效：无角色用户有会话也 403
         com.newcoupon.infrastructure.persistence.po.AdminUserPO noRole = new com.newcoupon.infrastructure.persistence.po.AdminUserPO();

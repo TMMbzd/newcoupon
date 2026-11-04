@@ -4,7 +4,7 @@ import { api, csrfHeader, AdminProfile, TemplatePage } from './api';
 const PAGE_SIZE = 20;
 
 // 模板列表页：GET /api/templates（会话 Cookie 自动带）+ 上一页/下一页 + 登出。
-// "已领"列直接来自 coupon_template.issued_count（最省口径，无聚合查询）。
+// "已领"列是后端聚合好的分片真实口径 Σcoupon_stock_shard.used（issued_count 冻结列在 C1 下恒 0）。
 export function ListView({ user, onLogout }: {
   user: AdminProfile;
   onLogout: () => void;
