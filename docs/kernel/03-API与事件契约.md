@@ -578,7 +578,7 @@ X-Client-Token: refund-20261018-001
 | 锁/核销/释放 | ✅ 含结算主体行级归属；锁券绑定快照、核销按冻结价、`CONFIRM_EXCEPTION` 人工解除 | 商家/门店/地区主体 |
 | 退款 | ✅ 整单/按行；明细复制原主体；租户级政策 | 按主体退款查询的开放面（内部面已有） |
 | 查券包 | ✅ 券包；✅ 内部面退款/账单查询（POST+管理令牌） | 开放面租户自助查询 |
-| 日账单/主体汇总 | ✅ 模板日账单 + 主体日账单 + 内部查询 API | 导出/结算单/结算时点 |
+| 日账单/主体汇总 | ✅ 模板日账单 + 主体日账单 + 内部查询 API；可结算口径（V47：`settle_eligible` 质量排除行两张账单都不进）+ hold/payable（应付=净额-ACTIVE hold，负数如实展示）+ 冻结挂点 `POST /api/settlement/holds`（settlement:read/write） | 导出/结算单/结算时点（3B 批次/结算单、门店/BU 维度已裁剪——runbook 结算最小版） |
 | 事件 | ◐ 内部事件；ISSUED 带 `app_id/activity_id/source/biz_type/biz_id`（V43 接线，SYNC/ASYNC/GRANT/CODE 四源归因）；发件箱仅 ISSUED，默认 log 传输 | 全事件投递、对外 Webhook、至少一次、死信 |
 | 沙箱/契约测试 | ❌ | ✅ |
 | `/api` 多租户隔离 | ❌ | 平台运营面或补内部租户身份 |
