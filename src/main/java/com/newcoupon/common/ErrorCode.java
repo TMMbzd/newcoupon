@@ -29,6 +29,13 @@ public enum ErrorCode {
     // ---- 1xxx 参数与通用 ----
     PARAM_ERROR(1000, "参数错误"),
     REQUEST_DUPLICATED(1001, "重复请求（幂等命中，按成功处理）"),
+    /**
+     * 路径不存在（V6 2C 清偿 L80）：无 handler 的路径/静态资源（Spring 6.1 的
+     * {@code NoResourceFoundException}）配 HTTP 404。归 1xxx 通用段——它不属于任何
+     * 业务域；域内"资源不存在"仍用各自专码（2001 模板/3005 任务/4008 退款单……），
+     * 那些是"业务知道这个东西但找不到"，1002 是"连路由都没有"。
+     */
+    RESOURCE_NOT_FOUND(1002, "资源不存在"),
 
     // ---- 2xxx 模板域 ----
     TEMPLATE_NOT_FOUND(2001, "券模板不存在"),

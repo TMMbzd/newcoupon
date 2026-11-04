@@ -101,6 +101,23 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 路径不存在（V6 2C 清偿 L80）：Spring 6.1 起未匹配路径抛 NoResourceFoundException，
+     * 此前被下面的兜底 handler 收敛成 HTTP 200 + 5000——404 语义丢失，每次探测请求
+     * 还刷一条 ERROR 假告警（告警系统对 ERROR 响铃，路径探测是常态噪音）。
+     *
+     * <p>WARN 而非 ERROR：与 405 同一立场——"请求打错了地方"是调用方的常态，
+     * 不是系统事故。响应给真实 404 + Result 形状（1002）。
+     */
+    @ExceptionHandler(org.springframework.web.servlet.resource.NoResourceFoundException.class)
+    public Result<Void> handleNoResourceFound(
+            org.springframework.web.servlet.resource.NoResourceFoundException e,
+            jakarta.servlet.http.HttpServletResponse response) {
+        log.warn("not found: {}", e.getResourcePath());
+        response.setStatus(404);
+        return Result.fail(ErrorCode.RESOURCE_NOT_FOUND, "路径不存在: " + e.getResourcePath());
+    }
+
+    /**
      * HTTP 方法不支持：例如对只允许 POST 的财务查询发 GET。
      * 不落到兜底 5000——那是"系统异常"，会误导排障；405 才是准确的。
      */

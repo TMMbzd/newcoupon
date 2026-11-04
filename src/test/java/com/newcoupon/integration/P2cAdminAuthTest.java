@@ -87,6 +87,32 @@ class P2cAdminAuthTest extends ShardedIntegrationTestSupport {
                 .isNotEqualTo(401);
     }
 
+    @Test
+    @DisplayName("L80：不存在的路径 → 真 404 + 1002（不再被兜底收敛成 200+5000 假系统错）")
+    void unknownPath_returnsReal404() {
+        // 管理面：带令牌过了认证过滤器、到 DispatcherServlet 才发现没有 handler——
+        // 修复前（L80 债）：NoResourceFoundException 被 @ExceptionHandler(Exception) 兜底
+        // 收敛成 HTTP 200 + 5000，每次探测还刷一条 ERROR 假告警
+        HttpHeaders withToken = new HttpHeaders();
+        withToken.set("X-Admin-Token", "test-admin-token");
+        ResponseEntity<String> managed = rest.exchange("/api/nonexistent-path", HttpMethod.GET,
+                new HttpEntity<>(withToken), String.class);
+        assertThat(managed.getStatusCode().value()).as("管理面未知路径应 404: " + managed.getBody()).isEqualTo(404);
+        assertThat(managed.getBody()).contains("\"code\":1002");
+
+        // 兜底链上的任意未知路径（匿名也有同样语义——404 不是秘密，路径本来就不存在）
+        ResponseEntity<String> anonymous = rest.getForEntity("/no-such-thing", String.class);
+        assertThat(anonymous.getStatusCode().value()).isEqualTo(404);
+        assertThat(anonymous.getBody()).contains("\"code\":1002");
+
+        // 开放面相反：未验签的请求在 HMAC 过滤器就 401（6001），到不了 DispatcherServlet——
+        // 对匿名探测者，"路径不存在"与"没权限"不可区分（不向探测者播报路由表），
+        // 404 语义只对**已验签**的开放面调用方存在（带签名的未知路径才走 1002）
+        ResponseEntity<String> openFace = rest.getForEntity("/open/v1/no-such-api", String.class);
+        assertThat(openFace.getStatusCode().value()).isEqualTo(401);
+        assertThat(openFace.getBody()).contains("6001");
+    }
+
     private ResponseEntity<String> postCreate(String token) {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);

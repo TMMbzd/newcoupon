@@ -518,22 +518,30 @@ class OpenApiContractIntegrationTest extends ShardedIntegrationTestSupport {
         // springdoc.enable-default-api-docs: false 关闭，本用例钉住这张脸不复活。
         // /api/api-docs/swagger-config（UI 的分组索引）随 swagger-ui.enabled=false 一并消失。
         //
-        // 断言口径：本应用对"不存在的路径"的可观测响应不是 404，而是 HTTP 200 + Result(5000)
-        // ——Spring 6.1 起未匹配路径抛 NoResourceFoundException，被 GlobalExceptionHandler 的
-        // 兜底 @ExceptionHandler(Exception) 收敛成 5000（既有全站行为，不在本刀改）。所以这里的
-        // 判据是"响应不是 OpenAPI 文档"：端点若复活，body 会以 {"openapi":...} 开头。
-        // （swagger-config 的另一个坑：路径恰好落进分组模式 /{group:.+}，group="swagger-config"
-        // 不存在 → springdoc 抛 OpenApiResourceNotFoundException → 同样被兜底收敛成 5000。）
-        for (String path : List.of("/api/api-docs", "/api/api-docs.yaml", "/api/api-docs/swagger-config")) {
+        // 断言口径（V6 2C 清偿 L80 后）：关掉的端点=没有 handler 的路径 → 真 404 + Result(1002)
+        // ——Spring 6.1 抛 NoResourceFoundException，GlobalExceptionHandler 有显式 handler 出 404。
+        // （2B-2 时代的旧判据是 200+5000 兜底收敛，L80 修复后同步翻面。）
+        // swagger-config 的另一个坑：路径恰好落进分组模式 /{group:.+}，group="swagger-config"
+        // 不存在 → springdoc 抛 OpenApiResourceNotFoundException（不是 NoResourceFound），
+        // 仍走兜底 handler → 维持 200+5000 的既有收敛。
+        for (String path : List.of("/api/api-docs", "/api/api-docs.yaml")) {
             HttpResponse<String> r = rawGet(path, ADMIN_TOKEN);
-            assertThat(r.statusCode()).as(path + " 的状态码").isEqualTo(200);
+            assertThat(r.statusCode()).as(path + " 的状态码").isEqualTo(404);
             assertThat(r.body())
-                    .as(path + " 不得返回 OpenAPI 文档（默认组未过滤全量 spec/UI 配置端点都是多余暴露面），"
+                    .as(path + " 不得返回 OpenAPI 文档，且应是 404 语义（code=1002），"
                             + "实际 body 前 200 字=" + r.body().substring(0, Math.min(200, r.body().length())))
                     .doesNotContain("\"openapi\"")
                     .doesNotContain("\"paths\"")
-                    .contains("\"code\":5000");
+                    .contains("\"code\":1002");
         }
+        HttpResponse<String> swaggerConfig = rawGet("/api/api-docs/swagger-config", ADMIN_TOKEN);
+        assertThat(swaggerConfig.statusCode()).as("swagger-config 落进分组模式，springdoc 抛业务异常").isEqualTo(200);
+        assertThat(swaggerConfig.body())
+                .as("分组不存在被兜底收敛为 5000，且绝不是 OpenAPI/UI 配置文档")
+                .doesNotContain("\"openapi\"")
+                .doesNotContain("\"paths\"")
+                .doesNotContain("swagger-config")
+                .contains("\"code\":5000");
         // 分组端点本身仍在（上一用例的正例），关默认组不能误伤 open-v1
         assertThat(rawGet("/api/api-docs/open-v1", ADMIN_TOKEN).statusCode()).isEqualTo(200);
     }
