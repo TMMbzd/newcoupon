@@ -36,6 +36,36 @@ class AuditLogIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired
     private AuditLogMapper auditLogMapper;
 
+    /** T3 的篡改对象与原值（M4）：库跨类共享，篡改行不还原会把后面所有 verify 用例卡在假断点上。 */
+    private Long tamperedRowId;
+    private String tamperedOriginalAction;
+
+    /**
+     * 还原 T3 的篡改行（M4，实测复现：不还原时 AuditQueryIntegrationTest 的 verify
+     * 用例断点定位全部错位、三类联跑必红）。还原=改回原 action + 按当前内容重算
+     * record_hash——内容复原后重算值与原存储哈希本就一致，重算是防御性的：
+     * 将来有更狠的篡改用例（连哈希一起改）时同一套还原仍然自洽。
+     */
+    @org.junit.jupiter.api.AfterEach
+    void restoreTamperedRow() {
+        if (tamperedRowId == null) {
+            return;
+        }
+        auditLogMapper.update(null,
+                new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<AuditLogPO>()
+                        .eq(AuditLogPO::getId, tamperedRowId)
+                        .set(AuditLogPO::getAction, tamperedOriginalAction));
+        AuditLogPO restored = auditLogMapper.selectById(tamperedRowId);
+        if (restored != null) {
+            auditLogMapper.update(null,
+                    new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<AuditLogPO>()
+                            .eq(AuditLogPO::getId, tamperedRowId)
+                            .set(AuditLogPO::getRecordHash, AuditService.computeHash(restored)));
+        }
+        tamperedRowId = null;
+        tamperedOriginalAction = null;
+    }
+
     @org.springframework.test.context.DynamicPropertySource
     static void shardingProperties(org.springframework.test.context.DynamicPropertyRegistry registry) {
         registry.add("coupon.sharding.url", () -> MYSQL.getJdbcUrl()
@@ -142,13 +172,15 @@ class AuditLogIntegrationTest extends ShardedIntegrationTestSupport {
 
     @Test
     @Order(3)
-    @DisplayName("T3: 篡改一条审计记录的内容 → 重算哈希与存储值不匹配（篡改可检出）")
+    @DisplayName("T3: 篡改一条审计记录的内容 → 重算哈希与存储值不匹配（篡改可检出；@AfterEach 还原）")
     void t3_tamperingDetected() throws Exception {
         produceAuditRecord("T3");
         List<AuditLogPO> records = waitForAuditRecordsByAction("TEST_T3");
         assertThat(records).as("本测试写过一条 TEST_T3 记录").isNotEmpty();
 
         AuditLogPO victim = records.get(records.size() - 1);
+        tamperedRowId = victim.getId();          // @AfterEach 依据（M4：篡改行必须还原）
+        tamperedOriginalAction = victim.getAction();
 
         // 直接改库（模拟攻击者改 action 字段）
         auditLogMapper.update(null,
