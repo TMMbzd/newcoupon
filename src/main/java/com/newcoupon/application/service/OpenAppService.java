@@ -49,6 +49,8 @@ public class OpenAppService {
     private final OpenAppRepository repository;
     private final SecretCipher cipher;
     private final CachedOpenAppReader authReader;
+    /** 管理面写动作审计（V6 2C 审查 M3）：创建/启停/轮换此前零留痕——rotate 连专表都没有 */
+    private final com.newcoupon.infrastructure.audit.AdminActionAuditor adminAudit;
 
     /** 轮换期长度（默认 7 天）：新密钥生效后，旧密钥还能用多久 */
     private final Duration rotationWindow;
@@ -57,11 +59,13 @@ public class OpenAppService {
                           SecretCipher cipher,
                           CachedOpenAppReader authReader,
                           org.springframework.context.ApplicationEventPublisher eventPublisher,
+                          com.newcoupon.infrastructure.audit.AdminActionAuditor adminAudit,
                           @Value("${coupon.open.secret-rotation-hours:168}") long rotationHours) {
         this.repository = repository;
         this.cipher = cipher;
         this.authReader = authReader;
         this.eventPublisher = eventPublisher;
+        this.adminAudit = adminAudit;
         this.rotationWindow = Duration.ofHours(rotationHours);
     }
 
@@ -118,6 +122,9 @@ public class OpenAppService {
         eventPublisher.publishEvent(new com.newcoupon.infrastructure.ratelimit.TenantQuotaChangedEvent(
                 "新建接入方：" + appId));
 
+        // 开门动作必须留痕"是谁开的门"（M3）：审计异步写不参与本事务
+        adminAudit.record("APP_CREATE", "OPEN_APP", appId,
+                java.util.Map.of("appName", appName, "environment", environment));
         return new AppWithSecret(appId, appName, secret, OpenApp.STATUS_ENABLED, qpsLimit, dailyQuota,
                 environment, initialLifecycle.name());
     }
@@ -173,6 +180,10 @@ public class OpenAppService {
         // 同理：停用后它的配额规则也该消失（模板的 mapper 里会跳过停用租户）
         eventPublisher.publishEvent(new com.newcoupon.infrastructure.ratelimit.TenantQuotaChangedEvent(
                 "接入方状态变更：" + appId + " → " + status));
+
+        // 启停是"掐断/恢复一个租户全部调用"的治理动作（M3）：留痕谁干的
+        adminAudit.record("APP_SET_STATUS", "OPEN_APP", appId,
+                java.util.Map.of("status", status));
     }
 
     /** 密钥轮换：签发新 SK，旧 SK 进入轮换期（默认 7 天）。返回**新 SK 明文（只此一次）** */
@@ -199,6 +210,11 @@ public class OpenAppService {
         // 轮换后缓存里还是旧密钥集合：本实例立刻失效；跨实例广播等提交后
         authReader.invalidateAfterCommit(appId);
 
+        // 密钥轮换是高危动作且**没有任何专表**留痕（lifecycle 事件表只记状态机迁移，
+        // 轮换不是迁移）——audit_log 是它唯一的"谁在何时轮过谁的钥匙"（M3）
+        adminAudit.record("APP_ROTATE_SECRET", "OPEN_APP", appId,
+                java.util.Map.of("oldKeyExpireAt",
+                        expireAt.toString()));
         return new AppWithSecret(app.appId(), app.appName(), secret,
                 app.status(), app.qpsLimit(), app.dailyQuota(),
                 app.environment(), app.lifecycle() == null ? null : app.lifecycle().name());

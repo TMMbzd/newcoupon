@@ -34,13 +34,17 @@ public class ActivityAppService {
     private final CouponActivityMapper activityMapper;
     private final CachedActivityReader activityReader;
     private final SnowflakeIdGenerator idGenerator;
+    /** 管理面写动作审计（V6 2C 审查 M3）：/api 侧建活动此前零留痕 */
+    private final com.newcoupon.infrastructure.audit.AdminActionAuditor adminAudit;
 
     public ActivityAppService(CouponActivityMapper activityMapper,
                               CachedActivityReader activityReader,
-                              SnowflakeIdGenerator idGenerator) {
+                              SnowflakeIdGenerator idGenerator,
+                              com.newcoupon.infrastructure.audit.AdminActionAuditor adminAudit) {
         this.activityMapper = activityMapper;
         this.activityReader = activityReader;
         this.idGenerator = idGenerator;
+        this.adminAudit = adminAudit;
     }
 
     /** 创建活动：服务端生成 activityCode（对外暴露它而非自增 id），归属取当前调用方。 */
@@ -70,6 +74,11 @@ public class ActivityAppService {
         activityReader.invalidate(po.getId());
         log.info("activity created: id={}, code={}, budgetAmount={}, budgetEnabled={}, appId={}",
                 po.getId(), activityCode, po.getBudgetAmount(), po.getBudgetEnabled(), po.getAppId());
+        // 预算挂活动（M3）：/api 管理面创建时留痕（开放面建活动由 open_api_audit 覆盖）
+        adminAudit.record("ACTIVITY_CREATE", "ACTIVITY", String.valueOf(po.getId()),
+                java.util.Map.of("activityCode", activityCode,
+                        "budgetEnabled", po.getBudgetEnabled(),
+                        "appId", String.valueOf(po.getAppId())));
         return ActivityResponse.from(po);
     }
 

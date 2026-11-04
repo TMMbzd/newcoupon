@@ -50,10 +50,13 @@ public class StockShardAdjustService {
     private final StringRedisTemplate redis;
     private final RedisIssueGate issueGate;
     private final ObjectMapper objectMapper;
+    /** 管理面写动作审计（V6 2C 审查 M3）：/api 侧调整库存=铸造/回收额度，动钱面 */
+    private final com.newcoupon.infrastructure.audit.AdminActionAuditor adminAudit;
 
     public StockShardAdjustService(TemplateMapper templateMapper,
                                    CouponStockShardMapper shardMapper,
                                    CouponStockAdjustLogMapper logMapper,
+                                   com.newcoupon.infrastructure.audit.AdminActionAuditor adminAudit,
                                    CachedTemplateReader cachedTemplateReader,
                                    StringRedisTemplate redis,
                                    RedisIssueGate issueGate,
@@ -65,6 +68,7 @@ public class StockShardAdjustService {
         this.redis = redis;
         this.issueGate = issueGate;
         this.objectMapper = objectMapper;
+        this.adminAudit = adminAudit;
     }
 
     @Transactional
@@ -155,6 +159,10 @@ public class StockShardAdjustService {
         afterCommit(templateId);
         log.info("C1 stock adjusted: templateId={}, layoutVersion={}, total={}->{}, used={}, requestId={}",
                 templateId, layoutVersion, current, target, sumUsed, req.requestId());
+        // 库存调整=铸造/回收发放额度（M3）：管理面发起时留痕（开放面由 open_api_audit 覆盖；
+        // 技术明细在 coupon_stock_adjust_log 专表，这里记"谁"）
+        adminAudit.record("TEMPLATE_STOCK_ADJUST", "TEMPLATE", String.valueOf(templateId),
+                java.util.Map.of("totalFrom", current, "totalTo", target));
         return new StockAdjustResult(templateId, target, sumUsed, false);
     }
 

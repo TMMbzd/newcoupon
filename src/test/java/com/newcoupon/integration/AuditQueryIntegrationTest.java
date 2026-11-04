@@ -466,10 +466,31 @@ class AuditQueryIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     // ------------------------------------------------------------------
-    // 每日巡检任务（AuditChainVerifyJob）
+    // 管理面写动作留痕（M3）
     // ------------------------------------------------------------------
 
     @Test
+    @DisplayName("管理面写动作留痕（M3）：注册接入方 → APP_CREATE 进 audit_log（rotate 此前连专表都没有）")
+    void adminWriteAction_audited() throws Exception {
+        String appId = "it-m3-app-" + UUID.randomUUID().toString().substring(0, 8);
+        JsonNode created = post("/api/apps", "{\"appId\":\"" + appId + "\",\"appName\":\"M3 审计验签应用\"}");
+        assertThat(created.path("code").asInt()).as("注册接入方应成功: " + created).isEqualTo(0);
+
+        List<AuditLogPO> rows = waitFor("APP_CREATE", 1);
+        AuditLogPO row = rows.stream()
+                .filter(r -> appId.equals(r.getResourceId()))
+                .findFirst().orElse(null);
+        assertThat(row).as("APP_CREATE 审计行（resourceId=appId）必须出现").isNotNull();
+        assertThat(row.getResourceType()).isEqualTo("OPEN_APP");
+        // 旧管理令牌（本用例的凭据）是共享机器凭据 → actor=SYSTEM；动作照记（M3 闸门裁定），
+        // 个人身份由控制台会话面（actor=ADMIN+userId）补齐
+        assertThat(row.getActorType()).isEqualTo("SYSTEM");
+        assertThat(row.getAfterSnapshot()).contains("M3 审计验签应用");
+    }
+
+    // ------------------------------------------------------------------
+    // 每日巡检任务（AuditChainVerifyJob）
+    // ------------------------------------------------------------------    @Test
     @DisplayName("巡检任务：健康轮 true；断链轮 false + 断链/轮次/活性指标（M2）；还原后恢复 true")
     void chainVerifyJob_reportsBrokenWithMetric() throws Exception {
         String marker = writeAuditRow("IT2C-JOB-" + UUID.randomUUID(), "{\"j\":1}");

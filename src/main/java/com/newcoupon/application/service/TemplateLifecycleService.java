@@ -37,17 +37,21 @@ public class TemplateLifecycleService {
     private final CachedTemplateReader cachedTemplateReader;
     private final StringRedisTemplate redis;
     private final RedisIssueGate issueGate;
+    /** 管理面写动作审计（V6 2C 审查 M3）：/api 侧冻结/解冻/下线/重上线此前零留痕 */
+    private final com.newcoupon.infrastructure.audit.AdminActionAuditor adminAudit;
 
     public TemplateLifecycleService(TemplateMapper templateMapper,
                                     CouponStockShardMapper shardMapper,
                                     CachedTemplateReader cachedTemplateReader,
                                     StringRedisTemplate redis,
-                                    RedisIssueGate issueGate) {
+                                    RedisIssueGate issueGate,
+                                    com.newcoupon.infrastructure.audit.AdminActionAuditor adminAudit) {
         this.templateMapper = templateMapper;
         this.shardMapper = shardMapper;
         this.cachedTemplateReader = cachedTemplateReader;
         this.redis = redis;
         this.issueGate = issueGate;
+        this.adminAudit = adminAudit;
     }
 
     @Transactional
@@ -57,6 +61,7 @@ public class TemplateLifecycleService {
 
         shardMapper.updateStatusAll(templateId, layoutVersion(t), 1);
         afterCommit(templateId);
+        adminAudit.record("TEMPLATE_FREEZE", "TEMPLATE", String.valueOf(templateId), null);
         log.warn("template frozen: id={}, layoutVersion={}", templateId, layoutVersion(t));
     }
 
@@ -67,6 +72,7 @@ public class TemplateLifecycleService {
 
         shardMapper.updateStatusAll(templateId, layoutVersion(t), 0);
         afterCommit(templateId);
+        adminAudit.record("TEMPLATE_UNFREEZE", "TEMPLATE", String.valueOf(templateId), null);
         log.info("template unfrozen: id={}, layoutVersion={}", templateId, layoutVersion(t));
     }
 
@@ -85,6 +91,7 @@ public class TemplateLifecycleService {
         }
         shardMapper.updateStatusAll(templateId, layoutVersion(t), 1);
         afterCommit(templateId);
+        adminAudit.record("TEMPLATE_OFFLINE", "TEMPLATE", String.valueOf(templateId), null);
         log.warn("template offline: id={}, layoutVersion={}", templateId, layoutVersion(t));
     }
 
@@ -103,6 +110,7 @@ public class TemplateLifecycleService {
         }
         shardMapper.updateStatusAll(templateId, layoutVersion(t), 0);
         afterCommit(templateId);
+        adminAudit.record("TEMPLATE_REONLINE", "TEMPLATE", String.valueOf(templateId), null);
         log.info("template reonline: id={}, layoutVersion={}", templateId, layoutVersion(t));
     }
 

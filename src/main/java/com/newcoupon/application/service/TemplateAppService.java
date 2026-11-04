@@ -43,6 +43,8 @@ public class TemplateAppService {
     private final SettlePartyPolicy settlePartyPolicy;
     private final TemplatePublishTxService templatePublishTxService;
     private final CachedActivityReader cachedActivityReader;
+    /** 管理面写动作审计（V6 2C 审查 M3）：/api 侧发布此前零留痕（开放面由 open_api_audit 覆盖） */
+    private final com.newcoupon.infrastructure.audit.AdminActionAuditor adminAudit;
 
     /** C1 默认分片数；实际 N_eff=min(N,total_count)。字段初始化同时服务无 Spring 的单测。 */
     @Value("${coupon.stock.shard-count:16}")
@@ -61,12 +63,14 @@ public class TemplateAppService {
                               CachedTemplateReader cachedTemplateReader,
                               SettlePartyPolicy settlePartyPolicy,
                               TemplatePublishTxService templatePublishTxService,
-                              CachedActivityReader cachedActivityReader) {
+                              CachedActivityReader cachedActivityReader,
+                              com.newcoupon.infrastructure.audit.AdminActionAuditor adminAudit) {
         this.templateRepository = templateRepository;
         this.cachedTemplateReader = cachedTemplateReader;
         this.settlePartyPolicy = settlePartyPolicy;
         this.templatePublishTxService = templatePublishTxService;
         this.cachedActivityReader = cachedActivityReader;
+        this.adminAudit = adminAudit;
     }
 
     /** 建券：生成业务编码 → 聚合工厂校验 → 落库（通用限领 1~99 自 ADR-0006 开放） */
@@ -147,6 +151,8 @@ public class TemplateAppService {
         // 中间态，领券只能报降级。旧 Redis 开桶链路已废弃。
         templatePublishTxService.publishC1(id);
         cachedTemplateReader.invalidate(id);
+        // 发布=开始烧库存（M3）：管理面发起时留痕（开放面由 open_api_audit 覆盖）
+        adminAudit.record("TEMPLATE_PUBLISH", "TEMPLATE", String.valueOf(id), null);
     }
 
     /** 查询模板详情 */
