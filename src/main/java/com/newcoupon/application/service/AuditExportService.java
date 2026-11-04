@@ -94,7 +94,13 @@ public class AuditExportService {
     public AuditExportJobView create(AuditQueryRequest req) {
         AuditFilter filter = req != null && req.filter() != null ? req.filter()
                 : new AuditFilter(null, null, null, null, null, null, null, null, null);
+        // 时间窗在**受理时**解析成绝对值再落任务行（m1）：默认窗（两个时间都空=最近 1 天）
+        // 若留空到构建时再解析，构建排队跨过零点/小时后窗口就漂了——导出件必须
+        // 与受理时刻的语义一致（"我申请的是那个时段的数据"）
         LocalDateTime[] window = queryService.normalizeWindow(filter);
+        AuditFilter absolute = new AuditFilter(filter.appId(), filter.actorType(), filter.actorId(),
+                filter.action(), filter.resourceType(), filter.resourceId(), filter.resultCode(),
+                window[0], window[1]);
 
         // 惰性清理：过期任务（含崩溃停滞的 PENDING/RUNNING）在每次受理时一并清掉。
         // 无独立调度——导出低频，为删几行养一个定时线程不值（runbook 有登记）。
@@ -105,7 +111,7 @@ public class AuditExportService {
         AuditExportJobPO job = new AuditExportJobPO();
         job.setJobNo("AUDIT-EXP-" + UUID.randomUUID());
         job.setRequestedBy(actor.actorId() == null ? "UNKNOWN" : actor.actorId());
-        job.setFiltersJson(filterToJson(filter));
+        job.setFiltersJson(filterToJson(absolute));
         job.setStatus(AuditExportJobPO.STATUS_PENDING);
         job.setExpiresAt(LocalDateTime.now().plusHours(expireHours));
         jobMapper.insert(job);

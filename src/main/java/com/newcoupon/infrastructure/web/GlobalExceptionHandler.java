@@ -130,15 +130,39 @@ public class GlobalExceptionHandler {
         return Result.fail(ErrorCode.PARAM_ERROR, "不支持的 HTTP 方法: " + e.getMethod());
     }
 
-    /** 参数校验失败：JSR-303 注解校验不通过时，把所有字段错误拼出来一次性返回 */
+    /**
+     * 参数校验失败：JSR-303 注解校验不通过时，把所有字段错误拼出来一次性返回。
+     *
+     * <p><b>HTTP 400（V6 2C 审查 m5 起）</b>：与下方 m4 的两个 handler 同一哲学——
+     * "请求没构造对"是调用方手误，不是系统事故，也不是业务结果。业务码仍是 1000
+     * （按码分支的调用方不受影响），HTTP 层给 400 让网关/监控把客户端错误与业务
+     * 响应分开统计。此前维持 200 是"1~5xxx 老约定"，但该约定的本意是"业务失败
+     * 仍算成功通信"，参数都读不进来不属此列。
+     */
     @ExceptionHandler(MethodArgumentNotValidException.class)
-    public Result<Void> handleValidation(MethodArgumentNotValidException e) {
+    public Result<Void> handleValidation(MethodArgumentNotValidException e,
+            jakarta.servlet.http.HttpServletResponse response) {
         StringBuilder sb = new StringBuilder();
         for (FieldError fe : e.getBindingResult().getFieldErrors()) {
             sb.append(fe.getField()).append(" ").append(fe.getDefaultMessage()).append("; ");
         }
         log.warn("param error: {}", sb);
+        response.setStatus(400);
         return Result.fail(ErrorCode.PARAM_ERROR, sb.toString());
+    }
+
+    /**
+     * 请求体不可读 / 参数类型不匹配（V6 2C 审查 m4）：JSON 解析失败、字符串填进
+     * 数字/时间字段——此前落到兜底 handler 变成 200+5000 加一条 ERROR 假告警，
+     * 与 L80 同病（调用方手误不是系统事故）。
+     */
+    @ExceptionHandler({org.springframework.http.converter.HttpMessageNotReadableException.class,
+            org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class})
+    public Result<Void> handleUnreadableRequest(Exception e,
+            jakarta.servlet.http.HttpServletResponse response) {
+        log.warn("request not readable: {}", e.getMessage());
+        response.setStatus(400);
+        return Result.fail(ErrorCode.PARAM_ERROR, "请求体或参数格式不合法（JSON 解析失败/类型不匹配）");
     }
 
     /** 兜底：预期外错误，ERROR 级别（触发告警），对用户只说"系统繁忙" */

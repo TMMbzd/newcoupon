@@ -1,5 +1,6 @@
 package com.newcoupon.application.dto;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Size;
@@ -43,7 +44,8 @@ public final class AuditDtos {
     public record AuditQueryRequest(
             Long cursor,
             @Min(1) @Max(200) Integer limit,
-            AuditFilter filter) {
+            /** @Valid 级联：没有它，AuditFilter 里的 @Size 在嵌套层全部失效（审查 m5 实测）。 */
+            @Valid AuditFilter filter) {
 
         /** filter 允许整个为空（= 默认窗口内全量翻页）。 */
         public static AuditQueryRequest of(Long cursor, Integer limit, AuditFilter filter) {

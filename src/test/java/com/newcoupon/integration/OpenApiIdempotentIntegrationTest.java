@@ -155,6 +155,26 @@ class OpenApiIdempotentIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(wallet.getBody()).contains("\"code\":0");
     }
 
+    @Test
+    @DisplayName("404 是环境性应答不进幂等快照（m6）：不存在路径同 token 重试不被 24h 钉死")
+    void notFoundResponse_notSnapshotted() {
+        // 场景：滚动发布期间接入方调新端点打到旧实例 → 404+1002。若被缓存 24h，
+        // 发版完成后同 token 重试仍拿 404（重放快照），接入方永远拿不到恢复。
+        String token = "tok-404-env-" + UUID.randomUUID().toString().substring(0, 8);
+        ResponseEntity<String> first = post("/open/v1/no-such-new-endpoint", "{}", token);
+        assertThat(first.getStatusCode().value()).as("未知路径=404（L80 语义）").isEqualTo(404);
+        assertThat(first.getBody()).contains("\"code\":1002");
+
+        // 第二次同 token：不缓存 404 的语义与 5xxx 同款——key 停在 PENDING 标记（60s 自然过期），
+        // 期间重试得到**可重试的 6009**（而不是重放出 404 快照）；60s 后新实例可正常服务。
+        // 修复前：第二次由快照重放，逐字节返回 404+1002 并带 X-Idempotent-Replay 头。
+        ResponseEntity<String> second = post("/open/v1/no-such-new-endpoint", "{}", token);
+        assertThat(second.getStatusCode().value()).as("PENDING 窗口内=409 可重试语义").isEqualTo(409);
+        assertThat(second.getBody()).contains("6009");
+        assertThat(second.getHeaders().getFirst("X-Idempotent-Replay"))
+                .as("绝不重放 404 快照").isNull();
+    }
+
     // ------------------------------------------------------------------
     // 辅助
     // ------------------------------------------------------------------

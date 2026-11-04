@@ -62,8 +62,12 @@ class AuditHashVersionTest {
     @Test
     @DisplayName("hashVersion 为 null 按 v1 口径（防御：历史 PO 无版本字段时的读路径）")
     void nullVersionFallsBackToV1() {
-        String withNull = AuditService.computeHash(po(1, "ADMIN", "7", "s-1"));
-        AuditLogPO explicit1 = po(1, "ADMIN", "7", "s-1");
-        assertThat(withNull).isEqualTo(AuditService.computeHash(explicit1));
+        // 构造真正 hashVersion=null 的 PO（po() 工厂收 int 装箱不出 null，显式置空），
+        // 与同内容的显式 v1 行比对——此前本用例构造了两个 v1 行自己比自己（1==1 假绿，审查 m3）
+        AuditLogPO nullVersion = po(2, "ADMIN", "7", "s-1");
+        nullVersion.setHashVersion(null);
+        assertThat(AuditService.computeHash(nullVersion))
+                .isEqualTo(AuditService.computeHash(po(1, "ADMIN", "7", "s-1")))
+                .isNotEqualTo(AuditService.computeHash(po(2, "ADMIN", "7", "s-1")));
     }
 }

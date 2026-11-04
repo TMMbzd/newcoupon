@@ -80,6 +80,9 @@ class AuditQueryIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired
     private org.springframework.jdbc.core.JdbcTemplate jdbc;
 
+    @Autowired
+    private com.newcoupon.infrastructure.persistence.mapper.AuditExportJobMapper exportJobMapper;
+
     @org.springframework.test.context.DynamicPropertySource
     static void shardingProperties(org.springframework.test.context.DynamicPropertyRegistry registry) {
         registry.add("coupon.sharding.url", () -> MYSQL.getJdbcUrl()
@@ -463,6 +466,56 @@ class AuditQueryIntegrationTest extends ShardedIntegrationTestSupport {
                         .orderByDesc(AuditLogPO::getId)
                         .last("LIMIT 1"));
         return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    // ------------------------------------------------------------------
+    // 审查 minors：导出窗口冻结（m1）/ 类型不合法 400（m4）/ 导出 @Valid（m5）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("导出时间窗受理即冻结（m1）：任务行的 filters_json 存绝对时间，不是留空到构建时再解析")
+    void export_windowFrozenAtAcceptance() {
+        // 不带时间过滤受理（默认窗语义）：任务行里必须已解析成绝对 startTime/endTime——
+        // 否则构建排队跨过整点/零点后窗口漂移，导出件与受理语义对不上
+        JsonNode created = post("/api/audit/export", "{}");
+        assertThat(created.path("code").asInt()).isEqualTo(0);
+        String jobNo = created.path("data").path("jobNo").asText();
+
+        com.newcoupon.infrastructure.persistence.po.AuditExportJobPO job =
+                exportJobMapper.selectOne(new LambdaQueryWrapper<
+                        com.newcoupon.infrastructure.persistence.po.AuditExportJobPO>()
+                        .eq(com.newcoupon.infrastructure.persistence.po.AuditExportJobPO::getJobNo, jobNo));
+        assertThat(job).isNotNull();
+        assertThat(job.getFiltersJson())
+                .as("受理时解析的绝对时间窗（startTime/endTime 非 null）")
+                .contains("\"startTime\":\"2")
+                .contains("\"endTime\":\"2");
+    }
+
+    @Test
+    @DisplayName("参数类型不合法 → 400+1000（m4：此前 200+5000+ERROR 假告警）")
+    void malformedTimeParam_rejectedAs400() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("X-Admin-Token", ADMIN_TOKEN);
+        ResponseEntity<String> resp = rest.exchange("/api/audit/query", HttpMethod.POST,
+                new HttpEntity<>("{\"filter\":{\"startTime\":\"2026-11-04 10:00:00\"}}", headers),
+                String.class);
+        assertThat(resp.getStatusCode().value()).as("空格分隔的时间串不是合法 ISO LocalDateTime").isEqualTo(400);
+        assertThat(resp.getBody()).contains("\"code\":1000");
+    }
+
+    @Test
+    @DisplayName("导出请求同样吃 @Valid（m5）：超长 actorId → 400+1000，而不是打穿到 SQL 层")
+    void exportValidatesFilterSizes() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("X-Admin-Token", ADMIN_TOKEN);
+        ResponseEntity<String> resp = rest.exchange("/api/audit/export", HttpMethod.POST,
+                new HttpEntity<>("{\"filter\":{\"actorId\":\"" + "a".repeat(70_000) + "\"}}", headers),
+                String.class);
+        assertThat(resp.getStatusCode().value()).isEqualTo(400);
+        assertThat(resp.getBody()).contains("\"code\":1000");
     }
 
     // ------------------------------------------------------------------

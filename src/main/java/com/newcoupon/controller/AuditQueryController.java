@@ -73,10 +73,10 @@ public class AuditQueryController {
         return Result.success(verifyService.verifyChain());
     }
 
-    /** 受理导出任务：过滤与查询同构，立即回 jobNo（构建异步进行）。 */
+    /** 受理导出任务：过滤与查询同构（含 @Valid 同一套校验，审查 m5——漏了它 @Size 全失效），立即回 jobNo。 */
     @PostMapping("/export")
     @PreAuthorize("hasAuthority('audit:export')")
-    public Result<AuditExportJobView> export(@RequestBody AuditQueryRequest req) {
+    public Result<AuditExportJobView> export(@Valid @RequestBody AuditQueryRequest req) {
         return Result.success(exportService.create(req));
     }
 

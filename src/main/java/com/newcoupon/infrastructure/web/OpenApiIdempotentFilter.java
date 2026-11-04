@@ -147,7 +147,12 @@ public class OpenApiIdempotentFilter extends OncePerRequestFilter {
             }
             String text = new String(body, StandardCharsets.UTF_8);
             int code = objectMapper.readTree(text).path("code").asInt(-1);
-            if (response.getStatus() >= 500 || (code >= 5000 && code < 6000)) {
+            if (response.getStatus() >= 500 || (code >= 5000 && code < 6000)
+                    // 404+1002 是"环境性应答"（V6 2C 审查 m6）：滚动发布期间接入方调
+                    // 新端点打到旧实例上，路由不存在是**实例版本差**不是业务终态——
+                    // 缓存它会把"暂时没有"钉成 24 小时的"永远没有"，发版完成后同
+                    // token 重试也拿不到恢复。与 5xxx 同列不缓存。
+                    || code == com.newcoupon.common.ErrorCode.RESOURCE_NOT_FOUND.getCode()) {
                 // "系统繁忙/降级"是**这次没成、下次可能成**，缓存它等于把一次抖动变成 24 小时的确定性失败。
                 // 保留 PENDING（60 秒后自然过期）→ 期间重试得到 6009，之后可重试。
                 return;
