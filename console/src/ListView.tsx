@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, csrfHeader, AdminProfile, TemplatePage } from './api';
+import { api, csrfHeader, UnauthorizedError, AdminProfile, TemplatePage } from './api';
 
 const PAGE_SIZE = 20;
 
@@ -32,17 +32,25 @@ export function ListView({ user, onLogout }: {
     void load(1);
   }, [load]);
 
+  // 登出的两种失败要分开（审查 mi2）：401 = 会话本来就没了（已等价登出，回登录页）；
+  // 其它失败（网络断/服务 5xx）= 服务端会话还活着（最长空闲 30 分钟），
+  // 回登录页等于把还活着的会话留在共用电脑上——留在本页提示重试
   async function logout() {
+    setError('');
     try {
       const headers = {
         'Content-Type': 'application/json',
         ...(await csrfHeader()),
       };
       await api('/console/api/auth/logout', { method: 'POST', headers });
-    } catch {
-      // 会话已过期时登出失败也算登出成功——本地视图照常回登录页
+      onLogout();
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        onLogout();
+      } else {
+        setError('登出失败，请检查网络后重试');
+      }
     }
-    onLogout();
   }
 
   const rows = data?.rows ?? [];

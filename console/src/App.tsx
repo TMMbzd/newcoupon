@@ -20,9 +20,11 @@ export function App() {
     onUnauthorized(() => backToLogin('会话已过期，请重新登录'));
   }, [backToLogin]);
 
-  // 刷新恢复：有会话则直接进列表视图（me 是 GET，未登录 401 被吞——留在登录视图）
+  // 刷新恢复：有会话则直接进列表视图。探测 /me 的 401 走 unauthorizedIsError——
+  // 它只说明"本来就没登录"（刷新/首开），不该触发全局 401 拦截的"会话已过期"提示，
+  // 否则从未登录过的用户首开页面就看到红色错误（审查 mi1）
   useEffect(() => {
-    api<AdminProfile>('/console/api/auth/me')
+    api<AdminProfile>('/console/api/auth/me', undefined, { unauthorizedIsError: true })
       .then(setUser)
       .catch(() => undefined)
       .finally(() => setBooting(false));
