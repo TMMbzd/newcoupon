@@ -249,6 +249,12 @@ mybatis-plus:
 # OpenAPI 契约生成（V6 2B-2，ADR-0022）：live spec 由 springdoc 从 Controller 注解生成，
 # 契约测试用它对基线 docs/open-api/openapi-v1.json 做"只增不改"门禁。
 springdoc:
+  # 关闭**默认未分组** spec 端点（对抗审查修复项 3）：springdoc 注册了 GroupedOpenApi 之后，
+  # 默认组（springdoc.enable-default-api-docs，默认 true）仍在——/api/api-docs 与
+  # /api/api-docs.yaml 会输出**未过滤的全量 spec**（全部 /api 管理端点、/console 路径、
+  # schema 约束），落在兜底链的 /api 认证后面，任何控制台会话无视 RBAC 细粒度都能拉。
+  # 对外契约只认 open-v1 分组端点；默认组没有存在理由。
+  enable-default-api-docs: false
   api-docs:
     # spec 端点挪进 /api 前缀：兜底安全链里 /api/** 的所有方法都要"旧令牌或会话"
     # （LegacyAdminTokenAuthenticationFilter，V6 2A-2 翻面）。默认路径 /v3/api-docs
@@ -258,16 +264,16 @@ springdoc:
     # 钉住 OAS 3.0 档（springdoc 高版本默认可切 3.1）：基线文件与 live spec 的版本声明
     # 必须可比，不随 springdoc 升级漂移。3.0 档实际渲染 "3.0.1"（springdoc 2.6 的 3.0 常量）。
     version: openapi_3_0
-    # swagger-config 端点（告诉 UI 有哪些分组）一并关闭：UI 已禁用，它只服务 UI，
-    # 留着是多余的暴露面（虽已吃 /api 认证，最小面原则下没有存在理由）。
-    swagger-config:
-      enabled: false
   # Controller 未声明 produces 时 spec 里的响应 media type 用什么。默认 */*——那是
   # "任意类型"的占位，不是真实契约（接口实际只产 JSON）；对外 spec 声明 application/json
   # 才是可消费的契约，黄金样例对拍也按它导航。（键名带 s：default-produces-media-type）
   default-produces-media-type: application/json
   swagger-ui:
-    # 生产不需要交互 UI（spec 以基线文件为准）；关掉后 swagger-ui 的全部路径不注册。
+    # 生产不需要交互 UI（spec 以基线文件为准）。这个开关**同时**关掉了 swagger-config 端点
+    # （/api/api-docs/swagger-config，UI 的分组索引）：SwaggerConfig 资源在 springdoc 2.6 里
+    # 挂在 @ConditionalOnProperty(springdoc.swagger-ui.enabled) 上——不存在
+    # "springdoc.api-docs.swagger-config.enabled" 这个键（实测裁决：有无该键行为相同，
+    # 字节码里也无此属性名；曾误配为死键已删）。
     enabled: false
 
 management:

@@ -510,6 +510,35 @@ class OpenApiContractIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
+    @DisplayName("安全面：默认组与 swagger-config 端点不存在——未过滤全量 spec 不设第二张脸")
+    void defaultGroupAndSwaggerConfigEndpoints_areAbsent() throws Exception {
+        // springdoc 有 GroupedOpenApi 时仍会注册**默认未分组**资源（springdoc.enable-default-api-docs
+        // 默认 true）：/api/api-docs 与 /api/api-docs.yaml 输出未过滤的全量 spec——全部 /api 管理端点、
+        // /console 路径、schema 约束，任何控制台会话（无视 RBAC 细粒度）都能拉。已用
+        // springdoc.enable-default-api-docs: false 关闭，本用例钉住这张脸不复活。
+        // /api/api-docs/swagger-config（UI 的分组索引）随 swagger-ui.enabled=false 一并消失。
+        //
+        // 断言口径：本应用对"不存在的路径"的可观测响应不是 404，而是 HTTP 200 + Result(5000)
+        // ——Spring 6.1 起未匹配路径抛 NoResourceFoundException，被 GlobalExceptionHandler 的
+        // 兜底 @ExceptionHandler(Exception) 收敛成 5000（既有全站行为，不在本刀改）。所以这里的
+        // 判据是"响应不是 OpenAPI 文档"：端点若复活，body 会以 {"openapi":...} 开头。
+        // （swagger-config 的另一个坑：路径恰好落进分组模式 /{group:.+}，group="swagger-config"
+        // 不存在 → springdoc 抛 OpenApiResourceNotFoundException → 同样被兜底收敛成 5000。）
+        for (String path : List.of("/api/api-docs", "/api/api-docs.yaml", "/api/api-docs/swagger-config")) {
+            HttpResponse<String> r = rawGet(path, ADMIN_TOKEN);
+            assertThat(r.statusCode()).as(path + " 的状态码").isEqualTo(200);
+            assertThat(r.body())
+                    .as(path + " 不得返回 OpenAPI 文档（默认组未过滤全量 spec/UI 配置端点都是多余暴露面），"
+                            + "实际 body 前 200 字=" + r.body().substring(0, Math.min(200, r.body().length())))
+                    .doesNotContain("\"openapi\"")
+                    .doesNotContain("\"paths\"")
+                    .contains("\"code\":5000");
+        }
+        // 分组端点本身仍在（上一用例的正例），关默认组不能误伤 open-v1
+        assertThat(rawGet("/api/api-docs/open-v1", ADMIN_TOKEN).statusCode()).isEqualTo(200);
+    }
+
+    @Test
     @DisplayName("版本头：认证成功的开放面响应带 X-API-Version: v1")
     void authenticatedResponse_carriesXApiVersionHeader() throws Exception {
         OpenApiTestClient.Response r = client.get(
