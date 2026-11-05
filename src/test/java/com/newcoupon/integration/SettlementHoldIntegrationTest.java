@@ -377,6 +377,45 @@ class SettlementHoldIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     // ------------------------------------------------------------------
+    // ⑧ 审查 I② 簇：主体拼错的冻结永久命不中账单——place 响应带 matchedHistory 可见性
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("H10: matchedHistory——近 90 天该 (appId,party) 有分账历史=true；陌生主体=false")
+    void placeResponseCarriesPartyHistoryMatch() throws Exception {
+        // 自包含纪律：上一次运行/别的用例可能留下同款行（本用例曾用 template_id=1 污染过
+        // 后续账单类——先清后插再清，插的历史行只在本用例生命周期内存在）
+        jdbc().update("DELETE FROM coupon_share_detail WHERE usage_no LIKE 'U-H10-%'");
+        // 造一段真实分账历史（直插明细——place 的 EXISTS 判据就是它）
+        jdbc().update("INSERT INTO coupon_share_detail "
+                        + "(id, user_coupon_id, user_id, template_id, app_id, settle_party_id, "
+                        + " usage_no, order_no, order_line_no, platform_burden, merchant_burden, share_total) "
+                        + "VALUES (?, 1, 1, 1, '1', 'M_MATCHED_H10', ?, 'O-H10', 'L1', 100, 0, 100)",
+                System.nanoTime(), "U-H10-" + System.nanoTime());
+
+        ResponseEntity<String> matched = post("/api/settlement/holds",
+                holdBody("HOLD-H10A-" + UUID.randomUUID().toString().substring(0, 8),
+                        "1", "M_MATCHED_H10", null, 100, "有历史主体"));
+        assertThat(JSON.readTree(matched.getBody()).path("data").path("matchedHistory").asBoolean())
+                .as("近 90 天有分账历史的主体=true（冻结大概率命中有意义的账单行）。body="
+                        + matched.getBody())
+                .isTrue();
+
+        ResponseEntity<String> unmatched = post("/api/settlement/holds",
+                holdBody("HOLD-H10B-" + UUID.randomUUID().toString().substring(0, 8),
+                        "1", "ZZZ-NO-HISTORY-" + UUID.randomUUID().toString().substring(0, 8),
+                        null, 100, "陌生主体"));
+        assertThat(JSON.readTree(unmatched.getBody()).path("data").path("matchedHistory").asBoolean())
+                .as("陌生主体=false——大概率拼错，人工核对（不强校验：新主体早期冻结合法）。body="
+                        + unmatched.getBody())
+                .isFalse();
+
+        // 历史行是探针数据：留在库里会以 eligible=1 进入后续测试的账单（曾实际污染过
+        // 同容器测试类的模板账单断言）——用完即清
+        jdbc().update("DELETE FROM coupon_share_detail WHERE usage_no LIKE 'U-H10-%'");
+    }
+
+    // ------------------------------------------------------------------
     // ⑦ 审查 G 簇：并发同目标迁移，输家 0 行分支按当前行分类（确定性行锁交错）
     // ------------------------------------------------------------------
 

@@ -327,16 +327,43 @@ public class DailyBillService {
      * <p><b>差异落表+指标（V47）</b>：现状差异只打 ERROR 日志——日志会滚走、不可查询。
      * 起落 {@code stock_drift_log}（action=SETTLE_BILL_RECONCILE，detail 记两侧五项读数，
      * 复用预算对账的告警通道）+ 指标 {@code coupon_settle_reconcile_diff_total{type}}
-     * （type 有界：PARTY_VS_TEMPLATE=金额/行数对不上 / PARTY_ORPHAN_TEMPLATE=主体有行模板没有）。
+     * （type 有界：PARTY_VS_TEMPLATE=金额/行数对不上 / PARTY_ORPHAN_TEMPLATE=主体有行模板没有 /
+     * HOLD_STALE=账单生成后 hold 变了未重跑）。
      * 落库失败不阻断对账主流程（与 StockDriftLogGateway 的使用约定一致）。
+     *
+     * <p><b>hold 过期检查（审查 I①，只告警不改账单）</b>：逐行比对账单 hold_amount 与
+     * 当下 ACTIVE hold 的重算汇总——不一致=该期账单在 hold 维度已过期（生成后有人
+     * place/release/void 而没重跑）。HOLD_STALE **不计入返回值**（金额/行数等式没破，
+     * 掺进去会让正常的 mismatch 指标被过期告警淹没），处置=重跑该期账单。
      */
     public int reconcile(LocalDate date) {
         Map<Long, CouponDailyBillPO> templates = new HashMap<>();
         for (CouponDailyBillPO bill : billMapper.selectByDate(date)) {
             templates.put(bill.getTemplateId(), bill);
         }
+        Map<String, Long> partyLevelHold = new HashMap<>();
+        Map<String, Long> templateHold = new HashMap<>();
+        for (CouponSettlementHoldMapper.HoldAgg agg : holdMapper.sumActiveGrouped()) {
+            if (agg.getTemplateId() == null) {
+                partyLevelHold.merge(agg.getAppId() + '|' + agg.getSettlePartyId(),
+                        agg.getTotalAmount(), Long::sum);
+            } else {
+                templateHold.merge(
+                        agg.getAppId() + '|' + agg.getSettlePartyId() + '|' + agg.getTemplateId(),
+                        agg.getTotalAmount(), Long::sum);
+            }
+        }
         Map<Long, long[]> sums = new HashMap<>();
         for (CouponSettlePartyDailyBillPO p : settlePartyBillMapper.selectAllByDate(date)) {
+            // hold 过期检查对**全部行**做（含零金额宿主行——宿主行也承载 hold 口径）
+            long activeHold = partyLevelHold.getOrDefault(
+                    p.getAppId() + '|' + p.getSettlePartyId(), 0L)
+                    + templateHold.getOrDefault(
+                    aggKey(p.getAppId(), p.getSettlePartyId(), p.getTemplateId()), 0L);
+            long billedHold = p.getHoldAmount() == null ? 0L : p.getHoldAmount();
+            if (billedHold != activeHold) {
+                recordHoldStale(date, p, billedHold, activeHold);
+            }
             // 全排除宿主行（审查 C 簇：0 金额 + ineligible 计数>0 的可观测行）不携带钱与
             // 行数——不进等式。判别=三零（真有交易的行必带 confirm/refund 计数：当日全额
             // 冲回的组是 confirm>0/discount=0，不会被误跳）。不跳的话宿主行会被当成
@@ -384,6 +411,34 @@ public class DailyBillService {
             log.info("SETTLE_PARTY_BILL_RECONCILE_OK date={} templates={}", date, templates.size());
         }
         return mismatches;
+    }
+
+    /** hold 过期三连（审查 I①）：WARN + drift（detail 记账单侧/当下侧 hold）+ 指标。
+     *  不计入 reconcile 返回值——处置是重跑该期账单，不是数据损坏。 */
+    private void recordHoldStale(LocalDate date, CouponSettlePartyDailyBillPO p,
+                                 long billedHold, long activeHold) {
+        log.warn("SETTLE_BILL_HOLD_STALE date={} appId={} party={} template={} "
+                        + "账单 hold={} 但当下 ACTIVE hold={}——账单生成后 hold 变了未重跑；"
+                        + "重跑该期账单即可收敛（本告警不改账单）",
+                date, p.getAppId(), p.getSettlePartyId(), p.getTemplateId(), billedHold, activeHold);
+        String detail = String.format(
+                "{\"date\":\"%s\",\"appId\":\"%s\",\"party\":\"%s\",\"templateId\":%d,"
+                        + "\"type\":\"HOLD_STALE\",\"billHold\":%d,\"activeHold\":%d}",
+                date, p.getAppId(), p.getSettlePartyId(), p.getTemplateId(), billedHold, activeHold);
+        try {
+            driftLog.record(new StockDriftLogGateway.DriftEvent(
+                    p.getTemplateId(), 0, 0, 0, 0, 0, null, null, 1,
+                    "SETTLE_BILL_RECONCILE", detail));
+        } catch (RuntimeException e) {
+            log.error("SETTLE_BILL_HOLD_STALE drift log failed: date={} templateId={}",
+                    date, p.getTemplateId(), e);
+        }
+        try {
+            meterRegistry.counter("coupon_settle_reconcile_diff_total", "type", "HOLD_STALE")
+                    .increment();
+        } catch (RuntimeException ignore) {
+            // 指标失败不影响对账
+        }
     }
 
     /**

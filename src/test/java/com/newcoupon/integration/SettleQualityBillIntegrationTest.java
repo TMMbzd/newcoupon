@@ -75,6 +75,15 @@ class SettleQualityBillIntegrationTest extends ShardedIntegrationTestSupport {
         return new JdbcTemplate(dataSource);
     }
 
+    /**
+     * 账单用例自包含纪律（JUnit 方法序不可控 + 共享库同账单日）：别的用例（本类 Q4/Q10、
+     * hold 测试类）留下的 __default__ 主体 ACTIVE hold 会改后续生成账单的 hold/payable——
+     * 凡断言 hold 口径的用例先清场（测试造物，非业务数据）。
+     */
+    private void clearDefaultPartyHolds() {
+        jdbc().update("DELETE FROM coupon_settlement_hold WHERE settle_party_id = '__default__'");
+    }
+
     private record Confirmed(long templateId, long couponId, String usageNo) {
     }
 
@@ -208,6 +217,7 @@ class SettleQualityBillIntegrationTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("Q4: ACTIVE hold 扣 payable（模板级只扣对应行）；释放后重跑恢复；负 payable 如实展示")
     void holdDeductsPayableAndRecoversAfterRelease() {
+        clearDefaultPartyHolds();
         Confirmed platform = confirmCoupon("Q4", null);   // __default__ 行 2000 分
         LocalDate today = LocalDate.now();
         dailyBillService.generateAll(today);
@@ -307,6 +317,7 @@ class SettleQualityBillIntegrationTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("Q7: 被排除分账行的退款明细镜像同标——从未计入的钱不能被冲回压低净额")
     void refundMirrorsExcludedShareRowTags() {
+        clearDefaultPartyHolds();
         Confirmed merchant = confirmCoupon("Q7", 2);   // 灰度关 → 两行 LEGACY_DEFAULT+eligible=0
         LocalDate today = LocalDate.now();
         dailyBillService.generateAll(today);
@@ -348,6 +359,7 @@ class SettleQualityBillIntegrationTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("Q8: 整组零合格行 → 主体账单出 0 金额行且 ineligible 计数>0（不是无行蒸发）")
     void fullyExcludedGroupStillProducesObservableRow() {
+        clearDefaultPartyHolds();
         Confirmed merchant = confirmCoupon("Q8", 2);   // 灰度关 → 两行全 LEGACY_DEFAULT+0
         LocalDate today = LocalDate.now();
 
@@ -410,7 +422,52 @@ class SettleQualityBillIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     // ------------------------------------------------------------------
-    // ⑨ V47 回填 SQL 解释性复验（迁移先于测试数据执行——手工跑同款语句验证判定口径）
+    // ⑩ 审查 I① 簇：账单生成后 hold 变了未重跑=账单过期必须可见
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("Q10: 生成后新 place 的 hold → reconcile 报 HOLD_STALE（只告警不算差异）+ 指标")
+    void holdChangedAfterBillGeneration_reportsStale() {
+        clearDefaultPartyHolds();
+        Confirmed platform = confirmCoupon("Q10", null);
+        LocalDate today = LocalDate.now();
+        dailyBillService.generateAll(today);
+        CouponSettlePartyDailyBillPO before = partyBill(today, platform.templateId());
+        assertThat(before.getHoldAmount()).isZero();
+
+        // 账单生成之后新 place 一笔主体级 hold（账单没重跑——hold_amount 已过期）
+        jdbc().update("INSERT INTO coupon_settlement_hold "
+                + "(id, hold_no, app_id, settle_party_id, template_id, amount, reason, source, "
+                + " status, created_by, created_at) VALUES "
+                + "(?, 'HOLD-Q10', ?, '__default__', NULL, 700, '过期探针', 'MANUAL', 'ACTIVE', 'it', NOW())",
+                System.nanoTime(), before.getAppId());
+
+        double beforeMetric = meterRegistry.find("coupon_settle_reconcile_diff_total")
+                .tag("type", "HOLD_STALE").counter() == null ? 0.0
+                : meterRegistry.find("coupon_settle_reconcile_diff_total")
+                .tag("type", "HOLD_STALE").counter().count();
+
+        // HOLD_STALE 只告警：不进返回值（金额等式没破），drift log + 指标可见
+        assertThat(dailyBillService.reconcile(today))
+                .as("hold 过期不是金额差异——返回值只算金额/行数等式").isZero();
+        Map<String, Object> drift = jdbc().queryForMap(
+                "SELECT action, detail FROM stock_drift_log "
+                        + "WHERE action = 'SETTLE_BILL_RECONCILE' AND detail LIKE '%HOLD_STALE%' "
+                        + "ORDER BY id DESC LIMIT 1");
+        String detail = String.valueOf(drift.get("detail"));
+        assertThat(detail).contains("__default__").contains("700");
+        double afterMetric = meterRegistry.find("coupon_settle_reconcile_diff_total")
+                .tag("type", "HOLD_STALE").counter().count();
+        assertThat(afterMetric).as("指标 {type=HOLD_STALE} 递增").isGreaterThan(beforeMetric);
+
+        // 重跑后收敛：账单 hold_amount 刷新，HOLD_STALE 不再触发（新值=当下 ACTIVE 汇总）
+        dailyBillService.generateAll(today);
+        assertThat(partyBill(today, platform.templateId()).getHoldAmount()).isEqualTo(700L);
+        assertThat(dailyBillService.reconcile(today)).isZero();
+    }
+
+    // ------------------------------------------------------------------
+    // ⑪ V47 回填 SQL 解释性复验（迁移先于测试数据执行——手工跑同款语句验证判定口径）
     // ------------------------------------------------------------------
 
     @Test

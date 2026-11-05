@@ -13,6 +13,7 @@ import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.infrastructure.audit.AdminActionAuditor;
 import com.newcoupon.infrastructure.id.SnowflakeIdGenerator;
 import com.newcoupon.infrastructure.persistence.mapper.CouponSettlementHoldMapper;
+import com.newcoupon.infrastructure.persistence.mapper.CouponShareDetailMapper;
 import com.newcoupon.infrastructure.persistence.po.CouponSettlementHoldPO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,6 +34,9 @@ import java.util.Set;
  * <p><b>语义边界（迁移列注释同源）</b>：hold 只改主体账单的应付口径
  * （{@code payable = discount_total - hold_amount}，生成时算好存列），
  * **不动真实资金、不影响用户退款**。因此：
+ * <b>hold 的任何变化（place/release/void）都只影响"之后生成"的账单——已生成的该期账单
+ * 不会自动更新，需重跑（generateAll）才反映</b>；reconcile 的 HOLD_STALE 检查会把
+ * "变了没重跑"的账单行点亮。因此：
  * <ul>
  *   <li><b>不接 EnvironmentGuard</b>：那是"真钱动作"的资金边界（退款/预算账本/账单聚合），
  *       hold 是账单口径的记号——沙箱租户建 hold 也动不了任何真钱，反而保留现场更好排查；
@@ -72,17 +76,20 @@ public class SettlementHoldService {
     private static final long MAX_AMOUNT = 10_000_000_000_000_000L;   // 1e13 分
 
     private final CouponSettlementHoldMapper holdMapper;
+    private final CouponShareDetailMapper shareDetailMapper;
     private final OpenAppRepository openAppRepository;
     private final TemplateRepository templateRepository;
     private final SnowflakeIdGenerator idGenerator;
     private final AdminActionAuditor adminAudit;
 
     public SettlementHoldService(CouponSettlementHoldMapper holdMapper,
+                                 CouponShareDetailMapper shareDetailMapper,
                                  OpenAppRepository openAppRepository,
                                  TemplateRepository templateRepository,
                                  SnowflakeIdGenerator idGenerator,
                                  AdminActionAuditor adminAudit) {
         this.holdMapper = holdMapper;
+        this.shareDetailMapper = shareDetailMapper;
         this.openAppRepository = openAppRepository;
         this.templateRepository = templateRepository;
         this.idGenerator = idGenerator;
@@ -266,11 +273,28 @@ public class SettlementHoldService {
         return new HoldQueryResult(page.stream().map(po -> toView(po, false)).toList(), nextCursor);
     }
 
-    private static HoldView toView(CouponSettlementHoldPO po, boolean duplicated) {
+    private HoldView toView(CouponSettlementHoldPO po, boolean duplicated) {
         return new HoldView(po.getId(), po.getHoldNo(), po.getAppId(), po.getSettlePartyId(),
                 po.getTemplateId(), po.getAmount(), po.getReason(), po.getSource(),
                 po.getStatus(), po.getCreatedBy(), po.getReleasedBy(),
-                po.getCreatedAt(), po.getReleasedAt(), duplicated);
+                po.getCreatedAt(), po.getReleasedAt(), duplicated,
+                hasRecentPartyHistory(po.getAppId(), po.getSettlePartyId()));
+    }
+
+    /**
+     * 近 90 天该 (appId, 主体) 是否有分账行（审查 I②）：主体拼错的冻结永远命不中账单
+     * 且无人知晓——place 响应带这个信号供人工核对。**不做强校验**（新主体先冻结后开张
+     * 是合法时序），只让"拼错"从不可见变成一眼可见。
+     */
+    private boolean hasRecentPartyHistory(String appId, String partyId) {
+        try {
+            return shareDetailMapper.existsPartyHistory(appId, partyId,
+                    LocalDateTime.now().minusDays(90));
+        } catch (RuntimeException e) {
+            log.warn("查询主体分账历史失败（按无历史展示，不阻断 place）appId={} party={}",
+                    appId, partyId, e);
+            return false;
+        }
     }
 
     /**

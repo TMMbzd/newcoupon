@@ -50,7 +50,8 @@ public final class SettlementHoldDtos {
             @Min(1) @Max(200) Integer limit) {
     }
 
-    /** 冻结行视图（duplicated=true 表示幂等重放命中已存在行） */
+    /** 冻结行视图（duplicated=true 幂等重放命中已存在行；matchedHistory=近 90 天该
+     *  (appId,主体) 有分账行——false 大概率主体拼错，人工核对，不强校验） */
     public record HoldView(
             Long id,
             String holdNo,
@@ -65,7 +66,8 @@ public final class SettlementHoldDtos {
             String releasedBy,
             LocalDateTime createdAt,
             LocalDateTime releasedAt,
-            boolean duplicated) {
+            boolean duplicated,
+            boolean matchedHistory) {
     }
 
     /** 游标分页结果（nextCursor=null 表示没有下一页） */
