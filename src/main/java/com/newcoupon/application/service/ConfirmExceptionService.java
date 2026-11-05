@@ -19,6 +19,12 @@ import org.springframework.stereotype.Service;
  * <p>异常单只能从这里出：{@code CONFIRM}=按锁券时绑定的快照原价核销；
  * {@code RELEASE}=确认订单已退款/不会使用该优惠后释放。普通 release/refund 对
  * {@code CONFIRM_EXCEPTION} 一律 4004，绝不让超时任务或取消消息把券放回 USABLE。
+ *
+ * <p><b>V6 4B 审查 m2：CONFIRM 走风控</b>——人工核销是 CONFIRM 状态唯一的资金出口
+ * （分账从这里出），绕过决策=拉黑用户的补贴照常分账且零留痕。{@code resolve(CONFIRM)}
+ * 前做 decide(scene=CONFIRM)：REJECT 拒绝（运营先处理风控名单再回来人工核销——本端点
+ * 就是运营自己的工具，拒绝语义不伤害消费者）；REVIEW/PASS 放行留痕。管理面路径无
+ * X-Device-Id（设备规则 degraded 跳过，符合透传语义）；低频管理动作不进熔断段。
  */
 @Service
 public class ConfirmExceptionService {
@@ -27,15 +33,18 @@ public class ConfirmExceptionService {
     private final com.newcoupon.domain.repository.CouponUsageRepository couponUsageRepository;
     private final PricingSnapshotService pricingSnapshotService;
     private final TradeTxService tradeTxService;
+    private final RiskDecisionService riskDecisionService;
 
     public ConfirmExceptionService(CouponConfirmExceptionMapper exceptionMapper,
                                    com.newcoupon.domain.repository.CouponUsageRepository couponUsageRepository,
                                    PricingSnapshotService pricingSnapshotService,
-                                   TradeTxService tradeTxService) {
+                                   TradeTxService tradeTxService,
+                                   RiskDecisionService riskDecisionService) {
         this.exceptionMapper = exceptionMapper;
         this.couponUsageRepository = couponUsageRepository;
         this.pricingSnapshotService = pricingSnapshotService;
         this.tradeTxService = tradeTxService;
+        this.riskDecisionService = riskDecisionService;
     }
 
     public List<PendingException> listPending(int limit) {
@@ -61,6 +70,19 @@ public class ConfirmExceptionService {
         CouponConfirmExceptionPO row = exceptionMapper.selectByUsageNo(usageNo);
         if (row == null || !"PENDING".equals(row.getResolveStatus())) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT, "核销异常已处理过");
+        }
+        // V6 4B 审查 m2：人工核销=CONFIRM 的资金出口，进风控（见类注释）。
+        // requestId=usageNo（与 confirm 主入口同一幂等锚，决策日志可对照）。
+        if ("CONFIRM".equals(normalized)
+                && riskDecisionService.enabled(row.getAppId())) {
+            RiskDecisionService.RiskDecision risk = riskDecisionService.decide(
+                    new com.newcoupon.application.service.RiskContext(
+                            com.newcoupon.domain.risk.RiskScene.CONFIRM, row.getAppId(),
+                            usage.getUserId(), null, null, usageNo));
+            if (risk.action() == com.newcoupon.domain.risk.RiskAction.REJECT) {
+                throw new BizException(ErrorCode.RISK_REJECTED,
+                        "该用户已被风控拦截，请先处理名单再人工核销");
+            }
         }
         String note = reason == null ? "" : reason.trim();
         if ("RELEASE".equals(normalized)) {
