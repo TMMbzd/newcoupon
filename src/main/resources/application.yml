@@ -195,6 +195,12 @@ coupon:
     # Redis 不可用→跳过+degraded+fail-open 指标（dimension=risk_device）
     device-daily:
       max-per-day: ${RISK_DEVICE_DAILY_MAX_PER_DAY:10}
+    # V6 4B 预算燃烧信号（R_BUDGET_BURN）：活动预算账户当日账本流水**行数**超阈 → REVIEW
+    # （放行留痕，不 REJECT——预算信号是可疑加速不是确定攻击，超额另有预算闸门挡）。
+    # 口径=coupon_budget_ledger 当日该账户全部 RESERVE/CONFIRM/RELEASE/EXPIRE 行数；
+    # 活动不开预算→因子缺失 degraded 跳过；回放=日志快照值×当前阈值纯重算（不查库）
+    budget-burn:
+      daily-ledger-threshold: ${RISK_BUDGET_BURN_DAILY_LEDGER_THRESHOLD:1000}
   # V6 4A 风控决策总闸的全站层（SwitchKey.RISK_DECISION，三层取值的第②层）：
   # 显式配 false 而不依赖"没配=true"的枚举默认——默认关=回归零变化（关时不写决策日志、
   # 热路径零额外 IO）；租户在 open_app_config 配 switch.risk.decision.enabled=true 逐租户灰度开
