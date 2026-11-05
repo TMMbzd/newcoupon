@@ -10,9 +10,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * 指标基数防线单测（V6 5A）：高基数标签被拒、超标签数被拒、总米数封顶。
+ * 指标基数防线单测（V6 5A）：高基数标签被拒、超标签数被拒、总量封顶（真实米数语义）。
  * 用 {@link MetricsCardinalityGuard} 的小上限构造器把闸门拧到可断言的量级——
- * 生产值（5/5000）语义相同，只是阈值不同。
+ * 生产值（6/5000）语义相同，只是阈值不同。
  */
 class MetricsCardinalityConfigTest {
 
@@ -34,37 +34,50 @@ class MetricsCardinalityConfigTest {
     }
 
     @Test
-    @DisplayName("单米标签数上限：6 个标签的米被拒（合法指标最多 5 个，http.server.requests 恰为 5）")
+    @DisplayName("单米标签数上限：7 个标签被拒；6 个放行（http.server.requests 在 Micrometer 1.13.6 下实际 6 标签）")
     void metersWithTooManyTagsAreDenied() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        registry.config().meterFilter(new MetricsCardinalityGuard(5, 1000));
+        MetricsCardinalityGuard guard = new MetricsCardinalityGuard(6, 1000);
+        guard.attach(registry);   // 生产里由 MeterRegistryCustomizer 回调 attach
+        registry.config().meterFilter(guard);
 
+        // 6 个标签：Boot 内建 http.server.requests 的真实形态（method/uri/status/exception/outcome/error）
         counter(registry, "test_ok", List.of(
                 Tag.of("method", "GET"), Tag.of("uri", "/api"), Tag.of("status", "200"),
-                Tag.of("exception", ""), Tag.of("outcome", "SUCCESS")));   // 5 个：放行
+                Tag.of("exception", ""), Tag.of("outcome", "SUCCESS"), Tag.of("error", "")));
+        // 7 个标签：超出当前已知任何合法指标的形态，拒
         counter(registry, "test_too_many", List.of(
                 Tag.of("a", "1"), Tag.of("b", "2"), Tag.of("c", "3"),
-                Tag.of("d", "4"), Tag.of("e", "5"), Tag.of("f", "6")));    // 6 个：拒
+                Tag.of("d", "4"), Tag.of("e", "5"), Tag.of("f", "6"), Tag.of("g", "7")));
 
         assertThat(registry.find("test_ok").counters()).hasSize(1);
         assertThat(registry.find("test_too_many").counters()).isEmpty();
     }
 
     @Test
-    @DisplayName("总米数封顶：超过上限后新米全拒，既有米不受影响")
-    void totalMeterCountIsCapped() {
+    @DisplayName("总米数封顶按真实米数：被单键闸拒掉的注册不占预算，事故后闸门可恢复（审查 minor 修正）")
+    void totalMeterCountUsesRealRegisteredMeters() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        registry.config().meterFilter(new MetricsCardinalityGuard(5, 10));
+        MetricsCardinalityConfig config = new MetricsCardinalityConfig();
+        // 上限 33：32 个穿透单键闸的垃圾米 + 1 个合法米刚好用满，第 2 个合法米被拒
+        MetricsCardinalityGuard guard = new MetricsCardinalityGuard(6, 33);
+        guard.attach(registry);
+        registry.config().meterFilter(config.userIdTagValueCap());
+        registry.config().meterFilter(guard);
 
-        for (int i = 0; i < 30; i++) {
-            counter(registry, "test_cap_" + i, List.of());
+        for (int i = 0; i < 100; i++) {
+            counter(registry, "test_bomb", List.of(Tag.of("userId", "user-" + i)));
         }
+        assertThat(registry.find("test_bomb").counters()).hasSize(32);
 
-        assertThat(registry.getMeters()).as("总量钉死在上限 10").hasSize(10);
-        // 第 1 个米在封顶前注册，仍可正常计数——闸门止血，不禁用存量
-        double before = registry.get("test_cap_0").counter().count();
-        registry.get("test_cap_0").counter().increment();
-        assertThat(registry.get("test_cap_0").counter().count()).isEqualTo(before + 1);
+        // 被拒的 68 次注册**不占总量预算**（旧计数器版会把 100 次尝试全计入、闸门永久卡死）
+        counter(registry, "test_legit_1", List.of());
+        assertThat(registry.find("test_legit_1").counters())
+                .as("拒新不烧预算：合法米仍可注册").hasSize(1);
+
+        // 真实米数到 33 后，下一个新米才被总量闸拒
+        counter(registry, "test_legit_2", List.of());
+        assertThat(registry.find("test_legit_2").counters()).isEmpty();
     }
 
     private static void counter(SimpleMeterRegistry registry, String name, List<Tag> tags) {

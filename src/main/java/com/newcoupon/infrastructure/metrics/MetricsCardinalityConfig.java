@@ -12,8 +12,11 @@ import org.springframework.context.annotation.Configuration;
  *
  * <p><b>两层各自拦什么</b>：
  * <ul>
- *   <li>{@link #metricsCardinalityGuard}：每米标签数 ≤5、全 registry 米数 ≤5000——
- *       兜"总量失控"（新指标类型混入、批量注册事故）。</li>
+ *   <li>{@link #metricsCardinalityGuard}：每米标签数 ≤6（Micrometer 1.13.6 的
+ *       http.server.requests 实际 6 标签，含 DefaultMeterObservationHandler 追加的
+ *       error——见 {@link MetricsCardinalityGuard} 类注释）、全 registry 真实米数
+ *       ≤5000（实时数 registry，被拒的米不计数，事故恢复即解封）——兜"总量失控"
+ *       （新指标类型混入、批量注册事故）。</li>
  *   <li>{@link #forbiddenTagValueCaps()} 系列六个内建过滤器：对**危险标签键**
  *       （userId/orderNo/requestId/couponId/templateId/ip——V6 §5A 点名的无界维度）
  *       限"单键取值数 ≤{@value #MAX_VALUES_PER_FORBIDDEN_KEY}"——合法指标根本不该带
@@ -21,10 +24,12 @@ import org.springframework.context.annotation.Configuration;
  *       这类事故钉死在 32 条序列。</li>
  * </ul>
  *
- * <p><b>为什么单独一个无依赖配置类</b>：与
- * {@link CircuitBreakerCardinalityConfig} 同一条实测教训——MeterFilter bean 会在
- * MeterRegistry 创建期被收集，若过滤器所在类还注入别的 bean 就可能成环启动失败。
- * 本类只产过滤器，不注入任何东西。
+ * <p><b>为什么单独一个配置类、registry 经 {@code MeterRegistryCustomizer} 交进 guard</b>：
+ * 与 {@link CircuitBreakerCardinalityConfig} 同一条实测教训——MeterFilter bean 会在
+ * MeterRegistry 创建期被收集，过滤器**直接注入** MeterRegistry 就是创建期循环；
+ * 在 accept() 里惰性解析 ObjectProvider 也不行（Micrometer meterMap 锁内的 Spring
+ * 单例查找=锁序反转，实测挂死启动）。customizer 回调在过滤器之前、registry 创建之后
+ * 的安全窗口执行，只存一个 volatile 引用。
  */
 @Configuration
 public class MetricsCardinalityConfig {
@@ -39,8 +44,22 @@ public class MetricsCardinalityConfig {
             new java.util.concurrent.atomic.AtomicLong();
 
     @Bean
-    MeterFilter metricsCardinalityGuard() {
+    MetricsCardinalityGuard metricsCardinalityGuard() {
         return new MetricsCardinalityGuard();
+    }
+
+    /**
+     * 把 registry 引用交给 guard 的钩子：MeterRegistryCustomizer 在 registry 创建后、
+     * 过滤器与绑定器应用前的回调线程上执行（Boot 的 MeterRegistryConfigurer 顺序：
+     * customizers → filters → binders）。**不能**用注入/Provider 在 accept() 里惰性解析
+     * ——accept() 在 Micrometer meterMap 锁内被调用，再进 Spring 单例查找就是锁序反转
+     * （2026-11-05 实测把上下文启动挂死，见 MetricsCardinalityGuard 类注释"attach"段）。
+     */
+    @Bean
+    org.springframework.boot.actuate.autoconfigure.metrics.MeterRegistryCustomizer<
+            io.micrometer.core.instrument.MeterRegistry> cardinalityGuardAttacher(
+                    MetricsCardinalityGuard guard) {
+        return guard::attach;
     }
 
     // ---- 危险标签键逐键封顶（Micrometer 内建 maximumAllowableTags：前缀 ""=全部米）----
