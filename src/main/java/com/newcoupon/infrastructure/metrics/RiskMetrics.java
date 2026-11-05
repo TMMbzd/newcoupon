@@ -53,4 +53,20 @@ public class RiskMetrics {
                 .register(registry)
                 .increment();
     }
+
+    /**
+     * 一次降级决策（因子不完整仍出决策，审查 C5）。
+     *
+     * <p><b>为什么 decision_total 不够、还要这条</b>：degraded 行在 decision_total 里
+     * 长得和正常 PASS 一样——"租户漏发 X-Device-Id，唯一自动化规则静默归零"这种事
+     * 只能靠它上盘面。reason 有界两值：{@code missing-header}（接入方没发设备头）/
+     * {@code counter-unavailable}（设备计数 Redis 故障）。
+     */
+    public void recordDecisionDegraded(String reason) {
+        Counter.builder("coupon_risk_decision_degraded_total")
+                .tag("reason", reason)
+                .description("因子不完整仍出决策的次数（fail-open 可见性）——missing-header=设备维度没接，counter-unavailable=计数 Redis 故障")
+                .register(registry)
+                .increment();
+    }
 }

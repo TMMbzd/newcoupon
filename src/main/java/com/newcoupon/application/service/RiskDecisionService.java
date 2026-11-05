@@ -10,6 +10,7 @@ import com.newcoupon.infrastructure.persistence.po.RiskDecisionLogPO;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -99,6 +100,15 @@ public class RiskDecisionService {
     }
 
     /**
+     * 风控决策是否启用（同一三层取值，decide 内部会再判一次——租户层有缓存，二次读无负担）。
+     * 给接线点的**前置分支**用：只在开时才做"幂等重放豁免"等额外查询，
+     * 保证关时热路径零额外 IO 的承诺不被前置查询破坏（审查 C2 的配套）。
+     */
+    public boolean enabled(String appId) {
+        return switchService.isOn(SwitchKey.RISK_DECISION, appId);
+    }
+
+    /**
      * 规则评估公共内核（decide 与 replay 共用，保证两条路的判定逻辑只有一份）。
      * matched 由调用方收集（回放也要用它做 diff）。
      */
@@ -181,13 +191,17 @@ public class RiskDecisionService {
     }
 
     /**
-     * 只读回放的评估内核：与 {@link #decide} 同一套"取最严"合成，但只跑
-     * {@code replayable()} 的规则（无副作用），其余列入 skippedRules。
-     * **不写决策日志、不看开关**——回放是离线分析（对照当前规则集与当时快照），
-     * 开关关着也应能复盘历史。与 decide 的另一差别：不短路（白名单/REJECT 仍评估完
-     * 全部可回放规则）——回放的价值在完整对照，省一次只读查询没有意义。
+     * 只读回放的评估内核：与 {@link #decide} 同一套"取最严"合成，但每条规则走
+     * {@link RiskRule#replay}（默认=线上同路径；副作用规则覆盖为"日志因子×当前配置"的
+     * 纯重算），不可回放的列入 skippedRules。**不写决策日志、不看开关**——回放是
+     * 离线分析（对照当前规则集与当时快照），开关关着也应能复盘历史。
+     * 与 decide 的另一差别：不短路（白名单/REJECT 仍评估完全部可回放规则）——
+     * 回放的价值在完整对照，省一次只读查询没有意义。
+     *
+     * @param loggedFactors 该行日志的 factors_json 反序列化快照——阈值重算类 replay 的输入
      */
-    public ReplayEvaluation replayEvaluate(RiskContext ctx) {
+    public ReplayEvaluation replayEvaluate(RiskContext ctx, Map<String, Object> loggedFactors) {
+        Map<String, Object> logged = loggedFactors == null ? Map.of() : loggedFactors;
         RiskFactors factors = new RiskFactors();
         List<String> matched = new ArrayList<>();
         List<String> replayed = new ArrayList<>();
@@ -198,12 +212,12 @@ public class RiskDecisionService {
                 continue;
             }
             if (!rule.replayable()) {
-                skipped.add(new SkippedRule(rule.ruleId(), "有副作用（计数等），回放只读不重算"));
+                skipped.add(new SkippedRule(rule.ruleId(), "有副作用且日志因子不足以重算，回放不评估"));
                 continue;
             }
             replayed.add(rule.ruleId());
             try {
-                Optional<RiskAction> hit = rule.evaluate(ctx, factors);
+                Optional<RiskAction> hit = rule.replay(ctx, logged, factors);
                 if (hit.isPresent()) {
                     matched.add(rule.ruleId());
                     if (hit.get().moreSevereThan(action)) {

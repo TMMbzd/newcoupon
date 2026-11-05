@@ -2,6 +2,7 @@ package com.newcoupon.application.service;
 
 import com.newcoupon.domain.risk.RiskAction;
 import com.newcoupon.domain.risk.RiskScene;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -43,10 +44,27 @@ public interface RiskRule {
     Optional<RiskAction> evaluate(RiskContext ctx, RiskFactors factors);
 
     /**
-     * 是否可回放（无副作用）。默认 false——**有副作用的规则必须显式声明不可回放**，
-     * 回放端点会把它列进 skippedRules 而不是假装重算了一个数。
+     * 是否可回放。**回放的定义是"无副作用地重算"**——不满足的规则返回 false，
+     * 回放端点会把它列进 skippedRules（如实标注"未评估"，不假装算过）。
+     *
+     * <p>纯规则（只读判定，如名单）直接 true；有副作用但**日志因子足够重算**的规则
+     * 也返回 true 并覆盖 {@link #replay}（如设备日限：日志里有当时的 count，
+     * 拿它对**当前阈值**重新比较即可，不需要再碰计数器）。
      */
     default boolean replayable() {
         return false;
+    }
+
+    /**
+     * 回放时的重算方式。默认=与线上同一条路径（{@link #evaluate}，适用于纯规则）；
+     * 有副作用的规则覆盖本方法做"**日志因子 × 当前配置**"的纯重算——这是调参验证
+     * 的物理基础：改了阈值/名单后回放历史行，diff 才会真的动。
+     *
+     * @param loggedFactors 当次决策日志里的 factors_json（反序列化后的快照）；
+     *                      老行/无快照时可能为空 Map——实现要能诚实地说"算不了"（返回 empty+注明）
+     */
+    default Optional<RiskAction> replay(RiskContext ctx, Map<String, Object> loggedFactors,
+                                        RiskFactors out) {
+        return evaluate(ctx, out);
     }
 }

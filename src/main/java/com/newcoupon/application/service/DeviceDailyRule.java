@@ -3,8 +3,10 @@ package com.newcoupon.application.service;
 import com.newcoupon.domain.risk.RiskAction;
 import com.newcoupon.domain.risk.RiskScene;
 import com.newcoupon.infrastructure.metrics.GovernanceMetrics;
+import com.newcoupon.infrastructure.metrics.RiskMetrics;
 import com.newcoupon.infrastructure.risk.DeviceDailyCounter;
 import java.time.LocalDate;
+import java.util.Map;
 import java.util.Optional;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.annotation.Order;
@@ -36,15 +38,22 @@ public class DeviceDailyRule implements RiskRule {
     /** fail-open 指标维度码：与 risk_ip（IP 频控）、开放面 ip（配额）互不合并计数 */
     static final String METRIC_DIMENSION = "risk_device";
 
+    /** degraded 指标的两个 reason（审查 C5）：设备维度缺失/计数源不可用 */
+    static final String REASON_MISSING_HEADER = "missing-header";
+    static final String REASON_COUNTER_UNAVAILABLE = "counter-unavailable";
+
     private final DeviceDailyCounter counter;
-    private final GovernanceMetrics metrics;
+    private final GovernanceMetrics governanceMetrics;
+    private final RiskMetrics riskMetrics;
     private final int maxPerDay;
 
     public DeviceDailyRule(DeviceDailyCounter counter,
-                           GovernanceMetrics metrics,
+                           GovernanceMetrics governanceMetrics,
+                           RiskMetrics riskMetrics,
                            @Value("${coupon.risk.device-daily.max-per-day:10}") int maxPerDay) {
         this.counter = counter;
-        this.metrics = metrics;
+        this.governanceMetrics = governanceMetrics;
+        this.riskMetrics = riskMetrics;
         this.maxPerDay = maxPerDay;
     }
 
@@ -60,16 +69,19 @@ public class DeviceDailyRule implements RiskRule {
 
     @Override
     public boolean replayable() {
-        return false;   // INCR 是副作用，回放跳过（见类注释）
+        // 回放走 replay() 的"日志因子×当前阈值"纯重算（不碰计数器）——见下
+        return true;
     }
 
     @Override
     public Optional<RiskAction> evaluate(RiskContext ctx, RiskFactors factors) {
         factors.put("device.maxPerDay", maxPerDay);
         if (ctx.deviceId() == null || ctx.deviceId().isBlank()) {
-            // 因子缺失：跳过并标 degraded——不挡请求（接入方没接设备头 ≠ 攻击）
-            factors.put("device.skipped", "missing-header");
+            // 因子缺失：跳过并标 degraded——不挡请求（接入方没接设备头 ≠ 攻击）。
+            // 必须上指标（审查 C5）：租户漏发设备头时"唯一自动化规则静默归零"要出现在盘面上
+            factors.put("device.skipped", REASON_MISSING_HEADER);
             factors.markDegraded();
+            riskMetrics.recordDecisionDegraded(REASON_MISSING_HEADER);
             return Optional.empty();
         }
         long count;
@@ -77,12 +89,38 @@ public class DeviceDailyRule implements RiskRule {
             count = counter.increment(ctx.appId(), ctx.deviceId(), LocalDate.now());
         } catch (RuntimeException e) {
             // 因子源不可用：fail-open（放行）+ degraded + 可见——与 IpRateGate 同款三件套
-            factors.put("device.skipped", "counter-unavailable");
+            factors.put("device.skipped", REASON_COUNTER_UNAVAILABLE);
             factors.markDegraded();
-            metrics.recordLimitFailOpen(METRIC_DIMENSION);
+            governanceMetrics.recordLimitFailOpen(METRIC_DIMENSION);
+            riskMetrics.recordDecisionDegraded(REASON_COUNTER_UNAVAILABLE);
             return Optional.empty();
         }
         factors.put("device.count", count);
         return count > maxPerDay ? Optional.of(RiskAction.REJECT) : Optional.empty();
+    }
+
+    /**
+     * 回放（审查 B 簇）：**日志 count × 当前阈值**的纯内存重算——不 INCR、不碰 Redis。
+     *
+     * <p>为什么必须做阈值重算而不是整体跳过：设备日限是稳态下 REJECT 的最大来源，
+     * 整体跳过会让这些行回放恒 PASS——误杀申诉拿到假答案（"拦他的条件已变"，用户重试
+     * 仍 7003），"改阈值回放量化影响"也物理不可行（改前改后逐字节相同）。
+     * 阈值重算后：阈值未变→REJECT（如实）；阈值调大→翻转成放行（量化可见）。
+     * 当时没算出 count（无头/Redis down 的 degraded 行）→ 如实说算不了，返回 empty。
+     */
+    @Override
+    public Optional<RiskAction> replay(RiskContext ctx, Map<String, Object> loggedFactors,
+                                       RiskFactors out) {
+        Object logged = loggedFactors.get("device.count");
+        if (!(logged instanceof Number number)) {
+            // 当时该规则没说话（无设备头/计数不可用）：回放同样不说话——不能拿"今天的计数"
+            // 冒充"当时的计数"（两次不同的观察混进一次复盘）
+            out.put("device.replay", "no-logged-count");
+            return Optional.empty();
+        }
+        out.put("device.replay", "threshold-recompute");
+        out.put("device.count", number.longValue());
+        out.put("device.maxPerDay", maxPerDay);
+        return number.longValue() > maxPerDay ? Optional.of(RiskAction.REJECT) : Optional.empty();
     }
 }
