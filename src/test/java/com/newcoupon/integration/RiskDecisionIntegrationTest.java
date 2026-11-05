@@ -65,6 +65,7 @@ class RiskDecisionIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired private org.springframework.security.crypto.password.PasswordEncoder passwordEncoder;
     @Autowired private com.newcoupon.infrastructure.persistence.mapper.AdminRbacMapper rbacMapper;
     @Autowired private org.springframework.data.redis.core.StringRedisTemplate redis;
+    @Autowired private io.micrometer.core.instrument.MeterRegistry meterRegistry;
     @Autowired private DataSource dataSource;
 
     private static final AtomicBoolean PROVISIONED = new AtomicBoolean();
@@ -206,6 +207,10 @@ class RiskDecisionIntegrationTest extends ShardedIntegrationTestSupport {
                 "SELECT degraded FROM risk_decision_log WHERE user_id = ? ORDER BY id DESC LIMIT 1",
                 (rs, n) -> ((Number) rs.getObject(1)).intValue(), user2);
         assertThat(degraded).as("缺设备头=因子不完整，degraded=1 且放行").isEqualTo(1);
+        // 缺头必须上盘面（审查 C5）：租户漏发设备头时"唯一自动化规则静默归零"不能只靠翻日志发现
+        assertThat(meterRegistry.find("coupon_risk_decision_degraded_total")
+                .tag("reason", "missing-header").counter())
+                .as("degraded 指标要让「设备维度没接」出现在大盘上").isNotNull();
     }
 
     // ------------------------------------------------------------------
@@ -327,7 +332,7 @@ class RiskDecisionIntegrationTest extends ShardedIntegrationTestSupport {
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("R8: decisions/query 按 scene/action/appId 过滤命中；时间窗护栏（不成对/超 31 天/拼错枚举=1000）")
+    @DisplayName("R8: decisions/query 过滤（scene/action/appId/userId/requestId）+定位键命中；默认窗=最近 1 天（审查 C4/C9）")
     void decisionQueryFiltersAndGuards() throws Exception {
         long userId = uniqueUserId();
         addList("BLACK", "USER_ID", String.valueOf(userId), null, "R8 查询用", null);
@@ -339,6 +344,43 @@ class RiskDecisionIntegrationTest extends ShardedIntegrationTestSupport {
                         adminHeaders(null)), String.class);
         assertThat(query.getStatusCode().value()).isEqualTo(200);
         assertThat(query.getBody()).as("按过滤条件应找到 R8 的拒绝行").contains(requestId);
+
+        // 定位键过滤（审查 C4）：误杀工单的真实入口是 userId/requestId，不是 scene
+        ResponseEntity<String> byUser = rest.exchange("/api/risk/decisions/query", HttpMethod.POST,
+                new HttpEntity<>("{\"userId\":" + userId + ",\"limit\":50}", adminHeaders(null)),
+                String.class);
+        JsonNode items = JSON.readTree(byUser.getBody()).path("data").path("items");
+        assertThat(items.isArray() && items.size() > 0).as("按 userId 应命中。body=" + byUser.getBody()).isTrue();
+        for (JsonNode item : items) {
+            assertThat(item.path("userId").asLong())
+                    .as("userId 过滤=只返回该用户的行（不是全量里恰好包含）").isEqualTo(userId);
+        }
+        ResponseEntity<String> byRequest = rest.exchange("/api/risk/decisions/query", HttpMethod.POST,
+                new HttpEntity<>("{\"requestId\":\"" + requestId + "\",\"limit\":50}", adminHeaders(null)),
+                String.class);
+        assertThat(JSON.readTree(byRequest.getBody()).path("data").path("items").toString())
+                .contains(requestId);
+
+        // 默认时间窗=最近 1 天（审查 C9）：不传时间不是无界扫描——3 天前的旧行默认窗不可见
+        jdbc().update("INSERT INTO risk_decision_log "
+                        + "(id, scene, app_id, user_id, action, degraded, created_at) "
+                        + "VALUES (?, 'RECEIVE', '1', ?, 'REJECT', 0, ?)",
+                System.nanoTime(), userId, LocalDateTime.now().minusDays(3));
+        ResponseEntity<String> defaultWindow = rest.exchange("/api/risk/decisions/query", HttpMethod.POST,
+                new HttpEntity<>("{\"userId\":" + userId + ",\"limit\":200}", adminHeaders(null)),
+                String.class);
+        JsonNode defaultItems = JSON.readTree(defaultWindow.getBody()).path("data").path("items");
+        // 显式给覆盖 3 天前的窗口 → 旧行可见（默认窗是护栏不是删除）：宽窗必须比默认窗多出那行
+        ResponseEntity<String> wideWindow = rest.exchange("/api/risk/decisions/query", HttpMethod.POST,
+                new HttpEntity<>("{\"userId\":" + userId
+                                + ",\"startTime\":\"" + LocalDateTime.now().minusDays(4).withNano(0)
+                                + "\",\"endTime\":\"" + LocalDateTime.now().withNano(0) + "\",\"limit\":200}",
+                        adminHeaders(null)), String.class);
+        int wideCount = JSON.readTree(wideWindow.getBody()).path("data").path("items").size();
+        assertThat(wideCount)
+                .as("默认窗=最近 1 天应排除 3 天前的旧行，宽窗（4 天）应多出它。default=%d wide=%d",
+                        defaultItems.size(), wideCount)
+                .isGreaterThan(defaultItems.size());
 
         // 护栏三连：只配一头 / 窗口超长 / 枚举拼错——都拒绝而不是静默空列表
         assertThat(codeOf(rest.exchange("/api/risk/decisions/query", HttpMethod.POST,
@@ -370,14 +412,16 @@ class RiskDecisionIntegrationTest extends ShardedIntegrationTestSupport {
         Integer totalRows = jdbc().queryForObject(
                 "SELECT COUNT(*) FROM risk_decision_log WHERE user_id = ?", Integer.class, userId);
 
-        // 第一次回放：名单还在、规则未变 → 同结果；设备日限因副作用被跳过（如实列出）
+        // 第一次回放：名单还在、规则未变 → 同结果。设备日限参与回放（日志因子×当前阈值的
+        // 纯重算，审查 B 簇）——本行无设备头（无日志 count），如实说"算不了"，不进 skippedRules
         ResponseEntity<String> same = rest.exchange("/api/risk/decisions/" + logId + "/replay",
                 HttpMethod.POST, new HttpEntity<>(adminHeaders(null)), String.class);
         assertThat(same.getStatusCode().value()).isEqualTo(200);
         JsonNode sameData = JSON.readTree(same.getBody()).path("data");
         assertThat(sameData.path("replayAction").asText()).isEqualTo("REJECT");
         assertThat(sameData.path("ruleDiff").toString()).as("规则未变=无差异").isEqualTo("[]");
-        assertThat(sameData.path("skippedRules").toString()).contains("R_DEVICE_DAILY");
+        assertThat(sameData.path("replayedRules").toString()).contains("R_DEVICE_DAILY");
+        assertThat(sameData.path("skippedRules").toString()).isEqualTo("[]");
 
         // 停用名单（误杀复盘的常见动作：先放人再查）→ 重放变 PASS，diff 把原因说清
         rest.exchange("/api/risk/lists/disable", HttpMethod.POST,
@@ -485,6 +529,91 @@ class RiskDecisionIntegrationTest extends ShardedIntegrationTestSupport {
         // 停用后命中失效（软删行还在=申诉现场）
         ResponseEntity<String> afterDisable = receive("rk-r11-" + UUID.randomUUID(), userId, null);
         assertThat(afterDisable.getStatusCode().value()).isEqualTo(200);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑨ 审查 A 簇：停用后同自然键重建（复活语义——否则黑名单静默缺失）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("R12: 停用→同键 add 复活为 ACTIVE（reactivated=true）→ 风控拦截立即生效")
+    void disabledEntryReactivatesOnReAdd() throws Exception {
+        long userId = uniqueUserId();
+        JsonNode first = addList("BLACK", "USER_ID", String.valueOf(userId), null, "R12 先建", null);
+        Long id = first.path("id").asLong();
+        rest.exchange("/api/risk/lists/disable", HttpMethod.POST,
+                new HttpEntity<>("{\"id\":" + id + "}", adminHeaders(null)), String.class);
+
+        // 同自然键重建：不是 duplicated 短路，而是复活——否则"停用后重建"的工作流在 API 上走不通，
+        // 黑名单静默缺失且无任何信号（审查 A：critical）
+        JsonNode reactivated = addList("BLACK", "USER_ID", String.valueOf(userId), null,
+                "R12 复活（新 reason）", null);
+        assertThat(reactivated.path("status").asText()).isEqualTo("ACTIVE");
+        assertThat(reactivated.path("reactivated").asBoolean())
+                .as("复活要可辨别——运营需要知道这条是重新生效而不是新建").isTrue();
+        assertThat(reactivated.path("reason").asText()).isEqualTo("R12 复活（新 reason）");
+        assertThat(jdbc().queryForObject(
+                "SELECT COUNT(*) FROM risk_list_entry WHERE value = ? AND status = 'ACTIVE'",
+                Integer.class, String.valueOf(userId))).isEqualTo(1);
+
+        // 复活的名单立即执法（决策时直查无缓存）
+        assertThat(codeOf(receive("rk-r12-" + UUID.randomUUID(), userId, null))).isEqualTo(7003);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑩ 审查 B 簇：设备日限 REJECT 行的回放（阈值-only 重算，不再恒 PASS）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("R13: 设备超阈 REJECT 行回放 → 仍 REJECT（用日志 count 对当前阈值重算，不做副作用）")
+    void deviceRejectRowReplaysWithThresholdRecompute() throws Exception {
+        String device = "DEV-R13-" + UUID.randomUUID();
+        long userId = uniqueUserId();
+        for (int i = 1; i <= 10; i++) {
+            receive("rk-r13-" + i + "-" + UUID.randomUUID(), userId, device);
+        }
+        assertThat(codeOf(receive("rk-r13-11-" + UUID.randomUUID(), userId, device))).isEqualTo(7003);
+        Long logId = jdbc().queryForObject(
+                "SELECT id FROM risk_decision_log WHERE device_id = ? AND action = 'REJECT' "
+                        + "ORDER BY id DESC LIMIT 1", Long.class, device);
+
+        ResponseEntity<String> replay = rest.exchange("/api/risk/decisions/" + logId + "/replay",
+                HttpMethod.POST, new HttpEntity<>(adminHeaders(null)), String.class);
+        JsonNode data = JSON.readTree(replay.getBody()).path("data");
+        // 之前：R_DEVICE_DAILY 被整体 skip → replayAction 恒 PASS——误杀申诉拿到假答案
+        // （"拦他的条件已变"，运维关单，用户重试仍 7003）。现在：日志 count=11 对当前阈值 10
+        // 纯内存重算 → REJECT；且不再进 skippedRules（它参与了回放）
+        assertThat(data.path("replayAction").asText())
+                .as("设备超阈行回放必须还是 REJECT。body=" + replay.getBody()).isEqualTo("REJECT");
+        assertThat(data.path("ruleDiff").toString()).as("阈值未变=无差异").isEqualTo("[]");
+        assertThat(data.path("skippedRules").toString())
+                .as("设备日限改为日志因子×当前阈值的重算，不再整体跳过").doesNotContain("R_DEVICE_DAILY");
+        assertThat(data.path("replayedRules").toString()).contains("R_DEVICE_DAILY");
+        // 只读语义：没有替用户多计一次数（Redis 键值不变）
+        var keys = redis.keys("c:risk:dev:1:" + device + ":*");
+        assertThat(redis.opsForValue().get(keys.iterator().next()))
+                .as("回放不得产生副作用（计数不变）").isEqualTo("11");
+    }
+
+    // ------------------------------------------------------------------
+    // ⑪ 审查 C2：REJECT 判定不得吃掉幂等重放（已成立的事实不被风控改写）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("R14: 领券成功→拉黑→同 requestId 重试 → duplicated 原结果而非 7003")
+    void idempotentReplaySkipsRiskRejection() throws Exception {
+        long userId = uniqueUserId();
+        String requestId = "rk-r14-" + UUID.randomUUID();
+        ResponseEntity<String> first = receive(requestId, userId, null);
+        assertThat(first.getStatusCode().value()).as("body=" + first.getBody()).isEqualTo(200);
+
+        addList("BLACK", "USER_ID", String.valueOf(userId), null, "R14 领券后才拉黑", null);
+        ResponseEntity<String> retry = receive(requestId, userId, null);
+        assertThat(retry.getStatusCode().value())
+                .as("同 requestId 的重试是既有事实的重放，不是新的领券意图。body=" + retry.getBody())
+                .isEqualTo(200);
+        assertThat(JSON.readTree(retry.getBody()).path("code").asInt()).isZero();
+        assertThat(JSON.readTree(retry.getBody()).path("data").path("duplicated").asBoolean()).isTrue();
     }
 
     // ------------------------------------------------------------------
