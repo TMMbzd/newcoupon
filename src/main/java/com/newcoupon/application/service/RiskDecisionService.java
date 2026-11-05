@@ -2,7 +2,6 @@ package com.newcoupon.application.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.newcoupon.domain.risk.RiskAction;
-import com.newcoupon.domain.risk.RiskScene;
 import com.newcoupon.infrastructure.id.SnowflakeIdGenerator;
 import com.newcoupon.infrastructure.metrics.RiskMetrics;
 import com.newcoupon.infrastructure.persistence.mapper.RiskDecisionLogMapper;
@@ -73,11 +72,16 @@ public class RiskDecisionService {
         this.objectMapper = objectMapper;
     }
 
-    /** 决策结果（matchedRules=产出动作的规则；关闸时恒为 PASS/空/false） */
-    public record RiskDecision(RiskAction action, List<String> matchedRules, boolean degraded) {
+    /**
+     * 决策结果（matchedRules=产出动作的规则；关闸时恒为 PASS/空/false）。
+     * decisionId=决策日志行的主键（4B）：退款场景的结算冻结 holdNo=RISK-{decisionId}
+     * 以它把 hold 行与决策行缝在一起（关闸时无日志行，decisionId=null）。
+     */
+    public record RiskDecision(RiskAction action, List<String> matchedRules, boolean degraded,
+                               Long decisionId) {
 
         static RiskDecision off() {
-            return new RiskDecision(RiskAction.PASS, List.of(), false);
+            return new RiskDecision(RiskAction.PASS, List.of(), false, null);
         }
     }
 
@@ -89,14 +93,15 @@ public class RiskDecisionService {
         if (!switchService.isOn(SwitchKey.RISK_DECISION, ctx.appId())) {
             return RiskDecision.off();
         }
+        long decisionId = idGenerator.next();   // 先取 id 再评估：决策与日志行号一对一
         RiskFactors factors = new RiskFactors();
         List<String> matched = new ArrayList<>();
         RiskAction action = evaluate(ctx, factors, matched);
 
-        writeLog(ctx, factors, matched, action);
+        writeLog(decisionId, ctx, factors, matched, action);
 
         metrics.recordDecision(action.name());
-        return new RiskDecision(action, List.copyOf(matched), factors.degraded());
+        return new RiskDecision(action, List.copyOf(matched), factors.degraded(), decisionId);
     }
 
     /**
@@ -146,11 +151,11 @@ public class RiskDecisionService {
     }
 
     /** 同步写决策日志；失败不挡业务（ERROR + 指标，见类注释的语义裁定） */
-    private void writeLog(RiskContext ctx, RiskFactors factors, List<String> matched,
-                          RiskAction action) {
+    private void writeLog(long decisionId, RiskContext ctx, RiskFactors factors,
+                          List<String> matched, RiskAction action) {
         try {
             RiskDecisionLogPO po = new RiskDecisionLogPO();
-            po.setId(idGenerator.next());
+            po.setId(decisionId);
             po.setScene(ctx.scene().name());
             po.setAppId(ctx.appId());
             po.setUserId(ctx.userId());
