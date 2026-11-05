@@ -62,6 +62,8 @@ public class ReceiveAppService {
         this.riskDecisionService = riskDecisionService;
     }
 
+    @com.newcoupon.infrastructure.metrics.SliJourney(
+            com.newcoupon.infrastructure.metrics.SliMetrics.Journey.RECEIVE)
     public ReceiveResult receive(ReceiveRequest request) {
         // V43 事件归因：同步入口补链路标记 SYNC。用 ifAbsent 语义——其余三条链路
         // （异步/批量/兑换码）不经过本方法，它们构造 ReceiveRequest 时已自带 source；

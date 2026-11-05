@@ -44,6 +44,8 @@ public class CalculateAppService {
         this.maxDiscountRatio = maxDiscountRatio;
     }
 
+    @com.newcoupon.infrastructure.metrics.SliJourney(
+            com.newcoupon.infrastructure.metrics.SliMetrics.Journey.CALCULATE)
     public CalculateResponse calculate(CalculateRequest request) {
         String orderNo = normalizeOrderNo(request.orderNo());
         boolean partyEnabled = settlePartyPolicy.isEnabled();

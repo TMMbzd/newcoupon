@@ -222,6 +222,8 @@ public class TradeAppService {
      * 归属者可由 usageNo 在占用单反查（审计 before/after 快照里都带 usageNo）。
      */
     @AuditLog(action = "COUPON_CONFIRM", resourceType = "USAGE", describe = "核销占用单（动钱）")
+    @com.newcoupon.infrastructure.metrics.SliJourney(
+            com.newcoupon.infrastructure.metrics.SliMetrics.Journey.CONFIRM)
     public ConfirmResult confirm(ConfirmRequest req) {
         ConfirmResult result;
         try {
@@ -645,6 +647,8 @@ public class TradeAppService {
     }
 
     @AuditLog(action = "COUPON_REFUND", resourceType = "USAGE", describe = "退款冲销（动钱）")
+    @com.newcoupon.infrastructure.metrics.SliJourney(
+            com.newcoupon.infrastructure.metrics.SliMetrics.Journey.REFUND)
     public RefundResult refund(RefundRequest req) {
         RefundResult result;
         try {
