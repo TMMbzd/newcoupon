@@ -57,15 +57,32 @@ class TradeAppServiceTest {
     // 手动构造：构造器新增了两个 @Value 基本类型参数（占比上限/速率阈值），
     // @InjectMocks 无法给基本类型注入值——按生产默认值 80/600 手工传入。
     // DiscountCalculatorService 本组用例不走核销路径，传 null。
+    // V6 4B 新增的风控六依赖全部传 mock：mock 的 boolean 默认 false = 开关关，
+    // 接线段整段跳过——与本组用例（4B 之前的行为回归）的语义一致。
     // 构造放 @BeforeEach（不能放字段初始化器）：@Mock 字段由 Mockito 在每个测试前注入，
     // 字段初始化器跑得更早，那时 mock 还是 null。
     private TradeAppService service;
+
+    @Mock
+    private RiskDecisionService riskDecisionService;
+    @Mock
+    private SettlementHoldService settlementHoldService;
+    @Mock
+    private com.newcoupon.infrastructure.persistence.mapper.CouponRefundOrderMapper refundOrderMapper;
+    @Mock
+    private com.newcoupon.infrastructure.persistence.mapper.CouponRefundDetailMapper refundDetailMapper;
+    @Mock
+    private com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers breakers;
+    @Mock
+    private com.newcoupon.infrastructure.metrics.RiskMetrics riskMetrics;
 
     @org.junit.jupiter.api.BeforeEach
     void setUp() {
         service = new TradeAppService(
                 tradeTxService, userCouponRepository, couponUsageRepository, null, null,
-                pricingUsageRepository, refundPolicyService, tradeMetrics, 80, 600);
+                pricingUsageRepository, refundPolicyService, tradeMetrics,
+                riskDecisionService, settlementHoldService, refundOrderMapper, refundDetailMapper,
+                breakers, riskMetrics, 80, 600);
     }
 
     private static CouponUsage usage() {
