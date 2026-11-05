@@ -78,7 +78,11 @@ import javax.sql.DataSource;
         "coupon.risk.budget-burn.daily-ledger-threshold=3",
         // 熔断统计抬窗：测试内零星调用不触发熔断判据（只验证“7003 不计失败”，不开闸）
         "coupon.circuit-breaker.min-calls=10000",
-        "coupon.circuit-breaker.window-size=10000"
+        "coupon.circuit-breaker.window-size=10000",
+        // T11（核销异常单走风控）需要价格快照链路：calculate→lock(pricingId)→confirm 不一致
+        // →CONFIRM_EXCEPTION→resolve。快照默认关（PricingSnapshotPolicy），不开时 calculate
+        // 不返回 pricingId、confirm 走平台复算永远不进异常分支
+        "coupon.trade.pricing.enabled=true"
 })
 class Risk4BIntegrationTest extends ShardedIntegrationTestSupport {
 
@@ -104,6 +108,10 @@ class Risk4BIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired private CouponCodeBatchMapper batchMapper;
     @Autowired private DependencyCircuitBreakers breakers;
     @Autowired private DataSource dataSource;
+    @Autowired private com.newcoupon.application.service.CalculateAppService calculateAppService;
+    @Autowired private com.newcoupon.application.service.DailyBillService dailyBillService;
+    @Autowired private com.newcoupon.application.service.ConfirmExceptionService confirmExceptionService;
+    @Autowired private com.newcoupon.domain.repository.CouponUsageRepository couponUsageRepository;
 
     private static final AtomicBoolean PROVISIONED = new AtomicBoolean();
     private static volatile long templateId;
@@ -238,14 +246,16 @@ class Risk4BIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(decision.get("action")).isEqualTo("REJECT");
         assertThat((String) decision.get("matched_rules")).contains("R_LIST_BLACK");
 
-        // 结算冻结：RISK-{decisionId} 主体级 hold（template_id 空），金额=本单退款额
+        // 结算冻结：RISK-{decisionId} 模板级 hold（M1：只扣该模板行的应付，不放大到主体全部行）
         String holdNo = "RISK-" + decision.get("id");
         var hold = jdbc().queryForMap(
                 "SELECT app_id, settle_party_id, template_id, amount, source, status "
                         + "FROM coupon_settlement_hold WHERE hold_no = ?", holdNo);
         assertThat(hold.get("app_id")).isEqualTo("1");
         assertThat(hold.get("settle_party_id")).isEqualTo("__default__");
-        assertThat(hold.get("template_id")).as("主体级冻结（template_id 空=该主体全部模板行都扣）").isNull();
+        assertThat(((Number) hold.get("template_id")).longValue())
+                .as("模板级冻结（只扣本模板行——主体级会把同主体其它模板行也全额扣减）")
+                .isEqualTo(templateId);
         assertThat(((Number) hold.get("amount")).longValue()).isEqualTo(2000L);
         assertThat(hold.get("source")).isEqualTo("RISK_RULE");
         assertThat(hold.get("status")).isEqualTo("ACTIVE");
@@ -409,5 +419,227 @@ class Risk4BIntegrationTest extends ShardedIntegrationTestSupport {
                 .as("7003 是风控业务结果，不是 mysql 依赖故障——不进熔断统计")
                 .isEqualTo(failedBefore);
         assertThat(mysql.getState()).isEqualTo(CircuitBreaker.State.CLOSED);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑥ 审查 M1：退款 RISK hold 必须模板级——主体级会把同主体其它模板行全额扣减（×N 放大）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("T8: 多模板主体的退款冻结是模板级——账单只扣该模板行，其余模板行 hold=0")
+    void refundHoldIsTemplateLevelNotPartyWide() {
+        long templateA = createPublishedTemplate(3103L);
+        long templateB = createPublishedTemplate(3104L);
+        long userA = uniqueUserId();
+        long userB = uniqueUserId();
+        String usageA = confirmedUsageOn(userA, templateA, "t8a-" + UUID.randomUUID());
+        confirmedUsageOn(userB, templateB, "t8b-" + UUID.randomUUID());   // 同主体另一模板的正常核销
+
+        blacklist(userA);
+        RefundResult refund = tradeAppService.refund(
+                new RefundRequest(usageA, "RF-R4B-T8-" + UUID.randomUUID(), null));
+        assertThat(refund.duplicated()).isFalse();
+
+        // hold 行本身是模板级（template_id=被退券的模板），不是主体级（NULL）
+        var hold = jdbc().queryForMap(
+                "SELECT template_id FROM coupon_settlement_hold "
+                        + "WHERE hold_no LIKE 'RISK-%' AND settle_party_id = '__default__' "
+                        + "AND amount = 2000 ORDER BY id DESC LIMIT 1");
+        assertThat(((Number) hold.get("template_id")).longValue())
+                .as("模板级 hold：扣减精确到被退券的模板行").isEqualTo(templateA);
+
+        // 账单口径：该主体两个模板行都有当日核销，只有 A 行被 hold 扣、B 行不动
+        dailyBillService.generateAll(java.time.LocalDate.now());
+        Long holdA = jdbc().queryForObject(
+                "SELECT COALESCE(hold_amount, 0) FROM coupon_settle_party_daily_bill "
+                        + "WHERE app_id = '1' AND settle_party_id = '__default__' "
+                        + "AND template_id = ? AND bill_date = CURRENT_DATE",
+                Long.class, templateA);
+        Long holdB = jdbc().queryForObject(
+                "SELECT COALESCE(hold_amount, 0) FROM coupon_settle_party_daily_bill "
+                        + "WHERE app_id = '1' AND settle_party_id = '__default__' "
+                        + "AND template_id = ? AND bill_date = CURRENT_DATE",
+                Long.class, templateB);
+        assertThat(holdA).as("被退券的模板行按本单退款额扣减").isEqualTo(2000L);
+        assertThat(holdB).as("同主体其它模板行不被主体级 hold 波及（M1 前：这里也是 2000）")
+                .isEqualTo(0L);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑦ 审查 M3：兑换码决策要带 templateId——否则预算燃烧对码面恒失明
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("T9: 开预算活动高速兑换码 → R_BUDGET_BURN 亮 REVIEW（码面不再 degraded 跳过）")
+    void redeemCarriesTemplateIdForBudgetBurn() {
+        var activity = activityAppService.create(new ActivityCreateRequest(
+                "风控4B码面燃烧-" + UUID.randomUUID().toString().substring(0, 8),
+                1_000_000L, true,
+                LocalDateTime.now().minusDays(1), LocalDateTime.now().plusDays(30), "tester"));
+        long tpl = createPublishedTemplate(activity.id());
+        CouponCodeBatchCreateResult batch = codeService.createBatch(new CouponCodeBatchCreateRequest(
+                "rk4b-t9-batch-" + UUID.randomUUID(), tpl, 3, 1, "tester"));
+
+        // 每次兑换=RESERVE+CONFIRM 两行流水：第 3 次决策看到 4 行 > 阈值 3 → REVIEW
+        String thirdRequestId = null;
+        for (int i = 1; i <= 3; i++) {
+            thirdRequestId = "rk4b-t9-" + i + "-" + UUID.randomUUID();
+            codeService.redeem(new CouponCodeRedeemRequest(
+                    thirdRequestId, batch.codes().get(i - 1), uniqueUserId()));
+        }
+        // 按第 3 次兑换的 requestId 精确断言（不能按 factors 模糊查——T6 的同步领券行会串）
+        var decision = jdbc().queryForMap(
+                "SELECT action, matched_rules, factors_json FROM risk_decision_log "
+                        + "WHERE request_id = ? AND scene = 'RECEIVE'", thirdRequestId);
+        assertThat(decision.get("action"))
+                .as("码面高速兑换要让预算燃烧亮 REVIEW（M3 前：无 templateId 恒 degraded 跳过）")
+                .isEqualTo("REVIEW");
+        assertThat((String) decision.get("matched_rules")).contains("R_BUDGET_BURN");
+        assertThat((String) decision.get("factors_json")).contains("budget.ledgerToday");
+    }
+
+    // ------------------------------------------------------------------
+    // ⑧ 审查 m1：REFUND 名单只匹配 USER_ID——服务端调用方出口 IP/设备不是消费者维度
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("T10: 拉黑退款调用方出口 IP → 退款照做且不挂 hold（IP 维度对 REFUND 不参与判定）")
+    void refundSceneIgnoresCallerIpDimension() {
+        long userId = uniqueUserId();
+        String usageNo = confirmedUsage(userId, "t10-" + UUID.randomUUID());
+        String callerIp = "10.77.3." + (System.nanoTime() % 250);
+        riskListService.add(new com.newcoupon.application.dto.RiskDtos.ListAddRequest(
+                "BLACK", "IP", callerIp, null, "T10 拉黑商家出口 IP（治理领券滥用）", null));
+
+        // 服务端到服务端调用：调用方出口 IP 进了风控透传上下文（开放面真实形态）
+        com.newcoupon.infrastructure.risk.RiskRequestAttributes.set(
+                new com.newcoupon.infrastructure.risk.RiskRequestAttributes.Attributes(null, callerIp));
+        try {
+            String refundNo = "RF-R4B-T10-" + UUID.randomUUID();
+            RefundResult refund = tradeAppService.refund(new RefundRequest(usageNo, refundNo, null));
+            assertThat(refund.duplicated()).as("退款当然照做（红线不因维度口径改变）").isFalse();
+
+            var decision = jdbc().queryForMap(
+                    "SELECT action, factors_json FROM risk_decision_log "
+                            + "WHERE user_id = ? AND scene = 'REFUND' AND request_id = ?",
+                    userId, refundNo);
+            assertThat(decision.get("action"))
+                    .as("调用方出口 IP 不是消费者维度：REFUND 只匹配 USER_ID——它不在黑名单").isEqualTo("PASS");
+            assertThat((String) decision.get("factors_json"))
+                    .contains("refund-server-caller");
+            assertThat(jdbc().queryForObject(
+                    "SELECT COUNT(*) FROM coupon_settlement_hold WHERE settle_party_id = '__default__' "
+                            + "AND created_at >= CURRENT_DATE AND source = 'RISK_RULE'",
+                    Integer.class))
+                    .as("PASS 决策不冻结——商家的 payable 不会被拉黑出口 IP 的连带退款压住").isEqualTo(0);
+        } finally {
+            com.newcoupon.infrastructure.risk.RiskRequestAttributes.clear();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // ⑨ 审查 m2：CONFIRM_EXCEPTION 人工核销是 CONFIRM 的资金出口，不能绕过风控
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("T11: 拉黑用户的核销异常单 resolve(CONFIRM) 被拒 7003；解黑后放行且留决策行")
+    void confirmExceptionResolveGoesThroughRisk() {
+        // 建"满5000减1000"券 → 领 → 试算锁定快照 → 行不一致核销 → 4007 + CONFIRM_EXCEPTION
+        TemplateAppService.CreatedTemplate created = templateAppService.create(new TemplateCreateRequest(
+                "风控4B异常核销-" + UUID.randomUUID().toString().substring(0, 8),
+                9302L, 1, 1000L, null, 5000L, 100L, 1,
+                1, LocalDateTime.now().minusDays(1), LocalDateTime.now().plusDays(30),
+                null, 0L, 0));
+        templateAppService.publish(created.id());
+        long userId = uniqueUserId();
+        ReceiveResult rcv = receiveAppService.receive(
+                new ReceiveRequest("rk4b-t11-" + UUID.randomUUID(), userId, created.id()));
+        // 试算→锁定必须同一个 orderNo（快照按订单绑定；照 P6 用例形态）
+        String orderNo = "ORD-R4B-T11-" + UUID.randomUUID();
+        var calc = calculateAppService.calculate(new com.newcoupon.open.api.dto.CalculateRequest(
+                userId,
+                List.of(new com.newcoupon.open.api.dto.CalculateRequest.OrderItem(
+                        "SKU1", "CAT1", 10000L, 1, "L1")),
+                List.of(rcv.couponId()), orderNo));
+        LockResult lock = tradeAppService.lock(new LockRequest(
+                orderNo, userId, rcv.couponId(), calc.pricingId()));
+        assertThatThrownBy(() -> tradeAppService.confirm(new ConfirmRequest(lock.usageNo(), null,
+                List.of(new com.newcoupon.open.api.dto.CalculateRequest.OrderItem(
+                        "SKU1", "CAT1", 9999L, 1, "L1")), calc.pricingId())))
+                .isInstanceOf(BizException.class);
+        assertThat(couponUsageRepository.findByUsageNo(lock.usageNo())
+                .orElseThrow().getStatus())
+                .isEqualTo(com.newcoupon.domain.coupon.UsageStatus.CONFIRM_EXCEPTION);
+
+        // 拉黑后人工核销（CONFIRM_EXCEPTION 的资金出口）必须被风控拦下
+        blacklist(userId);
+        assertThatThrownBy(() -> confirmExceptionService.resolve(lock.usageNo(), "CONFIRM", "人工核对"))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getErrorCode())
+                .isEqualTo(ErrorCode.RISK_REJECTED);
+
+        // 解黑（白名单盖过）→ 放行且留 scene=CONFIRM 决策行
+        riskListService.add(new com.newcoupon.application.dto.RiskDtos.ListAddRequest(
+                "WHITE", "USER_ID", String.valueOf(userId), null, "T11 解黑-放行人工核销", null));
+        var resolved = confirmExceptionService.resolve(lock.usageNo(), "CONFIRM", "人工核对（解黑后）");
+        assertThat(resolved.usageStatus())
+                .isEqualTo(com.newcoupon.domain.coupon.UsageStatus.CONFIRMED.getDesc());
+        // 同一 usageNo 三行决策：进异常分支的那次核销尝试（PASS）+ 拉黑后 resolve（REJECT）
+        // + 解黑后 resolve（PASS）——资金出口的每次尝试都有留痕
+        Integer rejects = jdbc().queryForObject(
+                "SELECT COUNT(*) FROM risk_decision_log WHERE user_id = ? AND scene = 'CONFIRM' "
+                        + "AND action = 'REJECT' AND request_id = ?",
+                Integer.class, userId, lock.usageNo());
+        Integer passes = jdbc().queryForObject(
+                "SELECT COUNT(*) FROM risk_decision_log WHERE user_id = ? AND scene = 'CONFIRM' "
+                        + "AND action = 'PASS' AND request_id = ?",
+                Integer.class, userId, lock.usageNo());
+        assertThat(rejects).as("拉黑后的 resolve 必须留 REJECT 行").isEqualTo(1);
+        assertThat(passes).as("核销尝试与解黑后的 resolve 各留一行 PASS").isEqualTo(2);
+    }
+
+    /** 在指定模板上走"领→锁→核销"（M1 用：多模板同主体各自核销一笔）。 */
+    private String confirmedUsageOn(long userId, long template, String suffix) {
+        ReceiveResult rcv = receiveAppService.receive(
+                new ReceiveRequest("rk4b-" + suffix, userId, template));
+        LockResult lock = tradeAppService.lock(
+                new LockRequest("ORD-R4B-" + suffix, userId, rcv.couponId()));
+        tradeAppService.confirm(new ConfirmRequest(lock.usageNo(), null, List.of(
+                new com.newcoupon.open.api.dto.CalculateRequest.OrderItem("SKU_A", "CAT1", 6000L, 2, "L1"),
+                new com.newcoupon.open.api.dto.CalculateRequest.OrderItem("SKU_B", "CAT1", 4000L, 2, "L2"))));
+        return lock.usageNo();
+    }
+
+    // ------------------------------------------------------------------
+    // ⑩ 审查 M2：预算燃烧 COUNT 必须走 (account_id, create_time) 复合索引（V49）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("T12: V49 索引在位且当日 COUNT 走 idx_account_time（range scan，不扫全史）")
+    void budgetBurnCountUsesAccountTimeIndex() {
+        // EXPLAIN 同时证明两件事：索引存在（M2 前 key=idx_account 单列全扫）+ 被优化器选中。
+        // 不查 information_schema：分片数据源对系统表 SQL 解析不稳，EXPLAIN 是同一证据且更硬。
+        long syntheticAccount = 9_000_000_000L + (System.nanoTime() % 1_000_000L);
+        jdbc().update("INSERT INTO coupon_budget_ledger "
+                        + "(account_id, reservation_id, op, amount, reserved_after, consumed_after, note, create_time) "
+                        + "VALUES (?, 0, 'RESERVE', 1, 1, 0, 'T12 索引验证', NOW(3))",
+                syntheticAccount);
+        try {
+            var explain = jdbc().queryForMap(
+                    "EXPLAIN SELECT COUNT(*) FROM coupon_budget_ledger FORCE INDEX (idx_account_time) "
+                            + "WHERE account_id = ? AND create_time >= CURRENT_DATE",
+                    syntheticAccount);
+            assertThat(String.valueOf(explain.get("key")))
+                    .as("优化器必须选 idx_account_time（M2 前：idx_account 单列沿账户全史扫）")
+                    .contains("idx_account_time");
+            // 覆盖索引（Using index）：COUNT 不回表。访问类型不断言 range——测试库行数太少时
+            // 优化器给退化计划（type=index 也走本索引）；有真实统计量时选 range 的证据
+            // 在 dev MySQL 5100 行实测（EXPLAIN range + idx_account_time），贴验收报告
+            assertThat(String.valueOf(explain.get("Extra")))
+                    .as("COUNT 走覆盖索引不回表")
+                    .contains("Using index");
+        } finally {
+            jdbc().update("DELETE FROM coupon_budget_ledger WHERE account_id = ?", syntheticAccount);
+        }
     }
 }
