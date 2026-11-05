@@ -1,0 +1,56 @@
+package com.newcoupon.infrastructure.metrics;
+
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.stereotype.Component;
+
+/**
+ * 风控决策指标（V6 4A）。
+ *
+ * <p><b>与 GovernanceMetrics 并存而不合并</b>：那个类管"限流/熔断/租户用量"（治理域，
+ * 调用方是过滤器与熔断器）；本类管"风控决策域"（决策四态分布、日志写失败）。
+ * 刀 2（核销/退款接线、预算燃烧信号、结算冻结）的指标也落这里。
+ *
+ * <p><b>标签基数</b>：action 标签只有四个枚举值（PASS/CHALLENGE/REVIEW/REJECT），
+ * 天然有界——**绝不把 ruleId/appId/userId 放进标签**（appId 频度=租户数×请求量，
+ * userId 是无界维度，见 GovernanceMetrics 类注释的同一条纪律）。命中了哪些规则
+ * 去查 risk_decision_log（它有全部因子快照）。
+ */
+@Component
+public class RiskMetrics {
+
+    private final MeterRegistry registry;
+
+    public RiskMetrics(MeterRegistry registry) {
+        this.registry = registry;
+    }
+
+    /**
+     * 一次风控决策（开关开时每次决策 +1）。
+     *
+     * @param action RiskAction.name()——四值有界；REVIEW/REJECT 的占比就是
+     *               风控命中率的盘面（刀 2 复用同一指标）
+     */
+    public void recordDecision(String action) {
+        Counter.builder("coupon_risk_decision_total")
+                .tag("action", action)
+                .description("风控决策次数（按最终动作四态；REJECT 占比=拦截率，REVIEW 占比=复核队列压力）")
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * 决策日志写失败（不挡业务，但回放失真）。
+     *
+     * <p><b>为什么必须单独可见</b>：决策日志是同步写的（异步丢日志=回放失真，见
+     * RiskDecisionService），所以写失败被刻意"吞掉"以保护业务——没有这条指标，
+     * "日志写不进去"就只能靠人翻 ERROR 日志发现，而它意味着这段时间的决策
+     * **不可回放、不可复核**。
+     */
+    public void recordDecisionLogWriteFail() {
+        Counter.builder("coupon_risk_decision_log_write_fail_total")
+                .description("决策日志写失败次数——不挡业务，但这段时间的决策不可回放（需对存储排障）")
+                .register(registry)
+                .increment();
+    }
+}
