@@ -53,4 +53,16 @@ public interface RiskListEntryMapper extends BaseMapper<RiskListEntryPO> {
     @Update("UPDATE risk_list_entry SET status = 'DISABLED' "
             + "WHERE id = #{id} AND status = 'ACTIVE'")
     int disableById(@Param("id") Long id);
+
+    /**
+     * 复活（审查 A 簇）：同自然键重建时 DISABLED→ACTIVE 并覆盖 reason/expires_at/created_by。
+     * 条件 UPDATE 并发裁决：两个运营同时重建只有一个能改中，输家重读分类。
+     */
+    @Update("UPDATE risk_list_entry SET status = 'ACTIVE', reason = #{reason}, "
+            + "expires_at = #{expiresAt}, created_by = #{operator} "
+            + "WHERE id = #{id} AND status = 'DISABLED'")
+    int reactivateById(@Param("id") Long id,
+                       @Param("reason") String reason,
+                       @Param("expiresAt") LocalDateTime expiresAt,
+                       @Param("operator") String operator);
 }

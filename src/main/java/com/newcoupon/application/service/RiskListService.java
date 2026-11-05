@@ -85,11 +85,16 @@ public class RiskListService {
             throw new BizException(ErrorCode.RESOURCE_NOT_FOUND, "应用不存在: " + appId);
         }
 
-        // 幂等优先：同自然键重放返回已存在行（duplicated=true），不建新行不改原行
+        // 幂等优先：同自然键已有 **ACTIVE** 行 → 返回已存在行（duplicated=true）；
+        // 已有 **DISABLED** 行 → 复活（审查 A 簇）：停用行占着自然键唯一约束，
+        // 若走 duplicated 短路，"停用后重建"永远建不回来——黑名单静默缺失且无任何信号。
         RiskListEntryPO existing = listMapper.selectByNaturalKey(
                 listType.name(), valueType.name(), value, appId);
         if (existing != null) {
-            return toView(existing, true);
+            if (STATUS_ACTIVE.equals(existing.getStatus())) {
+                return toView(existing, true, false);
+            }
+            return reactivate(existing, reason, expiresAt);
         }
 
         RiskListEntryPO po = new RiskListEntryPO();
@@ -105,11 +110,14 @@ public class RiskListService {
         try {
             listMapper.insert(po);
         } catch (DuplicateKeyException e) {
-            // 并发同键：唯一键裁决，赢家先落——重读返回已存在的那条
+            // 并发同键：唯一键裁决，赢家先落——重读分类（ACTIVE=幂等成功；DISABLED=复活）
             RiskListEntryPO raced = listMapper.selectByNaturalKey(
                     listType.name(), valueType.name(), value, appId);
             if (raced != null) {
-                return toView(raced, true);
+                if (STATUS_ACTIVE.equals(raced.getStatus())) {
+                    return toView(raced, true, false);
+                }
+                return reactivate(raced, reason, expiresAt);
             }
             throw e;
         }
@@ -120,7 +128,34 @@ public class RiskListService {
                 java.util.Map.of("listType", listType.name(), "valueType", valueType.name(),
                         "value", value, "appId", appId,
                         "expiresAt", expiresAt == null ? "永久" : expiresAt.toString()));
-        return toView(po, false);
+        return toView(po, false, false);
+    }
+
+    /**
+     * 复活：DISABLED→ACTIVE 并覆盖 reason/expires_at/created_by（审查 A 簇）。
+     * 新参数覆盖旧值——重建的语义就是"按这次提交的样子重新生效"；旧行的 id/创建时间不动
+     * （审计线索连续）。0 行=并发赢家已复活，重读按当前状态分类。
+     */
+    private ListView reactivate(RiskListEntryPO disabled, String reason, LocalDateTime expiresAt) {
+        int updated = listMapper.reactivateById(disabled.getId(), reason, expiresAt,
+                currentOperator());
+        if (updated == 0) {
+            RiskListEntryPO current = listMapper.selectById(disabled.getId());
+            if (current != null && STATUS_ACTIVE.equals(current.getStatus())) {
+                return toView(current, true, true);   // 并发赢家刚复活：幂等成功
+            }
+            throw new BizException(ErrorCode.STATE_CONFLICT,
+                    "名单条目状态冲突（非 DISABLED，无法复活）: id=" + disabled.getId());
+        }
+        RiskListEntryPO fresh = listMapper.selectById(disabled.getId());
+        log.info("RISK_LIST_REACTIVATED id={} {} {}={} appId={}（停用后同键重建）",
+                disabled.getId(), disabled.getListType(), disabled.getValueType(),
+                disabled.getValue(), disabled.getAppId());
+        adminAudit.record("RISK_LIST_REACTIVATE", "RISK_LIST_ENTRY",
+                String.valueOf(disabled.getId()),
+                java.util.Map.of("listType", disabled.getListType(),
+                        "value", disabled.getValue(), "appId", disabled.getAppId()));
+        return toView(fresh == null ? disabled : fresh, false, true);
     }
 
     /** 停用（软删）：条件 UPDATE 并发裁决；已停用重放=幂等成功；不存在=1002 */
@@ -133,7 +168,7 @@ public class RiskListService {
         if (updated == 0) {
             RiskListEntryPO current = listMapper.selectById(req.id());
             if (current != null && STATUS_DISABLED.equals(current.getStatus())) {
-                return toView(current, true);   // 重复停用：幂等成功
+                return toView(current, true, false);   // 重复停用：幂等成功
             }
             throw new BizException(ErrorCode.STATE_CONFLICT,
                     "名单条目状态不允许停用: " + (current == null ? "已删除" : current.getStatus()));
@@ -147,7 +182,7 @@ public class RiskListService {
         adminAudit.record("RISK_LIST_DISABLE", "RISK_LIST_ENTRY", String.valueOf(req.id()),
                 java.util.Map.of("listType", po.getListType(), "value", po.getValue(),
                         "appId", po.getAppId()));
-        return toView(fresh == null ? po : fresh, false);
+        return toView(fresh == null ? po : fresh, false, false);
     }
 
     /** 游标分页查询（主键倒序；过滤维度全部可空） */
@@ -179,18 +214,18 @@ public class RiskListService {
         boolean hasNext = rows.size() > limit;
         List<RiskListEntryPO> page = hasNext ? rows.subList(0, limit) : rows;
         Long nextCursor = hasNext ? page.get(page.size() - 1).getId() : null;
-        return new ListQueryResult(page.stream().map(po -> toView(po, false)).toList(), nextCursor);
+        return new ListQueryResult(page.stream().map(po -> toView(po, false, false)).toList(), nextCursor);
     }
 
     private static boolean notBlank(String s) {
         return s != null && !s.isBlank();
     }
 
-    private ListView toView(RiskListEntryPO po, boolean duplicated) {
+    private ListView toView(RiskListEntryPO po, boolean duplicated, boolean reactivated) {
         return new ListView(po.getId(), po.getListType(), po.getValueType(), po.getValue(),
                 po.getAppId() == null || po.getAppId().isEmpty() ? null : po.getAppId(),
                 po.getReason(), po.getExpiresAt(), po.getStatus(), po.getCreatedBy(),
-                po.getCreatedAt(), po.getUpdatedAt(), duplicated);
+                po.getCreatedAt(), po.getUpdatedAt(), duplicated, reactivated);
     }
 
     /** 服务层枚举校验：拼错的 listType/valueType 落库后永远命不中任何判定——入口就拒 */

@@ -54,7 +54,10 @@ public final class RiskDtos {
             @Min(1) @Max(200) Integer limit) {
     }
 
-    /** 名单条目视图（duplicated=true 幂等重放命中已存在行） */
+    /**
+     * 名单条目视图。duplicated=true 幂等重放命中已存在 ACTIVE 行；
+     * reactivated=true 停用后同键重建（复活——审查 A 簇，运营需要分辨"重新生效"与"新建"）。
+     */
     public record ListView(
             Long id,
             String listType,
@@ -69,7 +72,8 @@ public final class RiskDtos {
             String createdBy,
             LocalDateTime createdAt,
             LocalDateTime updatedAt,
-            boolean duplicated) {
+            boolean duplicated,
+            boolean reactivated) {
     }
 
     public record ListQueryResult(List<ListView> items, Long nextCursor) {
@@ -79,13 +83,24 @@ public final class RiskDtos {
     // 决策查询与回放
     // ------------------------------------------------------------------
 
-    /** 决策日志分页查询：时间窗可选，但起止必须成对且跨度 ≤31 天（索引 idx_scene_created 的扫描范围保护） */
+    /**
+     * 决策日志分页查询。过滤键两组：态度过滤（scene/action/appId）与**定位键**
+     * （userId/traceId/requestId——误杀工单的真实入口，审查 C4）。
+     * 时间窗：都不传=默认最近 1 天（无归档任务下的无界扫描护栏，审查 C9）；
+     * 传了则成对且跨度 ≤31 天。
+     */
     public record DecisionQueryRequest(
             /** RECEIVE / LOCK / CONFIRM / REFUND；空 = 全部 */
             @Size(max = 16) String scene,
             /** PASS / CHALLENGE / REVIEW / REJECT；空 = 全部 */
             @Size(max = 16) String action,
             @Size(max = 32) String appId,
+            /** 定位键：业务用户 */
+            Long userId,
+            /** 定位键：链路 id（与响应头 X-Trace-Id 同源） */
+            @Size(max = 64) String traceId,
+            /** 定位键：幂等键（领券=ReceiveRequest.requestId） */
+            @Size(max = 64) String requestId,
             /** 与 endTime 成对出现；跨度 > 31 天拒绝（1000） */
             LocalDateTime startTime,
             LocalDateTime endTime,
