@@ -54,10 +54,11 @@ public class DeviceDailyCounter {
         String key = KEY_PREFIX + (appId == null || appId.isBlank() ? "_" : appId)
                 + ":" + deviceId + ":" + date.format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
         Long count = redis.opsForValue().increment(key);
-        if (count != null && count == 1L) {
-            // 只有键的第一次写入设 TTL（此后每次都重设会变成滑动过期，日界失真）
-            redis.expire(key, TTL);
-        }
+        // **每次都设 TTL**（审查 C1）：INCR 与 EXPIRE 不是原子的——只在"首次"设 TTL 的写法，
+        // 一旦那次 EXPIRE 失败（超时/抖动），键就永不过期（纯泄漏，日积月累占 Redis 内存）。
+        // 每次 set 的代价是零风险的：TTL 从每次请求重算，最坏把过期往后推"一次请求的间隔"；
+        // 日界由键名里的 yyyyMMdd 切换（次日自然换键），TTL 只是兜底回收，滑动一点无损语义。
+        redis.expire(key, TTL);
         return count == null ? 0L : count;
     }
 }

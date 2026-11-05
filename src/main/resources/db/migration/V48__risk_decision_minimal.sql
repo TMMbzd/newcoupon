@@ -61,6 +61,8 @@ CREATE TABLE risk_decision_log (
   PRIMARY KEY (id),
   KEY idx_scene_created (scene, created_at),
   KEY idx_app_action_created (app_id, action, created_at),
-  KEY idx_trace (trace_id)
+  KEY idx_trace (trace_id),
+  KEY idx_request (request_id),
+  KEY idx_user (user_id, created_at)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin
   COMMENT = '风控决策日志（V6 4A 最小版）：因子快照全量落库；回放端点按快照只读重算当前规则集，不改原行';

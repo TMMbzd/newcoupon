@@ -88,15 +88,34 @@ public class ReceiveAppService {
             // V6 4A 风控决策（scene=RECEIVE）：模板校验后、一切资源消耗（时间预算/预算租约/
             // 库存/落库）之前。appId 用**券模板归属租户**而不是调用方身份——黑名单/开关
             // 按"这张券是谁的"生效，内部面（/api）与开放面（/open）行为一致。
-            // 开关关=直接 PASS 且零额外 IO（RiskDecisionService 总闸）；REJECT 的处置
-            // 由场景定：领券=抛 7003，退款（刀 2）=照做+打标的合规红线——所以 decide
-            // 只返回结果不抛。设备号/IP 由 RiskContextFilter 透传（服务层不摸 HttpServletRequest）。
-            RiskDecisionService.RiskDecision risk = riskDecisionService.decide(new RiskContext(
-                    RiskScene.RECEIVE, template.getAppId(), req.userId(),
-                    RiskRequestAttributes.deviceId(), RiskRequestAttributes.clientIp(),
-                    req.requestId()));
-            if (risk.action() == RiskAction.REJECT) {
-                throw new BizException(ErrorCode.RISK_REJECTED);
+            // 开关关=整段跳过且零额外查询（enabled 前置门，审查 C2：后续的幂等快查只在
+            // 开时发生）；REJECT 的处置由场景定：领券=抛 7003，退款（刀 2）=照做+打标的
+            // 合规红线——所以 decide 只返回结果不抛。设备号/IP 由 RiskContextFilter 透传
+            // （服务层不摸 HttpServletRequest）。
+            if (riskDecisionService.enabled(template.getAppId())) {
+                // 名单三查/日志写入/幂等快查全是 MySQL 访问——包进既有 mysql 熔断段
+                // （审查 C8）：慢而不失败的 DB 故障会推高领券 RT 并计入熔断统计，而不是
+                // 无声地拖慢。7003 是 BizException，走熔断器的依赖故障白名单谓词，不计失败
+                // （黑名单风暴不会误开 mysql 熔断——那会让全量领券 5000）。
+                withBreakers("mysql", ErrorCode.SYSTEM_ERROR, "风控决策", () -> {
+                    // 幂等重放豁免（审查 C2）：同 requestId 已成功发过券=既有事实的重放，
+                    // 不是新的领券意图——拉黑后重试旧请求必须拿回旧结果（duplicated），
+                    // 而不是 7003。查询与 C1 幂等判断同键同源。
+                    boolean replayed = userCouponRepository
+                            .findByIdempotentKey(req.userId(), template.getAppId(), req.requestId())
+                            .isPresent();
+                    if (replayed) {
+                        return null;
+                    }
+                    RiskDecisionService.RiskDecision risk = riskDecisionService.decide(new RiskContext(
+                            RiskScene.RECEIVE, template.getAppId(), req.userId(),
+                            RiskRequestAttributes.deviceId(), RiskRequestAttributes.clientIp(),
+                            req.requestId()));
+                    if (risk.action() == RiskAction.REJECT) {
+                        throw new BizException(ErrorCode.RISK_REJECTED);
+                    }
+                    return null;
+                });
             }
             DeadlineGuard.requireBudget();
 
