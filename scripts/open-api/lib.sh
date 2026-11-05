@@ -61,6 +61,9 @@ signed_call() {
       -H "Authorization: NC-HMAC-SHA256 Credential=$APP_ID, Timestamp=$ts, Nonce=$nonce, Signature=$sig")
   [[ -n "$body" ]] && args+=(-d "$body")
   [[ -n "$client_token" ]] && args+=(-H "X-Client-Token: $client_token")
+  # 风控透传设备头（V6 4B，scripts/risk/ 用）：RISK_DEVICE_ID 非空时带上——与
+  # X-Client-Token 同款的可选头，不设则与 4B 之前的行为完全一致
+  [[ -n "${RISK_DEVICE_ID:-}" ]] && args+=(-H "X-Device-Id: $RISK_DEVICE_ID")
   curl "${args[@]}" "${extra[@]}"
 }
 
@@ -119,6 +122,16 @@ split_response() {
 admin_post() {
   local path="$1" body="${2:-}"
   curl -sS -X POST "$BASE$path" \
+      -H "Content-Type: application/json" \
+      -H "X-Admin-Token: $ADMIN_TOKEN" \
+      ${body:+-d "$body"}
+}
+
+# 管理面 PUT（带令牌）——租户配置等 @PutMapping 端点用；POST 版见 admin_post。
+# 单独存在的理由同 admin_post：方法×令牌头的组合只允许一份实现。
+admin_put() {
+  local path="$1" body="${2:-}"
+  curl -sS -X PUT "$BASE$path" \
       -H "Content-Type: application/json" \
       -H "X-Admin-Token: $ADMIN_TOKEN" \
       ${body:+-d "$body"}
