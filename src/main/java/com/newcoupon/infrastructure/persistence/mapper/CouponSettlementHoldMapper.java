@@ -42,6 +42,13 @@ public interface CouponSettlementHoldMapper extends BaseMapper<CouponSettlementH
             + "GROUP BY app_id, settle_party_id, template_id")
     List<HoldAgg> sumActiveGrouped();
 
+    /**
+     * ACTIVE hold 总额（4B 指标 coupon_risk_hold_amount 的数据源）：RISK_RULE 与 MANUAL
+     * 合计——盘面只关心“多少应付被扣住”，来源拆分去查 hold 表/审计。空表返回 0。
+     */
+    @Select("SELECT COALESCE(SUM(amount), 0) FROM coupon_settlement_hold WHERE status = 'ACTIVE'")
+    Long sumActiveAmount();
+
     /** 汇总行（MyBatis 按列别名映射；templateId 为 NULL 表示主体级 hold） */
     class HoldAgg {
         private String appId;

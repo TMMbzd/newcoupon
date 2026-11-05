@@ -65,8 +65,33 @@ public class RiskMetrics {
     public void recordDecisionDegraded(String reason) {
         Counter.builder("coupon_risk_decision_degraded_total")
                 .tag("reason", reason)
-                .description("因子不完整仍出决策的次数（fail-open 可见性）——missing-header=设备维度没接，counter-unavailable=计数 Redis 故障")
+                .description("因子不完整仍出决策的次数（fail-open 可见性）——missing-header=设备维度没接，counter-unavailable=计数 Redis 故障，budget-not-enabled=活动没开预算，budget-unavailable=预算流水源故障")
                 .register(registry)
                 .increment();
+    }
+
+    /**
+     * 退款 REJECT 降级后的结算冻结落账失败（4B）：冻结失败被刻意吞掉以保护已成功的
+     * 退款（红线：退款照做 > 账面完整）——没有这条指标，“该冻没冻”只能靠翻 ERROR 日志。
+     */
+    public void recordRiskHoldPlaceFail() {
+        Counter.builder("coupon_risk_hold_place_fail_total")
+                .description("风控结算冻结写入失败次数（退款已成功、需人工补 MANUAL hold）")
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * ACTIVE 结算冻结总额盘面（4B）：coupon_risk_hold_amount（gauge，分）。
+     * V6 原文的 hold 指标以这个口径落地——RISK_RULE 与 MANUAL 的 ACTIVE hold 合计，
+     * 释放/作废后自然回落；由持有 hold Mapper 的装配点注册（每次 scrape 现算 SUM，
+     * hold 表量级=风控 REJECT 退款数+人工冻结数，小表可承受）。
+     */
+    public void registerHoldAmountGauge(java.util.function.Supplier<Number> value) {
+        io.micrometer.core.instrument.Gauge
+                .builder("coupon_risk_hold_amount", value)
+                .description("ACTIVE 结算冻结总额（分）：payable=分账-退款-hold 的盘面信号，涨=有主体应付被扣住")
+                .strongReference(true)
+                .register(registry);
     }
 }
