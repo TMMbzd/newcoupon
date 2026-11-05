@@ -402,6 +402,8 @@ public class CouponCodeService {
         // 不烧码（码保持 ACTIVE，解除名单后可重兑）。幂等豁免（审查 C2 同款）：码已 USED
         // 的合法重试在上方 replayOrInvalid 已提前返回；这里再兜同 requestId 已发过券的
         // 重放（跨码复用 requestId）——已成立的兑换事实不被风控改写成 7003。
+        // templateId 必须带（审查 M3）：redeem 是三个 RECEIVE 入口里唯一逐次写预算账本
+        // 的——预算燃烧信号对码面失明（恒 degraded 跳过）等于规则对高速兑码不设防。
         // 决策段（名单/日志=MySQL）包进 mysql 依赖级熔断（4A C8 语义，7003 不计失败）。
         if (riskDecisionService.enabled(batch.getAppId())) {
             try {
@@ -415,7 +417,8 @@ public class CouponCodeService {
                     RiskDecisionService.RiskDecision risk = riskDecisionService.decide(
                             new RiskContext(RiskScene.RECEIVE, batch.getAppId(), req.userId(),
                                     RiskRequestAttributes.deviceId(),
-                                    RiskRequestAttributes.clientIp(), req.requestId()));
+                                    RiskRequestAttributes.clientIp(), req.requestId(),
+                                    batch.getTemplateId()));
                     if (risk.action() == RiskAction.REJECT) {
                         throw new BizException(ErrorCode.RISK_REJECTED);
                     }
