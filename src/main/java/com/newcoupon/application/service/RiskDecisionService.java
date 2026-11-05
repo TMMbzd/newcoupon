@@ -76,12 +76,14 @@ public class RiskDecisionService {
      * 决策结果（matchedRules=产出动作的规则；关闸时恒为 PASS/空/false）。
      * decisionId=决策日志行的主键（4B）：退款场景的结算冻结 holdNo=RISK-{decisionId}
      * 以它把 hold 行与决策行缝在一起（关闸时无日志行，decisionId=null）。
+     * logWritten（审查 m3）=决策日志**确实落库**——写失败时 false：decisionId 可能指向
+     * 不存在的行，下游（退款 hold）不得拿它当可靠取证锚，要换 traceId 兜底。
      */
     public record RiskDecision(RiskAction action, List<String> matchedRules, boolean degraded,
-                               Long decisionId) {
+                               Long decisionId, boolean logWritten) {
 
         static RiskDecision off() {
-            return new RiskDecision(RiskAction.PASS, List.of(), false, null);
+            return new RiskDecision(RiskAction.PASS, List.of(), false, null, false);
         }
     }
 
@@ -98,10 +100,11 @@ public class RiskDecisionService {
         List<String> matched = new ArrayList<>();
         RiskAction action = evaluate(ctx, factors, matched);
 
-        writeLog(decisionId, ctx, factors, matched, action);
+        boolean logWritten = writeLog(decisionId, ctx, factors, matched, action);
 
         metrics.recordDecision(action.name());
-        return new RiskDecision(action, List.copyOf(matched), factors.degraded(), decisionId);
+        return new RiskDecision(action, List.copyOf(matched), factors.degraded(),
+                decisionId, logWritten);
     }
 
     /**
@@ -150,9 +153,13 @@ public class RiskDecisionService {
         return action;
     }
 
-    /** 同步写决策日志；失败不挡业务（ERROR + 指标，见类注释的语义裁定） */
-    private void writeLog(long decisionId, RiskContext ctx, RiskFactors factors,
-                          List<String> matched, RiskAction action) {
+    /**
+     * 同步写决策日志；失败不挡业务（ERROR + 指标，见类注释的语义裁定）。
+     * 返回是否落库成功（审查 m3）：decisionId 是"预铸"的——写失败时它指向不存在的行，
+     * 调用方（退款 hold 的 holdNo）需要知道这个事实并换 traceId 兜底。
+     */
+    private boolean writeLog(long decisionId, RiskContext ctx, RiskFactors factors,
+                             List<String> matched, RiskAction action) {
         try {
             RiskDecisionLogPO po = new RiskDecisionLogPO();
             po.setId(decisionId);
@@ -174,10 +181,12 @@ public class RiskDecisionService {
             po.setRequestId(ctx.requestId());
             po.setCreatedAt(LocalDateTime.now().withNano(0));
             logMapper.insert(po);
+            return true;
         } catch (Exception e) {
             log.error("决策日志写入失败（不挡业务，但这段时间的决策不可回放）：scene={} appId={} userId={}",
                     ctx.scene(), ctx.appId(), ctx.userId(), e);
             metrics.recordDecisionLogWriteFail();
+            return false;
         }
     }
 

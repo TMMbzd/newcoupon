@@ -61,8 +61,9 @@ import org.springframework.stereotype.Service;
  * 准确的幂等成功或状态冲突错误 ③券包查询 ④<b>V6 4B 风控接线</b>：锁券/核销在业务
  * 校验后、金额计算前做决策（REJECT→7003）；退款按<b>合规红线</b>处理——
  * <b>REJECT 一律不拒绝退款</b>（消费者退款权&gt;平台风控），降级为“退款照做 + 决策日志
- * 如实记 REJECT + 结算冻结（holdNo=RISK-{decisionId}，主体级）”；REVIEW 只留痕不冻结。
- * 该红线同样写进 runbook §4B 与 RiskScene 注释，测试 T3 钉住。
+ * 如实记 REJECT + 结算冻结（holdNo=RISK-{decisionId}，模板级——只扣被退券模板行，
+ * 审查 M1）”；REVIEW 只留痕不冻结。该红线同样写进 runbook §1.2 与 RiskScene 注释，
+ * 测试 T3/T8 钉住。
  */
 @Service
 public class TradeAppService {
@@ -700,7 +701,7 @@ public class TradeAppService {
         // REVIEW/CHALLENGE/PASS 不冻结。冻结失败不回滚退款（红线优先级：退款照做 > 留账面）。
         if (refundRisk != null && refundRisk.action() == RiskAction.REJECT
                 && !result.duplicated()) {
-            placeRefundRiskHold(refundRisk.decisionId(), refundNo, coupon.getAppId(), result);
+            placeRefundRiskHold(refundRisk, refundNo, coupon, result);
         }
         return result;
     }
@@ -709,29 +710,56 @@ public class TradeAppService {
      * 退款 REJECT 的降级处置：按本单退款明细把各结算主体的退款额冻结成应付口径扣减
      * （source=RISK_RULE，holdNo=RISK-{decisionId}——同 decisionId 不双建，uk_hold_no 裁决）。
      *
-     * <p>主体解析：行级退款的主体=退款明细行上的 (appId, settlePartyId)（核销分账时逐行
-     * 落库，与账单命中口径同源），按主体聚合各挂一笔、金额=该主体本单冲回的优惠额；
-     * 旧式核销（无行级分账）没有明细行，退回 (券归属租户, __default__) 一笔主体级。
-     * 单主体时 holdNo=RISK-{decisionId}；多主体按主体名排序加序号后缀（决策行与 hold
-     * 行仍可按前缀对上；同一 decisionId 不会跨请求复用，重试已被上方幂等豁免挡住）。
+     * <p><b>模板级，不是主体级（审查 M1）</b>：hold 一律带 template_id=被退券的模板。
+     * 账单语义里主体级 hold（template_id 空）对该主体的**每个模板行全额扣减**——
+     * 同一主体的模板数 × 退款笔数会把扣减放大 N 倍，攻击者可用多券多次退款蓄意
+     * 压制商家 payable。模板级把扣减精确到被退的那张券所属的模板行，乘法消失。
+     *
+     * <p><b>只聚合可结算行（审查①核实）</b>：settle_eligible=0 的退款明细镜像自被排除的
+     * 核销分账行——那张确认从未进真实账单（V47 口径：账单聚合只取 settle_eligible=1），
+     * 它的冲回额不在任何 payable 里；冻结它=冻结从未存在的钱。聚合跳过。
+     *
+     * <p>主体解析：行级退款的主体=退款明细行上的 settlePartyId（与账单命中同源），
+     * 按主体聚合各挂一笔、金额=该主体本单冲回的优惠额；旧式核销（无行级分账）没有
+     * 明细行，退回 (券归属租户, __default__) 一笔。单主体时 holdNo=RISK-{decisionId}；
+     * 多主体按主体名排序加序号后缀（同一 decisionId 不跨请求复用——重试已被幂等豁免挡住）。
      * hold 是账单口径不是真钱（V47 语义），不影响该期已生成账单——重跑才反映。
      */
-    private void placeRefundRiskHold(Long decisionId, String refundNo, String couponAppId,
-                                     RefundResult result) {
+    private void placeRefundRiskHold(RiskDecisionService.RiskDecision risk, String refundNo,
+                                     UserCoupon coupon, RefundResult result) {
+        Long decisionId = risk.decisionId();
+        String appId = coupon.getAppId();
         try {
             // TreeMap 按主体名排序：多主体时 holdNo 后缀序号稳定（同一决策内可复现）。
             // 值=该主体本单冲回的优惠额（单元素数组做可变累加器）
             Map<String, long[]> byParty = new TreeMap<>();
-            List<CouponRefundDetailPO> details = refundDetailMapper.selectByRefundNo(refundNo);
-            for (CouponRefundDetailPO d : details) {
+            long templateId = coupon.getTemplateId();
+            boolean sawDetails = false;
+            for (CouponRefundDetailPO d : refundDetailMapper.selectByRefundNo(refundNo)) {
+                sawDetails = true;
+                if (d.getSettleEligible() == null || d.getSettleEligible() != 1) {
+                    continue;   // 排除行不进账单（见方法注释），其冲回额无可扣减的应付
+                }
                 String party = d.getSettlePartyId() == null ? DEFAULT_PARTY : d.getSettlePartyId();
                 byParty.computeIfAbsent(party, k -> new long[1])[0] +=
                         d.getRefundDiscountAmt() == null ? 0 : d.getRefundDiscountAmt();
+                if (d.getTemplateId() != null) {
+                    templateId = d.getTemplateId();   // 明细行的模板=被退券的模板（行行同值）
+                }
             }
             if (byParty.isEmpty()) {
+                if (sawDetails) {
+                    // 有明细但全部是排除行：本单没有任何进真实账单的冲回，无应付可冻——
+                    // 决策留痕已在决策日志，冻结侧如实为零（旧式兜底会冻从未存在的钱）
+                    log.info("退款 REJECT 的冲回全为排除行，无可冻结应付：refundNo={} decisionId={}",
+                            refundNo, decisionId);
+                    return;
+                }
                 // 旧式核销退款：无行级主体明细——默认主体一笔，金额=本单退款额
                 byParty.put(DEFAULT_PARTY, new long[]{result.discountAmt()});
             }
+            String reason = riskHoldReason(risk.logWritten(),
+                    org.slf4j.MDC.get(com.newcoupon.infrastructure.web.TraceIdFilter.TRACE_ID));
             int seq = 0;
             for (Map.Entry<String, long[]> e : byParty.entrySet()) {
                 long amount = e.getValue()[0];
@@ -742,8 +770,7 @@ public class TradeAppService {
                         ? "RISK-" + decisionId
                         : "RISK-" + decisionId + "-" + (++seq);
                 settlementHoldService.place(new HoldPlaceRequest(
-                        holdNo, couponAppId, e.getKey(), null, amount,
-                        "风控拦截退款决策降级+冻结结算", "RISK_RULE"));
+                        holdNo, appId, e.getKey(), templateId, amount, reason, "RISK_RULE"));
             }
         } catch (RuntimeException e) {
             // 冻结失败不能把已经成功的退款变成失败（红线：退款照做 > 账面完整）——
@@ -752,6 +779,20 @@ public class TradeAppService {
                     refundNo, decisionId, e);
             riskMetrics.recordRiskHoldPlaceFail();
         }
+    }
+
+    /**
+     * 冻结 reason（审查 m3）：决策日志写失败时 decisionId 指向不存在的行——hold 行必须
+     * 自带可查线索（traceId 与决策同线程同 MDC），否则取证断链只能靠翻 ERROR 日志。
+     */
+    static String riskHoldReason(boolean logWritten, String traceId) {
+        String base = "风控拦截退款决策降级+冻结结算";
+        if (logWritten) {
+            return base;
+        }
+        return traceId == null || traceId.isBlank()
+                ? base + "（决策日志缺失）"
+                : base + "（决策日志缺失,traceId=" + traceId + "）";
     }
 
     /**
