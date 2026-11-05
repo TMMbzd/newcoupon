@@ -54,6 +54,7 @@ class SettlementHoldIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired private org.springframework.boot.test.web.client.TestRestTemplate rest;
     @Autowired private com.newcoupon.infrastructure.persistence.mapper.AdminRbacMapper rbacMapper;
     @Autowired private org.springframework.security.crypto.password.PasswordEncoder passwordEncoder;
+    @Autowired private com.newcoupon.application.service.SettlementHoldService holdService;
     @Autowired private DataSource dataSource;
 
     private JdbcTemplate jdbc() {
@@ -306,5 +307,114 @@ class SettlementHoldIntegrationTest extends ShardedIntegrationTestSupport {
             Thread.sleep(50);
         }
         return false;
+    }
+
+    // ------------------------------------------------------------------
+    // ⑤ 审查 B 簇：同号异参重放不得静默返回旧行（4B 风控调参重发会误以为新金额生效）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("H7: 同 holdNo 异参（金额/主体/模板/租户任一不同）→ 1000 拒绝；同参重放 200")
+    void sameHoldNoDifferentParamsRejected() throws Exception {
+        String holdNo = "HOLD-H7-" + UUID.randomUUID().toString().substring(0, 8);
+        post("/api/settlement/holds", holdBody(holdNo, "1", "M", null, 500, "同号异参-基线"));
+
+        // 同参重放：幂等成功（H1 已钉，这里作对照）
+        assertThat(post("/api/settlement/holds",
+                holdBody(holdNo, "1", "M", null, 500, "同号异参-基线")).getStatusCode().value())
+                .isEqualTo(200);
+
+        // 异参四连：金额/主体/模板/租户任一不同都拒绝，且不改原行
+        for (String body : new String[]{
+                holdBody(holdNo, "1", "M", null, 999, "同号异参-基线"),           // 金额不同
+                holdBody(holdNo, "1", "OTHER", null, 500, "同号异参-基线"),       // 主体不同
+                holdBody(holdNo, "1", "M", 1L, 500, "同号异参-基线"),             // 模板不同
+                holdBody(holdNo, "2", "M", null, 500, "同号异参-基线")}) {        // 租户不同
+            ResponseEntity<String> resp = post("/api/settlement/holds", body);
+            assertThat(resp.getStatusCode().value()).isEqualTo(200);
+            assertThat(JSON.readTree(resp.getBody()).path("code").asInt())
+                    .as("同号异参拒绝。body=" + resp.getBody()).isEqualTo(1000);
+        }
+        assertThat(jdbc().queryForObject(
+                "SELECT amount FROM coupon_settlement_hold WHERE hold_no = ?", Long.class, holdNo))
+                .as("原行不被异参重放改动").isEqualTo(500L);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑥ 审查 H 簇：服务层自查（4B 直调入口绕过控制器 @Valid）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("H8: 直调服务 place——负金额/超额/空 reason/超长 holdNo 全拒绝")
+    void serviceLevelValidationForDirectCalls() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        com.newcoupon.application.service.SettlementHoldService service = holdService;
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.place(request(
+                "HOLD-H8A-" + suffix, "1", "M", null, -5000L, "负金额")))
+                .isInstanceOf(com.newcoupon.common.BizException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.place(request(
+                "HOLD-H8B-" + suffix, "1", "M", null, 0L, "零金额")))
+                .isInstanceOf(com.newcoupon.common.BizException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.place(request(
+                "HOLD-H8C-" + suffix, "1", "M", null, 10_000_000_000_000_005L, "超上限")))
+                .isInstanceOf(com.newcoupon.common.BizException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.place(request(
+                "HOLD-H8D-" + suffix, "1", "M", null, 100L, null)))
+                .isInstanceOf(com.newcoupon.common.BizException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.place(request(
+                "HOLD-H8E-" + suffix + "-0123456789012345678901234567890123456789012345678901234567890123",
+                "1", "M", null, 100L, "超长单号")))
+                .isInstanceOf(com.newcoupon.common.BizException.class);
+        assertThat(jdbc().queryForObject(
+                "SELECT COUNT(*) FROM coupon_settlement_hold WHERE hold_no LIKE ?",
+                Integer.class, "HOLD-H8%")).isZero();
+    }
+
+    private static com.newcoupon.application.dto.SettlementHoldDtos.HoldPlaceRequest request(
+            String holdNo, String appId, String party, Long templateId, long amount, String reason) {
+        return new com.newcoupon.application.dto.SettlementHoldDtos.HoldPlaceRequest(
+                holdNo, appId, party, templateId, amount, reason, null);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑦ 审查 G 簇：并发同目标迁移，输家 0 行分支按当前行分类（确定性行锁交错）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("H9: 并发同目标 release——输家按当前行分类幂等成功，不得误报'终态 ACTIVE'4002")
+    void concurrentSameTargetTransitionLoserReadsFreshRow() throws Exception {
+        String holdNo = "HOLD-H9-" + UUID.randomUUID().toString().substring(0, 8);
+        holdService.place(request(holdNo, "1", "M", null, 100L, "并发交错"));
+
+        // 赢家：事务内条件 UPDATE 改中 1 行但不提交（行锁在手=并发中"已执行未提交"）
+        java.sql.Connection winner = dataSource.getConnection();
+        winner.setAutoCommit(false);
+        int hit = winner.createStatement().executeUpdate(
+                "UPDATE coupon_settlement_hold SET status='RELEASED', released_by='WINNER', "
+                        + "released_at=NOW() WHERE hold_no='" + holdNo + "' AND status='ACTIVE'");
+        assertThat(hit).isEqualTo(1);
+
+        // 输家：SELECT 读 ACTIVE，UPDATE 阻塞在赢家行锁上；赢家提交后才求值 → 0 行
+        java.util.concurrent.atomic.AtomicReference<Object> loserResult = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread loser = new Thread(() -> {
+            try {
+                loserResult.set(holdService.release(holdNo));
+            } catch (Throwable t) {
+                loserResult.set(t);
+            }
+        }, "hold-transition-loser");
+        loser.start();
+        Thread.sleep(800);   // 让输家完成 SELECT 并阻塞在 UPDATE
+        winner.commit();
+        winner.close();
+        loser.join(10_000);
+        assertThat(loser.getState()).isEqualTo(Thread.State.TERMINATED);
+
+        // 输家的 0 行分支必须重读当前行分类：RELEASED=幂等成功；旧实现按旧快照 ACTIVE 误报 4002
+        assertThat(loserResult.get())
+                .as("输家应幂等成功返回 RELEASED 视图，实际=" + loserResult.get())
+                .isInstanceOf(com.newcoupon.application.dto.SettlementHoldDtos.HoldView.class);
+        assertThat(((com.newcoupon.application.dto.SettlementHoldDtos.HoldView) loserResult.get())
+                .status()).isEqualTo("RELEASED");
     }
 }
