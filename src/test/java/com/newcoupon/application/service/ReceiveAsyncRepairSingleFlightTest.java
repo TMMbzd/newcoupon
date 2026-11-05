@@ -59,6 +59,8 @@ class ReceiveAsyncRepairSingleFlightTest {
     @Mock
     private com.newcoupon.infrastructure.redis.SoldOutHint soldOutHint;
     @Mock
+    private RiskDecisionService riskDecisionService;   // mock boolean 默认 false=风控开关关
+    @Mock
     private MeterRegistry meterRegistry;
 
     private CouponTemplate template;
@@ -278,6 +280,7 @@ class ReceiveAsyncRepairSingleFlightTest {
     private ReceiveAsyncAppService service(String policy) {
         return new ReceiveAsyncAppService(cachedTemplateReader, issueGate,
                 taskService, counterRepairService, gateRebuildService, gateRepairQueueService,
-                soldOutHint, meterRegistry, true, true, "*", 604800, 172800, policy);
+                soldOutHint, meterRegistry, riskDecisionService, null,
+                true, true, "*", 604800, 172800, policy);
     }
 }

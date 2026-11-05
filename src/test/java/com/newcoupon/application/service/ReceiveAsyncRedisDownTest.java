@@ -58,6 +58,8 @@ class ReceiveAsyncRedisDownTest {
     private GateRepairQueueService gateRepairQueueService;
     @Mock
     private com.newcoupon.infrastructure.redis.SoldOutHint soldOutHint;
+    @Mock
+    private RiskDecisionService riskDecisionService;   // mock boolean 默认 false=风控开关关
 
     /** 真实内存注册表：直接断言 reject / db-fallback / redis_error 三个结果标签。 */
     private final MeterRegistry meterRegistry = new SimpleMeterRegistry();
@@ -205,6 +207,7 @@ class ReceiveAsyncRedisDownTest {
     private ReceiveAsyncAppService service(String policy) {
         return new ReceiveAsyncAppService(cachedTemplateReader, issueGate,
                 taskService, counterRepairService, gateRebuildService, gateRepairQueueService,
-                soldOutHint, meterRegistry, true, true, "*", 604800, 172800, policy);
+                soldOutHint, meterRegistry, riskDecisionService, null,
+                true, true, "*", 604800, 172800, policy);
     }
 }
