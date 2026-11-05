@@ -190,6 +190,18 @@ coupon:
       enabled: true
       window-seconds: 60
       max-per-window: 30
+    # V6 4A 设备日限（R_DEVICE_DAILY）：同设备当日领券尝试数阈值，超阈 REJECT（7003）。
+    # 计数=Redis INCR+EXPIRE（键 c:risk:dev:{appId}:{deviceId}:{yyyyMMdd}，含被拒尝试）；
+    # Redis 不可用→跳过+degraded+fail-open 指标（dimension=risk_device）
+    device-daily:
+      max-per-day: ${RISK_DEVICE_DAILY_MAX_PER_DAY:10}
+  # V6 4A 风控决策总闸的全站层（SwitchKey.RISK_DECISION，三层取值的第②层）：
+  # 显式配 false 而不依赖"没配=true"的枚举默认——默认关=回归零变化（关时不写决策日志、
+  # 热路径零额外 IO）；租户在 open_app_config 配 switch.risk.decision.enabled=true 逐租户灰度开
+  switch:
+    risk:
+      decision:
+        enabled: ${RISK_DECISION_ENABLED:false}
   # 管理面最小鉴权（L27）：POST /api/templates* 需 X-Admin-Token 与此一致；空=拒绝所有管理写（fail-closed）
   # L38 修复（评审 P1-12）：默认值改空——此前默认 dev-admin-token 使 fail-closed 分支不可达，
   # 未设环境变量的部署等于管理面无鉴权（发布=铸造库存额度的入口）。dev 便利值挪 application-dev.yml。

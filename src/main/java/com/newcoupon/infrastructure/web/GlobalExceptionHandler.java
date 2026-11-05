@@ -75,8 +75,14 @@ public class GlobalExceptionHandler {
     /** 6xxx 接入域 → HTTP 状态（与 docs/S1-开放接入层-需求与设计-2026-10-01.md §4.10 的表一致） */
     private static int httpStatusOf(ErrorCode code) {
         int c = code.getCode();
+        // 7003（风控决策拒绝，V6 4A）：安全域但语义是"被安全策略拒绝"，与 6011 越权同族
+        // → 403。网关/监控按状态码把"风控拦截"与"业务失败"分开统计（6xxx 特殊化的同一理由）。
+        // 文案不泄漏命中规则（见 ErrorCode.RISK_REJECTED 注释），HTTP 层给真实 403 不给 200。
+        if (c == ErrorCode.RISK_REJECTED.getCode()) {
+            return 403;
+        }
         if (c < 6000 || c >= 7000) {
-            return 200;                      // 非接入域：维持既有约定
+            return 200;                      // 其余非接入域：维持既有约定（7010-7012 由安全链直接设置）
         }
         return switch (c) {
             case 6006, 6007 -> 429;          // 配额

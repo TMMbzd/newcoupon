@@ -13,7 +13,9 @@ package com.newcoupon.application.service;
  * （{@code RequestContext.resourceName()}）对齐——开关、限流、熔断、监控共用同一套 key 词汇。
  *
  * <p><b>默认全开</b>：开关是"出事时关"，不是"上线时开"。缺省为 true，
- * 少配一个开关不会让功能莫名消失。
+ * 少配一个开关不会让功能莫名消失。<b>唯一例外是 {@link #RISK_DECISION}</b>：
+ * 新功能按灰度发布纪律默认关（全站层在 application.yml 显式配 false，
+ * 见它的条目注释）——"默认全开"保护的是既有功能，不是新功能的自动生效。
  *
  * <p><b>S2 第 10 步起，开关可以按租户配置</b>：存储键是 {@code switch.<key>}
  * （见 {@link #configKey()}），落在 {@code open_app_config} 里，
@@ -47,7 +49,18 @@ public enum SwitchKey implements ConfigKeySpec {
     OUTBOX_DISPATCH("outbox.dispatch.enabled", "发件箱投递开关（关闭后暂停投递，消息不丢）", true),
 
     /** 触达外呼开关——S6 的触达通道用；S1 先登记，保证清单完整 */
-    MESSAGE_CHANNEL("message.channel.enabled", "触达外呼开关（关闭后不发送消息，仅落表）", false);
+    MESSAGE_CHANNEL("message.channel.enabled", "触达外呼开关（关闭后不发送消息，仅落表）", false),
+
+    /**
+     * 风控决策开关（V6 4A）——决策框架总闸，**全项目唯一默认关的已接线开关**：
+     * application.yml 全站层显式配 false（不依赖"没配=true"的枚举默认），租户在
+     * open_app_config 配 {@code switch.risk.decision.enabled=true} 逐租户灰度开。
+     * 关 = decide 直接 PASS **且不写决策日志**（热路径零额外 IO——回归零变化承诺，
+     * 用例钉住）；开 = 评估规则 + 同步写决策日志。执行点在 RiskDecisionService
+     * （服务层判断而非 @SwitchGuard：它不是"入口可用性"开关，关了不返回 5001，
+     * 而是"放行且不留痕"）。
+     */
+    RISK_DECISION("risk.decision.enabled", "风控决策开关（关闭=不做风控决策、不写决策日志）", true);
 
     private final String key;
     private final String description;
