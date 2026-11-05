@@ -58,6 +58,7 @@ class SettleQualityBillIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired private TradeTxService tradeTxService;
     @Autowired private DailyBillService dailyBillService;
     @Autowired private CouponShareDetailMapper shareDetailMapper;
+    @Autowired private com.newcoupon.infrastructure.persistence.mapper.CouponRefundDetailMapper refundDetailMapper;
     @Autowired private CouponSettlePartyDailyBillMapper partyBillMapper;
     @Autowired private MeterRegistry meterRegistry;
     @Autowired private DataSource dataSource;
@@ -300,7 +301,48 @@ class SettleQualityBillIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     // ------------------------------------------------------------------
-    // ⑤ V47 回填 SQL 解释性复验（迁移先于测试数据执行——手工跑同款语句验证判定口径）
+    // ⑤ 退款镜像打标（审查 A 簇：退款明细是第四个写入点，不能漏）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("Q7: 被排除分账行的退款明细镜像同标——从未计入的钱不能被冲回压低净额")
+    void refundMirrorsExcludedShareRowTags() {
+        Confirmed merchant = confirmCoupon("Q7", 2);   // 灰度关 → 两行 LEGACY_DEFAULT+eligible=0
+        LocalDate today = LocalDate.now();
+        dailyBillService.generateAll(today);
+        // 前置：整组被排除，账面无该模板金额（金额口径；行是否存在由 Q8 的可观测行为钉）
+
+        // 整单退款（无 items = 退剩余全部）→ 两条退款明细
+        tradeAppService.refund(new com.newcoupon.application.dto.TradeDtos.RefundRequest(
+                merchant.usageNo(), "RF-QUALITY-Q7", null));
+
+        List<com.newcoupon.infrastructure.persistence.po.CouponRefundDetailPO> details =
+                refundDetailMapper.selectByRefundNo("RF-QUALITY-Q7");
+        assertThat(details).as("两行商品两条退款明细").hasSize(2);
+        for (com.newcoupon.infrastructure.persistence.po.CouponRefundDetailPO d : details) {
+            assertThat(d.getQualityFlags())
+                    .as("退款明细从原分账行镜像质量标（分账侧丢失主体，退款侧同样丢失）")
+                    .isEqualTo(SettleQualityFlags.LEGACY_DEFAULT);
+            assertThat(d.getSettleEligible()).as("镜像排除——冲回不得进真实结算").isEqualTo(0);
+        }
+
+        // 再跑账单：净额不得出现 -2000（被排除的核销从未计入，其冲回计入=净额无声压低）
+        dailyBillService.generateAll(today);
+        List<CouponSettlePartyDailyBillPO> partyRows = partyBillMapper.selectByFilters(
+                today, null, "__default__", merchant.templateId(), 10, 0);
+        assertThat(partyRows.stream()
+                .anyMatch(r -> r.getDiscountTotal() != 0 || r.getRefundCount() > 0))
+                .as("主体账单不得出现被排除组的冲回金额。rows=" + partyRows)
+                .isFalse();
+        assertThat(new JdbcTemplate(dataSource).queryForObject(
+                "SELECT COALESCE(SUM(discount_total), 0) FROM coupon_daily_bill "
+                        + "WHERE bill_date = ? AND template_id = ?", Long.class,
+                today, merchant.templateId()))
+                .as("模板账单同理（同口径过滤）").isZero();
+    }
+
+    // ------------------------------------------------------------------
+    // ⑥ V47 回填 SQL 解释性复验（迁移先于测试数据执行——手工跑同款语句验证判定口径）
     // ------------------------------------------------------------------
 
     @Test

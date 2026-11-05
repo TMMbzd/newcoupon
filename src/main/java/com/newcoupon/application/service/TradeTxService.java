@@ -815,7 +815,9 @@ public class TradeTxService {
             }
             plans.add(new RefundLinePlan(lineNo, qty, thisDiscount,
                     thisPlatform, thisDiscount - thisPlatform,
-                    share.getAppId(), share.getSettlePartyId()));
+                    share.getAppId(), share.getSettlePartyId(),
+                    share.getQualityFlags() == null ? 0 : share.getQualityFlags(),
+                    share.getSettleEligible() == null || share.getSettleEligible() == 1));
         }
 
         if (!requested.isEmpty()) {
@@ -883,6 +885,9 @@ public class TradeTxService {
             detail.setRefundDiscountAmt(plan.discount());
             detail.setRefundPlatformAmt(plan.platform());
             detail.setRefundMerchantAmt(plan.merchant());
+            // 质量标从原分账行镜像（V47）：被排除的核销其冲回同样排除——见 RefundLinePlan 注释
+            detail.setQualityFlags(plan.qualityFlags());
+            detail.setSettleEligible(plan.settleEligible() ? 1 : 0);
             couponRefundDetailMapper.insert(detail);
         }
 
@@ -1061,10 +1066,16 @@ public class TradeTxService {
         }
     }
 
-    /** 一行退款计划：本次退多少数量、冲回多少优惠与平台/商家出资 */
+    /**
+     * 一行退款计划：本次退多少数量、冲回多少优惠与平台/商家出资。
+     * qualityFlags/settleEligible 从原分账行镜像（V47 审查 A 簇）：被排除的核销从未进
+     * 真实账单，它的冲回若以 eligible=1 进账单=从未计入的钱被冲回、净额无声压低——
+     * 退款明细必须与原分账行同生共死（null 容错是给 V47 前的存量行：列有默认值 0/1）。
+     */
     private record RefundLinePlan(String lineNo, int qty, long discount,
                                   long platform, long merchant,
-                                  String appId, String settlePartyId) {
+                                  String appId, String settlePartyId,
+                                  int qualityFlags, boolean settleEligible) {
     }
 
 }
