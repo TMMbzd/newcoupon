@@ -23,7 +23,10 @@ import org.springframework.stereotype.Component;
  *
  * <p><b>判定顺序（语义，不是配置）</b>：
  * <ol>
- *   <li>用户/设备/IP 三维度各查一次（等值 + 平台级/租户级两层 + ACTIVE 未过期）；</li>
+ *   <li>用户/设备/IP 三维度各查一次（等值 + 平台级/租户级两层 + ACTIVE 未过期）。
+ *       **例外（审查 m1）**：REFUND 场景只查用户维度——退款是服务端到服务端调用，
+ *       上下文里的 IP/设备是商家后端的出口，对它拉黑（治理领券滥用的常见动作）不该
+ *       连坐正常退款；因子里以 {@code list.refund-server-caller} 可见这个跳过；</li>
  *   <li>任一维度命中 WHITE → PASS 且**短路**（后续规则不再评估）——运营放行是
  *       明确的意思表示，盖过黑名单与频控；</li>
  *   <li>否则任一维度命中 BLACK → REJECT；</li>
@@ -67,6 +70,14 @@ public class RiskListRule implements RiskRule {
         // 租户层为空串=平台级（PO 存储口径，见 RiskListEntryPO）：只匹配平台级条目
         String scope = ctx.appId() == null ? "" : ctx.appId();
         factors.put("list.scope", scope.isEmpty() ? "platform-only" : scope);
+        // 审查 m1：退款是服务端到服务端调用——上下文里的 IP/设备是**商家后端/聚合器的
+        // 出口**，不是消费者维度。运营为治理领券滥用拉黑一个出口 IP 时，绝不能让经它
+        // 的正常退款逐笔变自动 RISK hold（商家 payable 被静默压制）。REFUND 只匹配
+        // USER_ID；因子里如实记下"调用方维度被跳过"，排障时不会误以为是漏查。
+        boolean userDimensionOnly = ctx.scene() == RiskScene.REFUND;
+        if (userDimensionOnly) {
+            factors.put("list.refund-server-caller", "ip/device 不参与退款判定（服务端调用的出口不是消费者）");
+        }
         LocalDateTime now = LocalDateTime.now();
 
         // ① 三维度各查一次；记录每个维度命中了哪些名单类型（快照=回放稿）
@@ -75,11 +86,11 @@ public class RiskListRule implements RiskRule {
             allHits.addAll(collect(factors, "list.user",
                     RiskValueType.USER_ID, String.valueOf(ctx.userId()), scope, now));
         }
-        if (ctx.deviceId() != null) {
+        if (ctx.deviceId() != null && !userDimensionOnly) {
             allHits.addAll(collect(factors, "list.device",
                     RiskValueType.DEVICE_ID, ctx.deviceId(), scope, now));
         }
-        if (ctx.ip() != null) {
+        if (ctx.ip() != null && !userDimensionOnly) {
             allHits.addAll(collect(factors, "list.ip",
                     RiskValueType.IP, ctx.ip(), scope, now));
         }
