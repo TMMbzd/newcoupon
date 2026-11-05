@@ -132,7 +132,17 @@ public class DailyBillService {
      * （负数=该主体有未释放 hold 超过当期净额，财务需人工关注）。精确分摊/结转属
      * 3B 批次与结算单的职责（本刀裁剪，见 runbook）。
      *
-     * @return 聚合出的主体行数
+     * <p><b>全排除组也出行（审查 C 簇）</b>：当日整组零合格行（如灰度关一整天商家券），
+     * 仍 upsert 一条 0 金额 + ineligible 计数&gt;0 的宿主行——金额等式不受影响（0 贡献），
+     * 而"钱去哪了"在账单上始终可查。
+     *
+     * <p><b>重跑留痕（审查 D 簇）</b>：覆盖前比对旧值，任一字段变化 →
+     * stock_drift_log（action=SETTLE_BILL_RERUN_CHANGED，记旧/新九字段）+ 指标
+     * coupon_settle_bill_rerun_changed_total。**仍执行覆盖**（重跑收敛是运维目的）——
+     * 改明细必经重跑才影响账单，这条告警即覆盖该威胁路径的全部痕迹需求；
+     * 明细级"Σ明细=账单"独立等式不做（登记 runbook）。
+     *
+     * @return 写出的主体行数（含全排除 0 金额宿主行）
      */
     public int generateSettlePartyBill(LocalDate date) {
         LocalDateTime start = date.atStartOfDay();
@@ -158,39 +168,126 @@ public class DailyBillService {
                         agg.getTotalAmount(), Long::sum);
             }
         }
+        // 重跑留痕（审查 D 簇）的旧值快照：一次读全该日，内存比对——仍执行覆盖，但变化必留痕
+        Map<String, CouponSettlePartyDailyBillPO> existing = new HashMap<>();
+        for (CouponSettlePartyDailyBillPO old : settlePartyBillMapper.selectAllByDate(date)) {
+            existing.put(aggKey(old.getAppId(), old.getSettlePartyId(), old.getTemplateId()), old);
+        }
 
+        java.util.Set<String> written = new java.util.HashSet<>();
         for (CouponSettlePartyDailyBillMapper.SettlePartyAgg row : rows) {
-            CouponSettlePartyDailyBillPO bill = new CouponSettlePartyDailyBillPO();
-            bill.setBillDate(date);
-            bill.setAppId(row.getAppId());
-            bill.setSettlePartyId(row.getSettlePartyId());
-            bill.setTemplateId(row.getTemplateId());
-            bill.setConfirmCount(row.getConfirmCount().intValue());
-            bill.setRefundCount(row.getRefundCount().intValue());
-            bill.setDiscountTotal(row.getDiscountTotal());
-            bill.setPlatformBurden(row.getPlatformBurden());
-            bill.setMerchantBurden(row.getMerchantBurden());
-
-            // hold：主体级（全适用）+ 模板级（只扣本行）——金额口径见方法注释
-            long hold = partyLevelHold.getOrDefault(
-                    row.getAppId() + '|' + row.getSettlePartyId(), 0L)
-                    + templateHold.getOrDefault(aggKey(row.getAppId(), row.getSettlePartyId(),
-                    row.getTemplateId()), 0L);
-            bill.setHoldAmount(hold);
-            // payable = 分账净额(已含退款冲回) - hold；负数不钳制——钳制会掩盖"hold 超净额"这个事实本身
-            bill.setPayableAmount(row.getDiscountTotal() - hold);
-
-            CouponSettlePartyDailyBillMapper.IneligibleAgg bucket = ineligible.get(
-                    aggKey(row.getAppId(), row.getSettlePartyId(), row.getTemplateId()));
-            bill.setIneligibleShareCount(bucket == null ? 0 : bucket.getIneligibleShareCount().intValue());
-            bill.setIneligibleRefundCount(bucket == null ? 0 : bucket.getIneligibleRefundCount().intValue());
-            settlePartyBillMapper.upsertBill(bill);
+            String key = aggKey(row.getAppId(), row.getSettlePartyId(), row.getTemplateId());
+            CouponSettlePartyDailyBillMapper.IneligibleAgg bucket = ineligible.get(key);
+            upsertRow(date, row.getAppId(), row.getSettlePartyId(), row.getTemplateId(),
+                    row.getConfirmCount().intValue(), row.getRefundCount().intValue(),
+                    row.getDiscountTotal(), row.getPlatformBurden(), row.getMerchantBurden(),
+                    partyLevelHold, templateHold, bucket, existing);
+            written.add(key);
+        }
+        // 全排除组（审查 C 簇）：当日整组零合格行 → 也要出"0 金额+计数>0"的宿主行——
+        // 否则 L76 主场景（灰度关一整天商家券）在账单上完全蒸发，排查无门
+        for (Map.Entry<String, CouponSettlePartyDailyBillMapper.IneligibleAgg> e : ineligible.entrySet()) {
+            if (written.contains(e.getKey())) {
+                continue;
+            }
+            CouponSettlePartyDailyBillMapper.IneligibleAgg bucket = e.getValue();
+            upsertRow(date, bucket.getAppId(), bucket.getSettlePartyId(), bucket.getTemplateId(),
+                    0, 0, 0L, 0L, 0L, partyLevelHold, templateHold, bucket, existing);
+            written.add(e.getKey());
         }
         log.info("SETTLE_PARTY_DAILY_BILL date={} parties/templates={} 核销行={} 退款行={}",
-                date, rows.size(),
+                date, written.size(),
                 rows.stream().mapToLong(CouponSettlePartyDailyBillMapper.SettlePartyAgg::getConfirmCount).sum(),
                 rows.stream().mapToLong(CouponSettlePartyDailyBillMapper.SettlePartyAgg::getRefundCount).sum());
-        return rows.size();
+        return written.size();
+    }
+
+    /** 单行组装 + 变更留痕 + upsert：聚合行与全排除 0 金额行共用同一条路径（口径一致） */
+    private void upsertRow(LocalDate date, String appId, String partyId, Long templateId,
+                           int confirmCount, int refundCount, long discountTotal,
+                           long platformBurden, long merchantBurden,
+                           Map<String, Long> partyLevelHold, Map<String, Long> templateHold,
+                           CouponSettlePartyDailyBillMapper.IneligibleAgg bucket,
+                           Map<String, CouponSettlePartyDailyBillPO> existing) {
+        CouponSettlePartyDailyBillPO bill = new CouponSettlePartyDailyBillPO();
+        bill.setBillDate(date);
+        bill.setAppId(appId);
+        bill.setSettlePartyId(partyId);
+        bill.setTemplateId(templateId);
+        bill.setConfirmCount(confirmCount);
+        bill.setRefundCount(refundCount);
+        bill.setDiscountTotal(discountTotal);
+        bill.setPlatformBurden(platformBurden);
+        bill.setMerchantBurden(merchantBurden);
+        // hold：主体级（全适用）+ 模板级（只扣本行）——金额口径见 generateSettlePartyBill 注释
+        long hold = partyLevelHold.getOrDefault(appId + '|' + partyId, 0L)
+                + templateHold.getOrDefault(aggKey(appId, partyId, templateId), 0L);
+        bill.setHoldAmount(hold);
+        // payable = 分账净额(已含退款冲回) - hold；负数不钳制——钳制会掩盖"hold 超净额"这个事实本身
+        bill.setPayableAmount(discountTotal - hold);
+        bill.setIneligibleShareCount(bucket == null ? 0 : bucket.getIneligibleShareCount().intValue());
+        bill.setIneligibleRefundCount(bucket == null ? 0 : bucket.getIneligibleRefundCount().intValue());
+
+        // 重跑留痕：与旧值任一字段不同 → drift log + 指标（仍覆盖——重跑收敛是运维目的，
+        // 留痕回答"这一轮覆盖改了什么"）。首次生成无旧行=正常路径不记。
+        CouponSettlePartyDailyBillPO old = existing.get(aggKey(appId, partyId, templateId));
+        if (old != null && billChanged(old, bill)) {
+            logRerunChange(date, old, bill);
+        }
+        settlePartyBillMapper.upsertBill(bill);
+    }
+
+    /** 九个业务字段逐一比对（create/update_time 除外——它们每轮必变） */
+    private static boolean billChanged(CouponSettlePartyDailyBillPO old, CouponSettlePartyDailyBillPO fresh) {
+        return old.getConfirmCount() != null && (!java.util.Objects.equals(old.getConfirmCount(), fresh.getConfirmCount())
+                || !java.util.Objects.equals(old.getRefundCount(), fresh.getRefundCount())
+                || !java.util.Objects.equals(old.getDiscountTotal(), fresh.getDiscountTotal())
+                || !java.util.Objects.equals(old.getPlatformBurden(), fresh.getPlatformBurden())
+                || !java.util.Objects.equals(old.getMerchantBurden(), fresh.getMerchantBurden())
+                || !java.util.Objects.equals(old.getHoldAmount(), fresh.getHoldAmount())
+                || !java.util.Objects.equals(old.getPayableAmount(), fresh.getPayableAmount())
+                || !java.util.Objects.equals(old.getIneligibleShareCount(), fresh.getIneligibleShareCount())
+                || !java.util.Objects.equals(old.getIneligibleRefundCount(), fresh.getIneligibleRefundCount()));
+    }
+
+    /** 重跑变化三连：ERROR 日志 + drift log（旧值/新值九字段紧凑 JSON，512 列宽内）+ 指标 */
+    private void logRerunChange(LocalDate date, CouponSettlePartyDailyBillPO old,
+                                CouponSettlePartyDailyBillPO fresh) {
+        log.warn("SETTLE_BILL_RERUN_CHANGED date={} appId={} party={} template={} 旧[核销={},退款={},"
+                        + "净额={},hold={},payable={},排除分账={},排除退款={}] 新[核销={},退款={},净额={},"
+                        + "hold={},payable={},排除分账={},排除退款={}]（明细被改后重跑——账单已按新值覆盖，"
+                        + "本行留痕供审计回溯改了什么）",
+                date, old.getAppId(), old.getSettlePartyId(), old.getTemplateId(),
+                old.getConfirmCount(), old.getRefundCount(), old.getDiscountTotal(),
+                old.getHoldAmount(), old.getPayableAmount(), old.getIneligibleShareCount(),
+                old.getIneligibleRefundCount(), fresh.getConfirmCount(), fresh.getRefundCount(),
+                fresh.getDiscountTotal(), fresh.getHoldAmount(), fresh.getPayableAmount(),
+                fresh.getIneligibleShareCount(), fresh.getIneligibleRefundCount());
+        String detail = String.format(
+                "{\"date\":\"%s\",\"appId\":\"%s\",\"party\":\"%s\",\"templateId\":%d,"
+                        + "\"old\":{\"confirm\":%d,\"refund\":%d,\"discount\":%d,\"hold\":%d,"
+                        + "\"payable\":%d,\"ineligShare\":%d,\"ineligRefund\":%d},"
+                        + "\"new\":{\"confirm\":%d,\"refund\":%d,\"discount\":%d,\"hold\":%d,"
+                        + "\"payable\":%d,\"ineligShare\":%d,\"ineligRefund\":%d}}",
+                date, old.getAppId(), old.getSettlePartyId(), old.getTemplateId(),
+                old.getConfirmCount(), old.getRefundCount(), old.getDiscountTotal(),
+                old.getHoldAmount(), old.getPayableAmount(), old.getIneligibleShareCount(),
+                old.getIneligibleRefundCount(), fresh.getConfirmCount(), fresh.getRefundCount(),
+                fresh.getDiscountTotal(), fresh.getHoldAmount(), fresh.getPayableAmount(),
+                fresh.getIneligibleShareCount(), fresh.getIneligibleRefundCount());
+        try {
+            driftLog.record(new StockDriftLogGateway.DriftEvent(
+                    old.getTemplateId(), 0, 0, 0, 0, 0, null, null, 1,
+                    "SETTLE_BILL_RERUN_CHANGED", detail));
+        } catch (RuntimeException e) {
+            log.error("SETTLE_BILL_RERUN_CHANGED drift log failed: date={} templateId={}",
+                    date, old.getTemplateId(), e);
+        }
+        try {
+            meterRegistry.counter("coupon_settle_bill_rerun_changed_total").increment();
+        } catch (RuntimeException ignore) {
+            // 指标失败不影响账单
+        }
     }
 
     private static String aggKey(String appId, String partyId, Long templateId) {
@@ -240,6 +337,13 @@ public class DailyBillService {
         }
         Map<Long, long[]> sums = new HashMap<>();
         for (CouponSettlePartyDailyBillPO p : settlePartyBillMapper.selectAllByDate(date)) {
+            // 全排除宿主行（审查 C 簇：0 金额 + ineligible 计数>0 的可观测行）不携带钱与
+            // 行数——不进等式。判别=三零（真有交易的行必带 confirm/refund 计数：当日全额
+            // 冲回的组是 confirm>0/discount=0，不会被误跳）。不跳的话宿主行会被当成
+            // "主体有行、模板账单没有"的孤儿差异，reconcile 永远红。
+            if (p.getConfirmCount() == 0 && p.getRefundCount() == 0 && p.getDiscountTotal() == 0) {
+                continue;
+            }
             long[] v = sums.computeIfAbsent(p.getTemplateId(), k -> new long[5]);
             v[0] += p.getConfirmCount();
             v[1] += p.getRefundCount();

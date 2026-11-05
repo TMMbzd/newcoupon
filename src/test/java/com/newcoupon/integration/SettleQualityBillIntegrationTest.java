@@ -342,7 +342,75 @@ class SettleQualityBillIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     // ------------------------------------------------------------------
-    // ⑥ V47 回填 SQL 解释性复验（迁移先于测试数据执行——手工跑同款语句验证判定口径）
+    // ⑦ 审查 C 簇：全排除组的可观测性（L76 主场景不能是账单上的黑洞）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("Q8: 整组零合格行 → 主体账单出 0 金额行且 ineligible 计数>0（不是无行蒸发）")
+    void fullyExcludedGroupStillProducesObservableRow() {
+        Confirmed merchant = confirmCoupon("Q8", 2);   // 灰度关 → 两行全 LEGACY_DEFAULT+0
+        LocalDate today = LocalDate.now();
+
+        dailyBillService.generateAll(today);
+
+        List<CouponSettlePartyDailyBillPO> rows = partyBillMapper.selectByFilters(
+                today, null, "__default__", merchant.templateId(), 10, 0);
+        assertThat(rows).as("全排除组也必须有宿主行承载质量桶计数").hasSize(1);
+        CouponSettlePartyDailyBillPO row = rows.get(0);
+        assertThat(row.getConfirmCount()).isZero();
+        assertThat(row.getRefundCount()).isZero();
+        assertThat(row.getDiscountTotal()).as("0 金额 + 计数>0 = 可观测信号").isZero();
+        assertThat(row.getHoldAmount()).isZero();
+        assertThat(row.getPayableAmount()).isZero();
+        assertThat(row.getIneligibleShareCount()).isEqualTo(2);
+        // 金额等式不受影响：0 贡献，模板账单无该模板行、reconcile 仍绿
+        assertThat(dailyBillService.reconcile(today)).isZero();
+    }
+
+    // ------------------------------------------------------------------
+    // ⑧ 审查 D 簇：重跑覆盖必须留痕（改明细+重跑=账单静默重述的威胁路径）
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("Q9: 生成→改明细→重跑 → drift log 记旧值新值 + 指标递增；账单仍收敛到新值")
+    void rerunChangeLeavesDriftTrace() {
+        Confirmed platform = confirmCoupon("Q9", null);   // __default__ 2000 分
+        LocalDate today = LocalDate.now();
+        dailyBillService.generateAll(today);
+        assertThat(partyBill(today, platform.templateId()).getDiscountTotal()).isEqualTo(2000L);
+
+        double before = meterRegistry.find("coupon_settle_bill_rerun_changed_total")
+                .counter() == null ? 0.0
+                : meterRegistry.find("coupon_settle_bill_rerun_changed_total").counter().count();
+
+        // 改明细：多插一条今天的合格分账行（同模板同主体 +400）
+        JdbcTemplate jdbc = jdbc();
+        jdbc.update("INSERT INTO coupon_share_detail "
+                        + "(id, user_coupon_id, user_id, template_id, app_id, settle_party_id, "
+                        + " usage_no, order_no, order_line_no, platform_burden, merchant_burden, share_total) "
+                        + "VALUES (?, ?, ?, ?, '1', '__default__', ?, 'O-Q9', 'L9', 400, 0, 400)",
+                System.nanoTime(), platform.couponId(), System.nanoTime(),
+                platform.templateId(), "U-Q9-" + System.nanoTime());
+
+        dailyBillService.generateAll(today);
+
+        // 账单收敛到新值（重跑覆盖仍是运维目的）
+        assertThat(partyBill(today, platform.templateId()).getDiscountTotal()).isEqualTo(2400L);
+        // 变化必留痕：drift log 记两侧读数 + 指标递增（现状静默覆盖——先红点）
+        Map<String, Object> drift = jdbc.queryForMap(
+                "SELECT action, detail FROM stock_drift_log "
+                        + "WHERE action = 'SETTLE_BILL_RERUN_CHANGED' AND detail LIKE ? "
+                        + "ORDER BY id DESC LIMIT 1",
+                "%" + platform.templateId() + "%");
+        assertThat(String.valueOf(drift.get("detail")))
+                .as("detail 记旧值与新值").contains("\"old\"").contains("\"new\"");
+        double after = meterRegistry.find("coupon_settle_bill_rerun_changed_total").counter().count();
+        assertThat(after).as("指标 coupon_settle_bill_rerun_changed_total 递增")
+                .isGreaterThan(before);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑨ V47 回填 SQL 解释性复验（迁移先于测试数据执行——手工跑同款语句验证判定口径）
     // ------------------------------------------------------------------
 
     @Test
