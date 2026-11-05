@@ -428,6 +428,11 @@ class Risk4BIntegrationTest extends ShardedIntegrationTestSupport {
     @Test
     @DisplayName("T8: 多模板主体的退款冻结是模板级——账单只扣该模板行，其余模板行 hold=0")
     void refundHoldIsTemplateLevelNotPartyWide() {
+        // 共享库自包含（3min 审查的同款教训）：别的测试类可能在 (app='1', __default__) 留下
+        // 主体级 ACTIVE hold——按"主体级对每模板行全额扣"的既有账单语义，它会汇进本用例
+        // 生成的账单行（全量跑时实发过：holdA=101999=他人 99999+本单 2000）。生成账单前清场。
+        jdbc().update("UPDATE coupon_settlement_hold SET status = 'RELEASED' "
+                + "WHERE app_id = '1' AND settle_party_id = '__default__' AND status = 'ACTIVE'");
         long templateA = createPublishedTemplate(3103L);
         long templateB = createPublishedTemplate(3104L);
         long userA = uniqueUserId();
