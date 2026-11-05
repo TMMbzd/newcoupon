@@ -47,6 +47,8 @@ public enum SwitchPlan {
             new PlanEntry(SwitchKey.TRADE_REFUND.configKey(), "true"),
             new PlanEntry(SwitchKey.TEMPLATE_PUBLISH.configKey(), "true"),
             new PlanEntry(SwitchKey.OUTBOX_DISPATCH.configKey(), "true"),
+            // RISK_DECISION 三份预案统一 false（见 RED 的注释——预案不做灰度开闸的决策人）
+            new PlanEntry(SwitchKey.RISK_DECISION.configKey(), "false"),
             new PlanEntry(TenantConfigKey.RATE_LIMIT_WARMUP_SECONDS.configKey(), "60"),
             new PlanEntry(TenantConfigKey.RATE_LIMIT_QPS.configKey(), "150")),
 
@@ -67,6 +69,7 @@ public enum SwitchPlan {
             new PlanEntry(SwitchKey.TRADE_REFUND.configKey(), "true"),
             new PlanEntry(SwitchKey.TEMPLATE_PUBLISH.configKey(), "false"),
             new PlanEntry(SwitchKey.OUTBOX_DISPATCH.configKey(), "false"),
+            new PlanEntry(SwitchKey.RISK_DECISION.configKey(), "false"),
             new PlanEntry(TenantConfigKey.RATE_LIMIT_WARMUP_SECONDS.configKey(), "0"),
             new PlanEntry(TenantConfigKey.RATE_LIMIT_QPS.configKey(), "0")),
 
@@ -85,6 +88,11 @@ public enum SwitchPlan {
             new PlanEntry(SwitchKey.TRADE_REFUND.configKey(), "true"),
             new PlanEntry(SwitchKey.TEMPLATE_PUBLISH.configKey(), "false"),
             new PlanEntry(SwitchKey.OUTBOX_DISPATCH.configKey(), "false"),
+            // RISK_DECISION 三份预案统一 false：它是**默认关的新功能**，预案不做灰度开闸的
+            // 决策人——已按租户灰度开的租户套用预案后会被覆盖回 false（全量物化的既定
+            // 取舍，见类注释），需要时在预案外手工恢复。攻击在途时它反而是防线，但
+            // "预案默认动它"的判断留给 4B 接线核销/退款后再定（登记 runbook）。
+            new PlanEntry(SwitchKey.RISK_DECISION.configKey(), "false"),
             new PlanEntry(TenantConfigKey.RATE_LIMIT_WARMUP_SECONDS.configKey(), "0"),
             new PlanEntry(TenantConfigKey.RATE_LIMIT_QPS.configKey(), "20"));
 

@@ -8,8 +8,11 @@ import com.newcoupon.common.context.DeadlineGuard;
 import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.domain.coupon.CouponEvent;
 import com.newcoupon.domain.coupon.CouponTemplate;
+import com.newcoupon.domain.risk.RiskAction;
+import com.newcoupon.domain.risk.RiskScene;
 import com.newcoupon.domain.repository.UserCouponRepository;
 import com.newcoupon.infrastructure.persistence.po.CouponBudgetReservationPO;
+import com.newcoupon.infrastructure.risk.RiskRequestAttributes;
 import com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import java.time.LocalDateTime;
@@ -39,6 +42,7 @@ public class ReceiveAppService {
     private final DependencyCircuitBreakers breakers;
     private final BudgetService budgetService;
     private final UserCouponRepository userCouponRepository;
+    private final RiskDecisionService riskDecisionService;
 
     public ReceiveAppService(CachedTemplateReader cachedTemplateReader,
                              CachedOpenAppReader cachedOpenAppReader,
@@ -46,7 +50,8 @@ public class ReceiveAppService {
                              ReceiveMetrics metrics,
                              DependencyCircuitBreakers breakers,
                              BudgetService budgetService,
-                             UserCouponRepository userCouponRepository) {
+                             UserCouponRepository userCouponRepository,
+                             RiskDecisionService riskDecisionService) {
         this.cachedTemplateReader = cachedTemplateReader;
         this.cachedOpenAppReader = cachedOpenAppReader;
         this.c1ReceiveAppService = c1ReceiveAppService;
@@ -54,6 +59,7 @@ public class ReceiveAppService {
         this.breakers = breakers;
         this.budgetService = budgetService;
         this.userCouponRepository = userCouponRepository;
+        this.riskDecisionService = riskDecisionService;
     }
 
     public ReceiveResult receive(ReceiveRequest request) {
@@ -79,6 +85,19 @@ public class ReceiveAppService {
             // 已受理的在途任务不回收（202 是受理承诺），登记在 runbook §6.2
             assertTenantIssuable(template.getAppId());
             template.assertReceivable(LocalDateTime.now());
+            // V6 4A 风控决策（scene=RECEIVE）：模板校验后、一切资源消耗（时间预算/预算租约/
+            // 库存/落库）之前。appId 用**券模板归属租户**而不是调用方身份——黑名单/开关
+            // 按"这张券是谁的"生效，内部面（/api）与开放面（/open）行为一致。
+            // 开关关=直接 PASS 且零额外 IO（RiskDecisionService 总闸）；REJECT 的处置
+            // 由场景定：领券=抛 7003，退款（刀 2）=照做+打标的合规红线——所以 decide
+            // 只返回结果不抛。设备号/IP 由 RiskContextFilter 透传（服务层不摸 HttpServletRequest）。
+            RiskDecisionService.RiskDecision risk = riskDecisionService.decide(new RiskContext(
+                    RiskScene.RECEIVE, template.getAppId(), req.userId(),
+                    RiskRequestAttributes.deviceId(), RiskRequestAttributes.clientIp(),
+                    req.requestId()));
+            if (risk.action() == RiskAction.REJECT) {
+                throw new BizException(ErrorCode.RISK_REJECTED);
+            }
             DeadlineGuard.requireBudget();
 
             budgetLease = reserveBudgetIfNeeded(req, template);
