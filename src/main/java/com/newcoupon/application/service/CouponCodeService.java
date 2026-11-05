@@ -16,12 +16,17 @@ import com.newcoupon.domain.coupon.PublishStatus;
 import com.newcoupon.domain.coupon.UserCoupon;
 import com.newcoupon.domain.repository.TemplateRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
+import com.newcoupon.domain.risk.RiskAction;
+import com.newcoupon.domain.risk.RiskScene;
 import com.newcoupon.infrastructure.id.SnowflakeIdGenerator;
 import com.newcoupon.infrastructure.persistence.mapper.CouponCodeBatchMapper;
 import com.newcoupon.infrastructure.persistence.mapper.CouponCodeMapper;
 import com.newcoupon.infrastructure.persistence.po.CouponBudgetReservationPO;
 import com.newcoupon.infrastructure.persistence.po.CouponCodeBatchPO;
 import com.newcoupon.infrastructure.persistence.po.CouponCodePO;
+import com.newcoupon.infrastructure.risk.RiskRequestAttributes;
+import com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -98,6 +103,8 @@ public class CouponCodeService {
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
     private final String pepper;
     private final BudgetService budgetService;
+    private final RiskDecisionService riskDecisionService;
+    private final DependencyCircuitBreakers breakers;
 
     public CouponCodeService(TemplateRepository templateRepository,
                              UserCouponRepository userCouponRepository,
@@ -109,6 +116,8 @@ public class CouponCodeService {
                              StringRedisTemplate redis,
                              com.fasterxml.jackson.databind.ObjectMapper objectMapper,
                              BudgetService budgetService,
+                             RiskDecisionService riskDecisionService,
+                             DependencyCircuitBreakers breakers,
                              @Value("${coupon.code.pepper}") String pepper) {
         this.templateRepository = templateRepository;
         this.userCouponRepository = userCouponRepository;
@@ -120,6 +129,8 @@ public class CouponCodeService {
         this.redis = redis;
         this.objectMapper = objectMapper;
         this.budgetService = budgetService;
+        this.riskDecisionService = riskDecisionService;
+        this.breakers = breakers;
         this.pepper = pepper;
         if (DEV_DEFAULT_PEPPER.equals(pepper)) {
             // 不 fail-fast（默认值合法可用），但生产忘配 CODE_PEPPER 时必须有人看见：
@@ -338,7 +349,8 @@ public class CouponCodeService {
     // ------------------------------------------------------------------
 
     /**
-     * 兑换一个码：限流 → 规范化/查码（租户口径）→ CAS 抢占 → receive 发券 → 结算。
+     * 兑换一个码：限流 → 规范化/查码（租户口径）→ 风控决策（V6 4B，REJECT 在 CAS 前不烧码）
+     * → CAS 抢占 → receive 发券 → 结算。
      *
      * <p><b>幂等重放路径</b>：码已 USED 时按 {@code redeem-{requestId}} 查
      * user_coupon——命中说明"上次兑换其实成功了（响应丢失）"，返回原券
@@ -384,6 +396,35 @@ public class CouponCodeService {
         if (code.getStatus() == CouponCodePO.STATUS_LOCKED) {
             // 他人正在兑换中（或崩窗残留未到回收时限）：与其它失败同文案
             throw unifiedInvalid(req, batch.getId(), code.getId(), "locked");
+        }
+
+        // V6 4B 风控决策（scene=RECEIVE，4A 遗留边界）：**抢占 CAS 之前**——被拒的兑换
+        // 不烧码（码保持 ACTIVE，解除名单后可重兑）。幂等豁免（审查 C2 同款）：码已 USED
+        // 的合法重试在上方 replayOrInvalid 已提前返回；这里再兜同 requestId 已发过券的
+        // 重放（跨码复用 requestId）——已成立的兑换事实不被风控改写成 7003。
+        // 决策段（名单/日志=MySQL）包进 mysql 依赖级熔断（4A C8 语义，7003 不计失败）。
+        if (riskDecisionService.enabled(batch.getAppId())) {
+            try {
+                breakers.dependency(DependencyCircuitBreakers.MYSQL).executeSupplier(() -> {
+                    boolean replayed = userCouponRepository.findByIdempotentKey(
+                            req.userId(), batch.getAppId(), redeemIdemKey(req.requestId()))
+                            .isPresent();
+                    if (replayed) {
+                        return null;
+                    }
+                    RiskDecisionService.RiskDecision risk = riskDecisionService.decide(
+                            new RiskContext(RiskScene.RECEIVE, batch.getAppId(), req.userId(),
+                                    RiskRequestAttributes.deviceId(),
+                                    RiskRequestAttributes.clientIp(), req.requestId()));
+                    if (risk.action() == RiskAction.REJECT) {
+                        throw new BizException(ErrorCode.RISK_REJECTED);
+                    }
+                    return null;
+                });
+            } catch (CallNotPermittedException e) {
+                log.warn("依赖熔断打开，兑换风控决策快速失败：codeId={}", code.getId());
+                throw new BizException(ErrorCode.SYSTEM_ERROR, "依赖暂时不可用（风控决策），请稍后重试");
+            }
         }
 
         // ACTIVE：抢占 CAS。1000 并发同码只有 1 个赢家，输家全部统一文案

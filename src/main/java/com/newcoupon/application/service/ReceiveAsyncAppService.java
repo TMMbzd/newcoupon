@@ -8,7 +8,10 @@ import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
 import com.newcoupon.common.context.DeadlineGuard;
 import com.newcoupon.domain.coupon.CouponTemplate;
+import com.newcoupon.domain.risk.RiskAction;
+import com.newcoupon.domain.risk.RiskScene;
 import com.newcoupon.infrastructure.persistence.po.CouponIssueTaskPO;
+import com.newcoupon.infrastructure.risk.RiskRequestAttributes;
 import com.newcoupon.infrastructure.redis.RedisIssueGate;
 import io.lettuce.core.RedisCommandTimeoutException;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -34,8 +37,9 @@ import org.springframework.stereotype.Service;
 /**
  * 异步发放受理编排（ADR-0019 第二层）。
  *
- * <p>流程：模板/归属/可领性校验 → Redis 准入预扣 → 同步写任务表 WAL → 202。
- * 它不发券；发券由 worker 在 C1 事务里执行。`stat_day` 在受理时固定，worker 不重新取日期。
+ * <p>流程：模板/归属/可领性校验 → 风控决策（V6 4B，REJECT 任务不建）→ Redis 准入预扣
+ * → 同步写任务表 WAL → 202。它不发券；发券由 worker 在 C1 事务里执行。`stat_day`
+ * 在受理时固定，worker 不重新取日期。
  *
  * <p>开关默认关闭。模板 allowlist 为空时拒绝启动异步入口；worker 未启用时只告警，
  * 因为 worker 是下一阶段才落地的组件，当前先验证受理/幂等/补偿。
@@ -54,6 +58,8 @@ public class ReceiveAsyncAppService {
     private final GateRepairQueueService gateRepairQueueService;
     private final com.newcoupon.infrastructure.redis.SoldOutHint soldOutHint;
     private final MeterRegistry meterRegistry;
+    private final RiskDecisionService riskDecisionService;
+    private final com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers breakers;
 
     private final boolean asyncEnabled;
     private final boolean workerEnabled;
@@ -71,6 +77,8 @@ public class ReceiveAsyncAppService {
                                   GateRepairQueueService gateRepairQueueService,
                                   com.newcoupon.infrastructure.redis.SoldOutHint soldOutHint,
                                   MeterRegistry meterRegistry,
+                                  RiskDecisionService riskDecisionService,
+                                  com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers breakers,
                                   @Value("${coupon.issue.async-enabled:false}") boolean asyncEnabled,
                                   @Value("${coupon.issue.worker.enabled:false}") boolean workerEnabled,
                                   @Value("${coupon.issue.async-template-ids:}") String asyncTemplateIds,
@@ -85,6 +93,8 @@ public class ReceiveAsyncAppService {
         this.gateRepairQueueService = gateRepairQueueService;
         this.soldOutHint = soldOutHint;
         this.meterRegistry = meterRegistry;
+        this.riskDecisionService = riskDecisionService;
+        this.breakers = breakers;
         this.asyncEnabled = asyncEnabled;
         this.workerEnabled = workerEnabled;
         this.allTemplates = "*".equals(asyncTemplateIds == null ? "" : asyncTemplateIds.trim());
@@ -122,6 +132,26 @@ public class ReceiveAsyncAppService {
         }
         AppOwnership.assertAccessible(template.getAppId(), "template:" + req.templateId());
         template.assertReceivable(java.time.LocalDateTime.now());
+        // V6 4B 风控决策（scene=RECEIVE，照同步入口同款模式）：受理层拦——REJECT 抛 7003，
+        // 任务不建（202 是受理承诺，被拒的意图不构成承诺）。幂等豁免（审查 C2 同款）：
+        // 同 requestId 已有任务=重放旧受理，不决策不拒绝。决策段（名单/日志=MySQL 访问）
+        // 包进 mysql 依赖级熔断（4A C8 语义：慢故障计入熔断统计而不是无声拖慢受理 RT）。
+        if (riskDecisionService.enabled(template.getAppId())) {
+            withMysqlBreaker(() -> {
+                if (taskService.findByUniqueKey(
+                        template.getAppId(), req.userId(), req.requestId()) != null) {
+                    return null;   // 重放：拿回既有任务的状态，不产生新决策
+                }
+                RiskDecisionService.RiskDecision risk = riskDecisionService.decide(
+                        new RiskContext(RiskScene.RECEIVE, template.getAppId(), req.userId(),
+                                RiskRequestAttributes.deviceId(), RiskRequestAttributes.clientIp(),
+                                req.requestId(), template.getId()));
+                if (risk.action() == RiskAction.REJECT) {
+                    throw new BizException(ErrorCode.RISK_REJECTED);
+                }
+                return null;
+            });
+        }
         DeadlineGuard.requireBudget();
 
         // 受理日只算一次：Redis gate 和任务表必须使用同一个日期，worker 不再取 now。
@@ -459,6 +489,21 @@ public class ReceiveAsyncAppService {
 
     private boolean allowed(long templateId) {
         return allTemplates || asyncTemplateIds.contains(templateId);
+    }
+
+    /**
+     * 风控决策段的 mysql 依赖级熔断包裹（4A C8 语义的受理层版）：慢而不失败的 DB
+     * 故障计入熔断统计并快速失败，而不是无声拖慢每个受理；7003 是 BizException，
+     * 不在“依赖故障”白名单谓词里，不计失败（黑名单风暴不会误开熔断）。
+     */
+    private void withMysqlBreaker(java.util.function.Supplier<Void> call) {
+        try {
+            breakers.dependency(com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers.MYSQL)
+                    .executeSupplier(call);
+        } catch (io.github.resilience4j.circuitbreaker.CallNotPermittedException e) {
+            log.warn("依赖熔断打开，风控决策快速失败");
+            throw new BizException(ErrorCode.SYSTEM_ERROR, "依赖暂时不可用（风控决策），请稍后重试");
+        }
     }
 
     private static Set<Long> parseIds(String raw) {

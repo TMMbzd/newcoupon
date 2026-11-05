@@ -110,7 +110,7 @@ public class ReceiveAppService {
                     RiskDecisionService.RiskDecision risk = riskDecisionService.decide(new RiskContext(
                             RiskScene.RECEIVE, template.getAppId(), req.userId(),
                             RiskRequestAttributes.deviceId(), RiskRequestAttributes.clientIp(),
-                            req.requestId()));
+                            req.requestId(), template.getId()));
                     if (risk.action() == RiskAction.REJECT) {
                         throw new BizException(ErrorCode.RISK_REJECTED);
                     }

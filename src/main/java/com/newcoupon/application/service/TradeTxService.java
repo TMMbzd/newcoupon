@@ -82,7 +82,8 @@ public class TradeTxService {
 
     private static final Logger log = LoggerFactory.getLogger(TradeTxService.class);
 
-    private static final String DEFAULT_PARTY = "__default__";
+    /** 分账默认主体（结算主体开关关/未传时的归集口径）；TradeAppService 退款冻结同值引用 */
+    static final String DEFAULT_PARTY = "__default__";
 
     private final UserCouponRepository userCouponRepository;
     private final CouponUsageRepository couponUsageRepository;

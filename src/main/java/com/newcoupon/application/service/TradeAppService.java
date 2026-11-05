@@ -12,6 +12,7 @@ import com.newcoupon.application.dto.TradeDtos.MyCoupon;
 import com.newcoupon.application.dto.TradeDtos.MyCouponList;
 import com.newcoupon.application.dto.TradeDtos.ReleaseRequest;
 import com.newcoupon.application.dto.TradeDtos.ReleaseResult;
+import com.newcoupon.application.dto.SettlementHoldDtos.HoldPlaceRequest;
 import com.newcoupon.common.AuditLog;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.BoundedKey;
@@ -29,12 +30,23 @@ import com.newcoupon.domain.pricing.PricingUsage;
 import com.newcoupon.domain.repository.CouponUsageRepository;
 import com.newcoupon.domain.repository.PricingUsageRepository;
 import com.newcoupon.domain.repository.UserCouponRepository;
+import com.newcoupon.domain.risk.RiskAction;
+import com.newcoupon.domain.risk.RiskScene;
+import com.newcoupon.infrastructure.metrics.RiskMetrics;
+import com.newcoupon.infrastructure.persistence.mapper.CouponRefundDetailMapper;
+import com.newcoupon.infrastructure.persistence.mapper.CouponRefundOrderMapper;
+import com.newcoupon.infrastructure.persistence.po.CouponRefundDetailPO;
+import com.newcoupon.infrastructure.risk.RiskRequestAttributes;
+import com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -46,12 +58,19 @@ import org.springframework.stereotype.Service;
  * 见 study/04a 第 4 部分）。
  *
  * <p>职责：①调用事务层执行三段 ②接住 CAS 信号/DuplicateKey，用事务外新快照分类成
- * 准确的幂等成功或状态冲突错误 ③券包查询。
+ * 准确的幂等成功或状态冲突错误 ③券包查询 ④<b>V6 4B 风控接线</b>：锁券/核销在业务
+ * 校验后、金额计算前做决策（REJECT→7003）；退款按<b>合规红线</b>处理——
+ * <b>REJECT 一律不拒绝退款</b>（消费者退款权&gt;平台风控），降级为“退款照做 + 决策日志
+ * 如实记 REJECT + 结算冻结（holdNo=RISK-{decisionId}，主体级）”；REVIEW 只留痕不冻结。
+ * 该红线同样写进 runbook §4B 与 RiskScene 注释，测试 T3 钉住。
  */
 @Service
 public class TradeAppService {
 
     private static final Logger log = LoggerFactory.getLogger(TradeAppService.class);
+
+    /** 旧式核销（无行级分账）的退款没有主体明细，退回分账的默认主体（与 TradeTxService 同值同源） */
+    private static final String DEFAULT_PARTY = TradeTxService.DEFAULT_PARTY;
 
     private final TradeTxService tradeTxService;
     private final UserCouponRepository userCouponRepository;
@@ -61,6 +80,12 @@ public class TradeAppService {
     private final PricingUsageRepository pricingUsageRepository;
     private final RefundPolicyService refundPolicyService;
     private final TradeMetrics tradeMetrics;
+    private final RiskDecisionService riskDecisionService;
+    private final SettlementHoldService settlementHoldService;
+    private final CouponRefundOrderMapper refundOrderMapper;
+    private final CouponRefundDetailMapper refundDetailMapper;
+    private final DependencyCircuitBreakers breakers;
+    private final RiskMetrics riskMetrics;
 
     /** 申报防线①：单笔优惠占订单金额的上限（百分数，默认 80）。极端促销（0元购）可调高 */
     private final int maxDiscountRatio;
@@ -81,6 +106,12 @@ public class TradeAppService {
                            PricingUsageRepository pricingUsageRepository,
                            RefundPolicyService refundPolicyService,
                            TradeMetrics tradeMetrics,
+                           RiskDecisionService riskDecisionService,
+                           SettlementHoldService settlementHoldService,
+                           CouponRefundOrderMapper refundOrderMapper,
+                           CouponRefundDetailMapper refundDetailMapper,
+                           DependencyCircuitBreakers breakers,
+                           RiskMetrics riskMetrics,
                            @Value("${coupon.trade.max-discount-ratio:80}") int maxDiscountRatio,
                            @Value("${coupon.trade.confirm-rate-per-minute:600}") int confirmRateLimit) {
         this.tradeTxService = tradeTxService;
@@ -91,6 +122,12 @@ public class TradeAppService {
         this.pricingUsageRepository = pricingUsageRepository;
         this.refundPolicyService = refundPolicyService;
         this.tradeMetrics = tradeMetrics;
+        this.riskDecisionService = riskDecisionService;
+        this.settlementHoldService = settlementHoldService;
+        this.refundOrderMapper = refundOrderMapper;
+        this.refundDetailMapper = refundDetailMapper;
+        this.breakers = breakers;
+        this.riskMetrics = riskMetrics;
         this.maxDiscountRatio = maxDiscountRatio;
         this.confirmRateLimit = confirmRateLimit;
     }
@@ -102,8 +139,12 @@ public class TradeAppService {
         // 这里不能用请求自报的 userId 做路由：userId 来自开放面 body，签名只认证 appId。
         // 若用 findByIdForUser，非券主会路由落空并跳过归属校验，紧接着的占用单快查会广播到
         // 别的租户的行。锁券预检故意保留一次广播：先拿到券做 appId 校验，再决定是否继续。
-        userCouponRepository.findById(req.couponId())
-                .ifPresent(c -> AppOwnership.assertAccessible(c.getAppId(), "coupon:" + c.getId()));
+        String couponAppId = userCouponRepository.findById(req.couponId())
+                .map(c -> {
+                    AppOwnership.assertAccessible(c.getAppId(), "coupon:" + c.getId());
+                    return c.getAppId();
+                })
+                .orElse(null);
         // 幂等快查（与领券同构）：锁券的幂等证据在占用单（usageNo 唯一），不在券状态上——
         // 必须在进事务前先查，否则事务层对券状态的内存快检会先抛冲突（E2E 抓到的真实Bug）
         // 与事务层使用同一个有界键：长 orderNo 会被折叠，快查/幂等重建必须用同一规则
@@ -119,6 +160,11 @@ public class TradeAppService {
             throw new BizException(ErrorCode.STATE_CONFLICT,
                     "该订单的占用已终结（" + u.getStatus().getDesc() + "），请使用新订单号");
         }
+
+        // V6 4B 风控决策（scene=LOCK）：照 ReceiveAppService 模式——幂等快查之后
+        // （已锁成功的重试在上方提前返回，不吃 7003）、快照绑定校验与事务之前。
+        // appId=券归属租户（上面越权校验顺手拿到）；REJECT→7003。开关关=整段跳过零查询。
+        assertRiskAllowed(RiskScene.LOCK, couponAppId, req.userId(), usageNo);
 
         // 环 2：带 pricingId 的锁券先做快照绑定校验（快照不锁价，核销时才按冻结价）。
         // 幂等快查在前面：已锁成功的重放即使快照过期也应答成功，不因快照失效破坏幂等。
@@ -191,6 +237,18 @@ public class TradeAppService {
     private ConfirmResult doConfirm(ConfirmRequest req) {
         // S1 越权防线（占用单只带 usageNo，需经券取归属）；返回的 usage 复用，避免二次广播。
         CouponUsage accessibleUsage = assertUsageAccessible(req.usageNo());
+
+        // V6 4B 风控决策（scene=CONFIRM）：占用单定位后、金额计算/事务之前。
+        // 幂等豁免：已 CONFIRMED 的重试（下方分支与事务层都答 duplicated）不做决策——
+        // 拉黑后重试已成功的核销拿回旧结果，不是 7003（审查 C2 同款豁免）。
+        // usage 为 null=老式路径广播未命中，后续必 4004——不决策（没有可归属的主体）。
+        if (accessibleUsage != null && accessibleUsage.getStatus() != UsageStatus.CONFIRMED) {
+            String appId = userCouponRepository
+                    .findByIdForUser(accessibleUsage.getUserCouponId(), accessibleUsage.getUserId())
+                    .map(UserCoupon::getAppId)
+                    .orElse(null);
+            assertRiskAllowed(RiskScene.CONFIRM, appId, accessibleUsage.getUserId(), req.usageNo());
+        }
 
         // 环 2：锁券带快照时，占用单上有唯一绑定。核销漏传 pricingId 也按绑定解析，
         // 防止调用方漏传后退回“按当前模板重算”——价格保证不能依赖调用方记性。
@@ -616,12 +674,125 @@ public class TradeAppService {
             refundNo = BoundedKey.of("AUTO:", req.usageNo());
         }
         RefundRequest normalized = new RefundRequest(req.usageNo(), refundNo, req.items());
+
+        // ══ V6 4B 风控决策（scene=REFUND）——合规红线的落点 ══
+        // REJECT 一律不拒绝退款（消费者退款权>平台风控）：这里只决策留痕，退款照做；
+        // REJECT 的处置=退款成功后结算冻结（见下方 placeRefundRiskHold），REVIEW 只留痕。
+        // 幂等豁免（审查 C2 同款）：同 refundNo 已退过=既有事实的重放，事务层会答
+        // duplicated——不做决策（拉黑后重试旧退款不产生新决策行/新冻结）。
+        RiskDecisionService.RiskDecision refundRisk = null;
+        if (riskDecisionService.enabled(coupon.getAppId())
+                && refundOrderMapper.selectByRefundNo(refundNo) == null) {
+            refundRisk = decideInBreaker(new RiskContext(RiskScene.REFUND, coupon.getAppId(),
+                    usage.getUserId(), RiskRequestAttributes.deviceId(),
+                    RiskRequestAttributes.clientIp(), refundNo));
+        }
+
+        RefundResult result;
         try {
             // usage 已由入口广播查到；事务层首读按 userId 单分片，锁行仍用快照 userId。
-            return tradeTxService.refundConfirm(normalized, usage.getUserId(),
+            result = tradeTxService.refundConfirm(normalized, usage.getUserId(),
                     LocalDateTime.now(), policy);
         } catch (TradeCasRejectedException e) {
             throw freshStateConflict("退款", e);
+        }
+        // 冻结挂点：只有“本次真的退了钱”（非重放）且决策为 REJECT 才冻结——重放不双冻，
+        // REVIEW/CHALLENGE/PASS 不冻结。冻结失败不回滚退款（红线优先级：退款照做 > 留账面）。
+        if (refundRisk != null && refundRisk.action() == RiskAction.REJECT
+                && !result.duplicated()) {
+            placeRefundRiskHold(refundRisk.decisionId(), refundNo, coupon.getAppId(), result);
+        }
+        return result;
+    }
+
+    /**
+     * 退款 REJECT 的降级处置：按本单退款明细把各结算主体的退款额冻结成应付口径扣减
+     * （source=RISK_RULE，holdNo=RISK-{decisionId}——同 decisionId 不双建，uk_hold_no 裁决）。
+     *
+     * <p>主体解析：行级退款的主体=退款明细行上的 (appId, settlePartyId)（核销分账时逐行
+     * 落库，与账单命中口径同源），按主体聚合各挂一笔、金额=该主体本单冲回的优惠额；
+     * 旧式核销（无行级分账）没有明细行，退回 (券归属租户, __default__) 一笔主体级。
+     * 单主体时 holdNo=RISK-{decisionId}；多主体按主体名排序加序号后缀（决策行与 hold
+     * 行仍可按前缀对上；同一 decisionId 不会跨请求复用，重试已被上方幂等豁免挡住）。
+     * hold 是账单口径不是真钱（V47 语义），不影响该期已生成账单——重跑才反映。
+     */
+    private void placeRefundRiskHold(Long decisionId, String refundNo, String couponAppId,
+                                     RefundResult result) {
+        try {
+            // TreeMap 按主体名排序：多主体时 holdNo 后缀序号稳定（同一决策内可复现）。
+            // 值=该主体本单冲回的优惠额（单元素数组做可变累加器）
+            Map<String, long[]> byParty = new TreeMap<>();
+            List<CouponRefundDetailPO> details = refundDetailMapper.selectByRefundNo(refundNo);
+            for (CouponRefundDetailPO d : details) {
+                String party = d.getSettlePartyId() == null ? DEFAULT_PARTY : d.getSettlePartyId();
+                byParty.computeIfAbsent(party, k -> new long[1])[0] +=
+                        d.getRefundDiscountAmt() == null ? 0 : d.getRefundDiscountAmt();
+            }
+            if (byParty.isEmpty()) {
+                // 旧式核销退款：无行级主体明细——默认主体一笔，金额=本单退款额
+                byParty.put(DEFAULT_PARTY, new long[]{result.discountAmt()});
+            }
+            int seq = 0;
+            for (Map.Entry<String, long[]> e : byParty.entrySet()) {
+                long amount = e.getValue()[0];
+                if (amount <= 0) {
+                    continue;   // 0 元冲回无应付口径可扣（place 也要求金额为正），如实跳过
+                }
+                String holdNo = byParty.size() == 1
+                        ? "RISK-" + decisionId
+                        : "RISK-" + decisionId + "-" + (++seq);
+                settlementHoldService.place(new HoldPlaceRequest(
+                        holdNo, couponAppId, e.getKey(), null, amount,
+                        "风控拦截退款决策降级+冻结结算", "RISK_RULE"));
+            }
+        } catch (RuntimeException e) {
+            // 冻结失败不能把已经成功的退款变成失败（红线：退款照做 > 账面完整）——
+            // ERROR+指标留“这笔该冻没冻”的信号，人工补 hold（管理面 MANUAL）
+            log.error("退款风控冻结失败（退款已成功，需人工补冻结）：refundNo={} decisionId={}",
+                    refundNo, decisionId, e);
+            riskMetrics.recordRiskHoldPlaceFail();
+        }
+    }
+
+    /**
+     * 拒绝型场景（LOCK/CONFIRM，RECEIVE 系）的接线公共段：开关开才决策，REJECT→7003。
+     * 决策段（名单三查/日志写入=MySQL 访问）包进 mysql 熔断段（照 ReceiveAppService
+     * 的 C8 语义）：慢而不失败的 DB 故障推高 RT 并计入熔断统计，而不是无声拖慢；
+     * 7003 是 BizException，走熔断器的依赖故障白名单谓词，不计失败。
+     */
+    private void assertRiskAllowed(RiskScene scene, String appId, Long userId, String requestId) {
+        if (appId == null || !riskDecisionService.enabled(appId)) {
+            return;   // 开关关=整段跳过零查询（回归零变化）；无主体=请求注定业务失败，不决策
+        }
+        RiskDecisionService.RiskDecision risk = decideInBreaker(new RiskContext(
+                scene, appId, userId, RiskRequestAttributes.deviceId(),
+                RiskRequestAttributes.clientIp(), requestId));
+        if (risk.action() == RiskAction.REJECT) {
+            throw new BizException(ErrorCode.RISK_REJECTED);
+        }
+    }
+
+    /** 决策的熔断包裹：两层次序与 ReceiveAppService.withBreakers 同款（租户分闸外、依赖总闸内）。 */
+    private RiskDecisionService.RiskDecision decideInBreaker(RiskContext ctx) {
+        Supplier<RiskDecisionService.RiskDecision> call = () -> riskDecisionService.decide(ctx);
+        String tenantAppId = AppOwnership.currentAppId();
+        if (tenantAppId == null) {
+            return withBreaker(breakers.dependency(DependencyCircuitBreakers.MYSQL),
+                    ErrorCode.SYSTEM_ERROR, "风控决策", call);
+        }
+        return withBreaker(breakers.forTenant(DependencyCircuitBreakers.MYSQL, tenantAppId),
+                ErrorCode.SYSTEM_ERROR, "风控决策",
+                () -> withBreaker(breakers.dependency(DependencyCircuitBreakers.MYSQL),
+                        ErrorCode.SYSTEM_ERROR, "风控决策", call));
+    }
+
+    private <T> T withBreaker(io.github.resilience4j.circuitbreaker.CircuitBreaker breaker,
+                              ErrorCode code, String what, Supplier<T> call) {
+        try {
+            return breaker.executeSupplier(call);
+        } catch (CallNotPermittedException e) {
+            log.warn("依赖熔断打开，快速失败：{}", what);
+            throw new BizException(code, "依赖暂时不可用（" + what + "），请稍后重试");
         }
     }
 }
