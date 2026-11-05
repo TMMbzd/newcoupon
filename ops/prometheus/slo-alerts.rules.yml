@@ -1,0 +1,48 @@
+# SLO alerting rules（V6 阶段 5A）——三类告警：快烧（page）/ 慢烧（ticket）/ SLI 断流（page）。
+#
+# severity 分级口径（Alertmanager 路由未部署，本文件只打标——见 SLO.md §5"不做"节）：
+#   page  = 立即处理（值班/电话）：预算在被快速烧穿或 SLI 本身失明；
+#   ticket = 工作时段建单跟进：预算消耗异常但还有余量。
+#
+# 阈值依据（Google SRE 工作簿《Alerting on SLOs》多窗燃烧率法，28 天窗口）：
+#   快烧 1h 窗 > 14.4×  ≈ 1 小时烧掉 2% 预算（28d 预算的 1/50）
+#   慢烧 6h 窗 > 6×      ≈ 6 小时烧掉 5% 预算
+# 标准做法快烧还配 5m 短窗二次确认（AND），本刀按裁剪线只做单窗（登记在 SLO.md 不做节）。
+groups:
+  - name: slo-alerts
+    interval: 1m
+    rules:
+      - alert: CouponSloFastBurn
+        expr: coupon:sli_burn_rate:1h > 14.4
+        # for 2m：连续 2 分钟过阈才 page，挡掉记录规则评估边沿的单次抖动
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "SLO 快烧（page）：{{ $labels.journey }} 链路 1h 燃烧率超 14.4 倍"
+          description: "{{ $labels.journey }} 链路正以约 2%/小时的速度烧错误预算。按 docs/operations/SLO.md §4 政策处置：定位 bad 来源（5xxx/未捕获异常），必要时降级止血；预算剩余见 coupon:sli_error_budget_remaining:ratio。"
+
+      - alert: CouponSloSlowBurn
+        expr: coupon:sli_burn_rate:6h > 6
+        # for 15m：慢烧本就用长窗平滑，再压 15 分钟确认持续性，避免 ticket 噪声
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "SLO 慢烧（ticket）：{{ $labels.journey }} 链路 6h 燃烧率超 6 倍"
+          description: "{{ $labels.journey }} 链路 6 小时已烧约 5% 错误预算。工作时段建单排查趋势根因；若持续将先于 28 天窗口耗尽预算。"
+
+      - alert: CouponSliStreamMissing
+        # 断流≠零流量：SliMetrics 启动即预建 12 条 events 序列，只要实例活着且抓取正常，
+        # 序列必然存在——absent_over_time 10 分钟即"实例没了/抓取断了/埋点被改掉"三选一。
+        # absent_over_time 会把选择器里的等值匹配标签（journey）带回结果，告警可区分链路。
+        expr: |
+          absent_over_time(coupon_sli_events_total{journey="receive"}[10m])
+            or absent_over_time(coupon_sli_events_total{journey="calculate"}[10m])
+            or absent_over_time(coupon_sli_events_total{journey="confirm"}[10m])
+            or absent_over_time(coupon_sli_events_total{journey="refund"}[10m])
+        labels:
+          severity: page
+        annotations:
+          summary: "SLI 断流（page）：{{ $labels.journey }} 的 coupon_sli_events_total 10 分钟无样本"
+          description: "SliMetrics 预建序列不该消失。三选一：实例宕机、Prometheus 抓取失败、埋点/指标名被改动。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"

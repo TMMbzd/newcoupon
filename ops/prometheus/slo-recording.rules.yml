@@ -1,0 +1,92 @@
+# SLO recording rules（V6 阶段 5A）——把 SLI 原始计数折叠成可用性/预算/燃烧率三条记录。
+#
+# 与谁同步：docs/operations/SLO.md（口径全文）、src/.../metrics/SliMetrics.java（指标定义）。
+# 四条链路的 SLO 与错误预算（1-SLO）：
+#   receive    99.9%  → 0.001    P99 ≤ 300ms
+#   calculate  99.9%  → 0.001    P99 ≤ 150ms
+#   confirm   99.95%  → 0.0005   P99 ≤ 500ms
+#   refund    99.95%  → 0.0005   P99 ≤ 500ms
+#
+# 口径要点（详见 SLO.md §3）：
+# - availability = good / (good + bad)，excluded 不进分母——售罄风暴是业务正常终点，
+#   不应烧掉错误预算；
+# - 低流量保护：窗口内 good+bad 事件数不足下限（1h≥10 / 6h≥30 / 3d≥100 / 28d≥100）
+#   时该窗口不产出 availability 序列（空而非噪声值）——下游燃烧率/预算记录随之无数据，
+#   告警不会基于零星样本误触发；
+# - 28d 记录要求 Prometheus retention ≥ 28d，不足时该窗口为现有数据的近似（见 README）。
+groups:
+  - name: slo-recording
+    interval: 1m
+    rules:
+      # ── 可用性比率（四窗共用同一公式，仅窗口与低流量下限不同）──
+      - record: coupon:sli_availability_ratio:1h
+        expr: |
+          sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[1h]))
+            /
+          (sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[1h]))
+            + sum by (journey) (increase(coupon_sli_events_total{outcome="bad"}[1h])))
+            unless on (journey)
+          (sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[1h]))
+            + sum by (journey) (increase(coupon_sli_events_total{outcome="bad"}[1h]))) < 10
+      - record: coupon:sli_availability_ratio:6h
+        expr: |
+          sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[6h]))
+            /
+          (sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[6h]))
+            + sum by (journey) (increase(coupon_sli_events_total{outcome="bad"}[6h])))
+            unless on (journey)
+          (sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[6h]))
+            + sum by (journey) (increase(coupon_sli_events_total{outcome="bad"}[6h]))) < 30
+      - record: coupon:sli_availability_ratio:3d
+        expr: |
+          sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[3d]))
+            /
+          (sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[3d]))
+            + sum by (journey) (increase(coupon_sli_events_total{outcome="bad"}[3d])))
+            unless on (journey)
+          (sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[3d]))
+            + sum by (journey) (increase(coupon_sli_events_total{outcome="bad"}[3d]))) < 100
+      - record: coupon:sli_availability_ratio:28d
+        expr: |
+          sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[28d]))
+            /
+          (sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[28d]))
+            + sum by (journey) (increase(coupon_sli_events_total{outcome="bad"}[28d])))
+            unless on (journey)
+          (sum by (journey) (increase(coupon_sli_events_total{outcome="good"}[28d]))
+            + sum by (journey) (increase(coupon_sli_events_total{outcome="bad"}[28d]))) < 100
+
+      # ── 28 天错误预算剩余（1 = 满预算；0 = 烧完；负值 = 超烧，冻结非关键发布）──
+      # 四链路合一条 or 链：同一 record 名的规则若按链路拆四条，promtool 的
+      # duplicate-rule lint 只看规则静态标签（都为空）会判重复；or 链同样把
+      # 各链路 (1-SLO) 的字面量写死在表达式里，自解释性不损失
+      - record: coupon:sli_error_budget_remaining:ratio
+        expr: |
+          1 - (1 - coupon:sli_availability_ratio:28d{journey="receive"}) / 0.001
+            or 1 - (1 - coupon:sli_availability_ratio:28d{journey="calculate"}) / 0.001
+            or 1 - (1 - coupon:sli_availability_ratio:28d{journey="confirm"}) / 0.0005
+            or 1 - (1 - coupon:sli_availability_ratio:28d{journey="refund"}) / 0.0005
+
+      # ── 燃烧率（burn rate）＝当前错误率 / 允许错误率，>1 即在烧预算 ──
+      # 窗口取 Google SRE 工作簿多窗燃烧率的标准三窗：1h（快，page 配 14.4×）、
+      # 6h（慢，ticket 配 6×）、3d（持续，仅记录观察，不配告警）。
+      # （计划文中"14.4h 窗"按业界标准实现为 1h 窗 14.4×——14.4 是燃烧率阈值，不是窗口；
+      #   且 Prometheus 时长字面量不支持小数单位，14.4h 本身不是合法写法。）
+      - record: coupon:sli_burn_rate:1h
+        expr: |
+          (1 - coupon:sli_availability_ratio:1h{journey="receive"}) / 0.001
+            or (1 - coupon:sli_availability_ratio:1h{journey="calculate"}) / 0.001
+            or (1 - coupon:sli_availability_ratio:1h{journey="confirm"}) / 0.0005
+            or (1 - coupon:sli_availability_ratio:1h{journey="refund"}) / 0.0005
+      - record: coupon:sli_burn_rate:6h
+        expr: |
+          (1 - coupon:sli_availability_ratio:6h{journey="receive"}) / 0.001
+            or (1 - coupon:sli_availability_ratio:6h{journey="calculate"}) / 0.001
+            or (1 - coupon:sli_availability_ratio:6h{journey="confirm"}) / 0.0005
+            or (1 - coupon:sli_availability_ratio:6h{journey="refund"}) / 0.0005
+      - record: coupon:sli_burn_rate:3d
+        expr: |
+          (1 - coupon:sli_availability_ratio:3d{journey="receive"}) / 0.001
+            or (1 - coupon:sli_availability_ratio:3d{journey="calculate"}) / 0.001
+            or (1 - coupon:sli_availability_ratio:3d{journey="confirm"}) / 0.0005
+            or (1 - coupon:sli_availability_ratio:3d{journey="refund"}) / 0.0005

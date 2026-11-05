@@ -1,0 +1,144 @@
+# promtool test rules 用例（V6 5A）——每条 alert 至少一例 + 记录规则数值抽查。
+# 运行：见 ops/prometheus/README.md（本机无 promtool 二进制，用 prom/prometheus 容器跑）。
+#
+# 三个 alert 用例的设计意图：
+#   1. 快烧：receive 全 bad（满足 1h 窗低流量下限 10 事件）→ CouponSloFastBurn page；
+#      同时 6h 窗也全 bad，但 CouponSloSlowBurn 的 for:15m 在 eval 时刻未满 → 不触发
+#      （验证 page 比 ticket 快，两级不会同时抢）。
+#   2. 慢烧：calculate 错误率 1%（burn=10，介于 6 与 14.4 之间）→ 只触发 SlowBurn，
+#      FastBurn 必须安静（验证两级阈值互斥）。
+#   3. 断流：receive 有样本、其余三条链路序列完全缺失 → 仅缺失链路报
+#      CouponSliStreamMissing，且告警带 journey 标签可区分。
+#   4. 低流量保护：confirm 窗口内仅 1 个事件 → availability 序列不产出（空而非噪声）。
+rule_files:
+  - slo-recording.rules.yml
+  - slo-alerts.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ── 用例 1：快烧（receive 全 bad）──
+  - interval: 1m
+    input_series:
+      - series: 'coupon_sli_events_total{journey="receive",outcome="good"}'
+        values: '0+0x40'
+      - series: 'coupon_sli_events_total{journey="receive",outcome="bad"}'
+        values: '0+10x40'
+    promql_expr_test:
+      # 全 bad：可用性 = 0/(0+bad) = 0（分母存在靠预建 good 序列——这正是预建的理由之一）
+      - expr: coupon:sli_availability_ratio:1h
+        eval_time: 10m
+        exp_samples:
+          - labels: 'coupon:sli_availability_ratio:1h{journey="receive"}'
+            value: 0
+      # burn = (1-0)/0.001 = 1000
+      - expr: coupon:sli_burn_rate:1h
+        eval_time: 10m
+        exp_samples:
+          - labels: 'coupon:sli_burn_rate:1h{journey="receive"}'
+            value: 1000
+      # 28d 预算剩余 = 1 - 1000 = -999（负值=已超烧，触发冻结政策）
+      - expr: coupon:sli_error_budget_remaining:ratio
+        eval_time: 10m
+        exp_samples:
+          - labels: 'coupon:sli_error_budget_remaining:ratio{journey="receive"}'
+            value: -999
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CouponSloFastBurn
+        exp_alerts:
+          - exp_labels:
+              journey: receive
+              severity: page
+            exp_annotations:
+              summary: "SLO 快烧（page）：receive 链路 1h 燃烧率超 14.4 倍"
+              description: "receive 链路正以约 2%/小时的速度烧错误预算。按 docs/operations/SLO.md §4 政策处置：定位 bad 来源（5xxx/未捕获异常），必要时降级止血；预算剩余见 coupon:sli_error_budget_remaining:ratio。"
+      # 6h 窗同样全 bad，但 for:15m 未满 → 不触发（page 先响，ticket 不抢跑）
+      - eval_time: 10m
+        alertname: CouponSloSlowBurn
+        exp_alerts: []
+      # 注：本用例只喂了 receive 序列，CouponSliStreamMissing 会对其余三条缺失链路触发
+      # ——那是用例 3 的主题，这里不断言它（避免两用例互相复制三段期望）。
+
+  # ── 用例 2：慢烧（calculate 错误率 1%，burn=10：>6 且 <14.4）──
+  - interval: 1m
+    input_series:
+      - series: 'coupon_sli_events_total{journey="calculate",outcome="good"}'
+        values: '0+99x400'
+      - series: 'coupon_sli_events_total{journey="calculate",outcome="bad"}'
+        values: '0+1x400'
+    promql_expr_test:
+      # 可用性 = 99/(99+1) = 0.99；同一窗口内两条序列的外推因子相同，比值不受影响
+      - expr: coupon:sli_availability_ratio:1h
+        eval_time: 30m
+        exp_samples:
+          - labels: 'coupon:sli_availability_ratio:1h{journey="calculate"}'
+            value: 0.99
+      # burn = (1-0.99)/0.001 ≈ 10。浮点注：1-0.99 在二进制浮点里是
+      # 0.010000000000000009，除以 0.001 得 10.000000000000001——不是精确 10，
+      # 用容差断言（promtool 的 exp_samples 是精确比较），而不是把浮点误差写进期望值
+      - expr: abs(coupon:sli_burn_rate:1h - 10) < bool 0.000001
+        eval_time: 30m
+        exp_samples:
+          - labels: '{journey="calculate"}'
+            value: 1
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CouponSloSlowBurn
+        exp_alerts:
+          - exp_labels:
+              journey: calculate
+              severity: ticket
+            exp_annotations:
+              summary: "SLO 慢烧（ticket）：calculate 链路 6h 燃烧率超 6 倍"
+              description: "calculate 链路 6 小时已烧约 5% 错误预算。工作时段建单排查趋势根因；若持续将先于 28 天窗口耗尽预算。"
+      # burn=10 < 14.4：快烧必须安静（两级阈值互斥）
+      - eval_time: 30m
+        alertname: CouponSloFastBurn
+        exp_alerts: []
+
+  # ── 用例 3：SLI 断流（三条链路序列缺失，一条在场）──
+  - interval: 1m
+    input_series:
+      - series: 'coupon_sli_events_total{journey="receive",outcome="good"}'
+        values: '0+0x30'
+    alert_rule_test:
+      # absent_over_time 把选择器的等值标签（journey）带回结果——三条缺失链路各一条告警
+      - eval_time: 5m
+        alertname: CouponSliStreamMissing
+        exp_alerts:
+          - exp_labels:
+              journey: calculate
+              severity: page
+            exp_annotations:
+              summary: "SLI 断流（page）：calculate 的 coupon_sli_events_total 10 分钟无样本"
+              description: "SliMetrics 预建序列不该消失。三选一：实例宕机、Prometheus 抓取失败、埋点/指标名被改动。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"
+          - exp_labels:
+              journey: confirm
+              severity: page
+            exp_annotations:
+              summary: "SLI 断流（page）：confirm 的 coupon_sli_events_total 10 分钟无样本"
+              description: "SliMetrics 预建序列不该消失。三选一：实例宕机、Prometheus 抓取失败、埋点/指标名被改动。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"
+          - exp_labels:
+              journey: refund
+              severity: page
+            exp_annotations:
+              summary: "SLI 断流（page）：refund 的 coupon_sli_events_total 10 分钟无样本"
+              description: "SliMetrics 预建序列不该消失。三选一：实例宕机、Prometheus 抓取失败、埋点/指标名被改动。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"
+
+  # ── 用例 4：低流量保护（confirm 1h 窗内仅 1 个事件 → availability 不产出）──
+  - interval: 1m
+    input_series:
+      - series: 'coupon_sli_events_total{journey="confirm",outcome="good"}'
+        values: '0+0x40'
+      - series: 'coupon_sli_events_total{journey="confirm",outcome="bad"}'
+        values: '0 1+0x40'
+    promql_expr_test:
+      # 窗口内 good+bad 事件不足 10（低流量下限）→ 序列为空，不产出 0 或噪声比值
+      - expr: coupon:sli_availability_ratio:1h
+        eval_time: 45m
+        exp_samples: []
+      # 下游燃烧率随之无数据——低流量期不告警，这是刻意的口径（SLO.md §3.5）
+      - expr: coupon:sli_burn_rate:1h
+        eval_time: 45m
+        exp_samples: []
