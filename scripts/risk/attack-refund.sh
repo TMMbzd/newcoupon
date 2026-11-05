@@ -77,11 +77,11 @@ step "4. 取证：决策日志 REJECT + 结算冻结 RISK-{decisionId}"
 resp=$(admin_post /api/risk/decisions/query \
     "{\"appId\":\"$ATK_APP\",\"scene\":\"REFUND\",\"userId\":$USER,\"limit\":5}")
 # JSON 走 argv 不走管道：heredoc（python 代码本体）会抢占 stdin
-python3 - "$REFUND_AMT" "$ATK_APP" "$BASE" "${ADMIN_TOKEN:-dev-admin-token}" "$resp" <<'PY'
+python3 - "$REFUND_AMT" "$ATK_APP" "$TPL" "$BASE" "${ADMIN_TOKEN:-dev-admin-token}" "$resp" <<'PY'
 import json, sys, urllib.request
 
-refund_amt, atk_app, base, admin_token = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
-data = json.loads(sys.argv[5])
+refund_amt, atk_app, tpl, base, admin_token = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
+data = json.loads(sys.argv[6])
 items = data.get("data", {}).get("items", [])
 assert items, f"退款场景没有决策日志行：{data}"
 row = items[0]
@@ -90,7 +90,8 @@ assert "R_LIST_BLACK" in (row.get("matchedRules") or []), f"命中规则不对�
 print(f"  ✓ 决策日志：action=REJECT matchedRules={row['matchedRules']} decisionId={row['id']}"
       f"（退款照做+打标，不是拒绝）")
 
-# 结算冻结：RISK-{decisionId} 主体级 hold（管理面查询端点取证）
+# 结算冻结：RISK-{decisionId} 模板级 hold（管理面查询端点取证）。
+# 模板级（审查 M1）=只扣被退券模板行的应付；主体级会把同主体其它模板行也全额扣减
 req = urllib.request.Request(
     base + "/api/settlement/holds/query",
     data=json.dumps({"appId": atk_app, "limit": 50}).encode(),
@@ -102,11 +103,11 @@ hit = [h for h in holds if h["holdNo"] == hold_no]
 assert hit, f"settlement_hold 没有 {hold_no} 行：已建 holds={[(h['holdNo'], h['status']) for h in holds]}"
 hold = hit[0]
 assert hold["status"] == "ACTIVE" and hold["source"] == "RISK_RULE", f"hold 状态/来源不对：{hold}"
-assert hold["templateId"] is None, f"必须是主体级冻结（templateId 空）：{hold}"
+assert hold["templateId"] == tpl, f"必须是模板级冻结（templateId={tpl}）：{hold}"
 assert hold["amount"] == refund_amt, f"冻结金额应=本单退款额 {refund_amt}，实际 {hold['amount']}"
 assert hold["settlePartyId"] == "__default__", f"主体口径：{hold['settlePartyId']}"
 print(f"  ✓ 结算冻结：holdNo={hold_no} amount={hold['amount']} 分 source={hold['source']}"
-      f" status={hold['status']}（主体级，payable=分账-退款-hold）")
+      f" status={hold['status']}（模板级 templateId={tpl}，payable=分账-退款-hold）")
 PY
 PASS=$((PASS + 1))
 
