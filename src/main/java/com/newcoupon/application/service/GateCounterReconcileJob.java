@@ -37,7 +37,9 @@ import org.springframework.stereotype.Component;
  * </pre>
  *
  * <p><b>读序</b>：先 GET Redis 当前值、再查 DB 目标。并发受理对两边同向 +1（cur 加一、
- * 在途任务加一），diff 不变——窗口噪声只剩罕见的释放/修复动作，因此阈值默认 0（任何偏差都修）。
+ * 在途任务加一），diff 不变——窗口噪声只剩罕见的释放/修复动作。ul/uld 默认阈值 0
+ * （每用户一键，单键并发低）；gate 与 dly 是模板级热点键，**至少容 1**，
+ * 否则高 QPS 下每轮都可能把 ±1 瞬态差当成漂移修掉（L78）。
  * 反过来先查 DB 再 GET，会把窗口内每个受理都算成 diff。
  *
  * <p><b>只枚举存在的键</b>（SCAN）：不存在的键在下次访问时由"键缺失"可修复码自愈，
@@ -228,7 +230,7 @@ public class GateCounterReconcileJob {
             return false;
         }
         long target = counterRepairService.computeUserTotalTarget(userId, templateId);
-        return fixCounter("ul_reconcile_fix", key, templateId, cur, target,
+        return fixCounter("ul_reconcile_fix", key, templateId, cur, target, threshold,
                 () -> issueGate.repairUserTotal(templateId, userId, target, idemTtlSeconds));
     }
 
@@ -248,7 +250,7 @@ public class GateCounterReconcileJob {
             return false;
         }
         long target = counterRepairService.computeUserDailyTarget(userId, templateId, day);
-        return fixCounter("uld_reconcile_fix", key, templateId, cur, target,
+        return fixCounter("uld_reconcile_fix", key, templateId, cur, target, threshold,
                 () -> issueGate.repairUserDaily(templateId, userId, day, target, dayTtlSeconds));
     }
 
@@ -267,18 +269,25 @@ public class GateCounterReconcileJob {
             return false;
         }
         long target = counterRepairService.computeTemplateDailyTarget(templateId, day);
-        return fixCounter("dly_reconcile_fix", key, templateId, cur, target,
+        // dly 与 gate 同为**高热度键**：配置了模板日限时，每个受理都会在 Lua 里 INCR
+        // dly，而 DB 侧目标要等任务落库/worker 完成才追上。高 QPS 下每轮都可能读到
+        // ±1 的瞬态差（2026-11-06 压测实测：同一模板 redis=3000 / target=3001，
+        // 修完下一轮又反向回来）。±1 修它只会制造 dly_reconcile_fix 噪音；更大偏差照修。
+        int dlyTolerance = Math.max(threshold, 1);
+        return fixCounter("dly_reconcile_fix", key, templateId, cur, target, dlyTolerance,
                 () -> issueGate.repairTemplateDaily(templateId, day, target, dayTtlSeconds));
     }
 
     // ------------------------------------------------------------------
 
-    /** 差值超过阈值才修；损坏值（哨兵）直接修。读序约定：cur 在 target 之前读（见类注释）。
+    /** 差值超过容差才修；损坏值（哨兵）直接修。读序约定：cur 在 target 之前读（见类注释）。
+     *  容差按键族传入：ul/uld 是"每用户一个键"，单键并发低；dly 是模板级热点键，
+     *  至少容 1（理由见 {@link #reconcileTemplateDailyKey(String)}）。
      *  漂移记录的 delta 在损坏值时取 target 本身——哨兵参与减法会溢出成天文数字写进审计表。 */
     private boolean fixCounter(String action, String key, long templateId,
-                               long cur, long target, Runnable repair) {
+                               long cur, long target, int tolerance, Runnable repair) {
         long diff = (cur == CORRUPT) ? target : target - cur;
-        if (cur != CORRUPT && Math.abs(diff) <= threshold) {
+        if (cur != CORRUPT && Math.abs(diff) <= tolerance) {
             metric("checked");
             return false;
         }

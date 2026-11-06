@@ -226,6 +226,23 @@ class GateCounterReconcileJobTest {
     }
 
     @Test
+    @DisplayName("dly ±1 容差：受理提交窗口的瞬态差不修，±2 起才修（L78）")
+    void dlyToleranceAbsorbsAdmissionWindow() {
+        LocalDate today = LocalDate.now();
+        String key = "c:issue:dly:{501}:" + today;
+        when(counterRepairService.computeTemplateDailyTarget(501L, today)).thenReturn(10L);
+
+        when(valueOps.get(key)).thenReturn("9");   // diff=+1：受理 Lua INCR 与任务落库之间的窗口噪声
+        job.reconcileTemplateDailyKey(key);
+        verify(issueGate, never())
+                .repairTemplateDaily(anyLong(), any(), anyLong(), anyLong());
+
+        when(valueOps.get(key)).thenReturn("7");   // diff=+3：真漂移
+        job.reconcileTemplateDailyKey(key);
+        verify(issueGate).repairTemplateDaily(501L, today, 10L, 172800L);
+    }
+
+    @Test
     @DisplayName("dly 往日键与缺失键都跳过；今日键照常对账")
     void dlyPastDayAndMissingSkipped() {
         LocalDate today = LocalDate.now();
