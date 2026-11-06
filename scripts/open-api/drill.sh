@@ -150,8 +150,8 @@ for i in $(seq 1 3); do
       -d "{\"requestId\":\"drill-async-fault-$i-$(date +%s%3N)\",\"userId\":$USER_A,\"templateId\":$TPL_A}" 2>/dev/null || echo '{}')
   code=$(printf '%s' "$body" | json_get '["code"]' 2>/dev/null || echo "?")
   if [[ "$code" == "7001" ]]; then
-    fail "被 IP 频控拦下（7001）——用 -Dcoupon.risk.ip-rate.enabled=false 重启应用再跑。
-（脚本只在第 4 步就撞上限，说明频控阈值比预期低。）"
+    fail "被 IP 频控拦下（7001）——把 --coupon.risk.ip-rate.max-per-window 调大后重启应用再跑。
+**不要关掉频控**：关掉后请求不再经过 IpRateGate，Redis 故障时 fail-open 指标不会产生，步骤 5' 必失败。"
   fi
   [[ "$code" == "5001" ]] && saw_degraded=$((saw_degraded + 1))
   [[ "$code" == "0" ]] && saw_success=$((saw_success + 1))
@@ -160,6 +160,22 @@ done
 [[ $saw_degraded -gt 0 ]] || fail "Redis 暂停期间异步受理没有返回 5001——故障注入没生效或 reject 策略被绕过"
 [[ $saw_success -eq 0 ]] || fail "Redis 暂停期间异步受理仍成功（预扣路径不该 fail-open）"
 ok "故障期异步受理 fail-closed：5001 共 $saw_degraded 次，成功 0 次"
+PASS=$((PASS + 1))
+
+# C1 语义的真验证：同步领券的库存/落库都在 MySQL，不依赖 Redis 库存——
+# 故障期它应当成功（旧脚本只打异步，报告却宣称"同步不受影响"，缺这条证据）。
+# 用两个新用户，避免基线用户已领过导致 3002 混进判据。
+sync_fault_ok=0
+for i in 1 2; do
+  body=$(curl -sS -X POST "$BASE/api/coupons/receive" -H "Content-Type: application/json" \
+      -d "{\"requestId\":\"drill-sync-fault-$i-$(date +%s%3N)\",\"userId\":$((97100 + i)),\"templateId\":$TPL_A}" 2>/dev/null || echo '{}')
+  code=$(printf '%s' "$body" | json_get '["code"]' 2>/dev/null || echo "?")
+  [[ "$code" == "7001" ]] && fail "被 IP 频控拦下（7001）——见上面的说明（调大阈值，不要关频控）"
+  [[ "$code" == "0" ]] && sync_fault_ok=$((sync_fault_ok + 1))
+  sleep 1
+done
+[[ $sync_fault_ok -eq 2 ]] || fail "Redis 暂停期间同步领券失败（$sync_fault_ok/2）——C1 不应依赖 Redis 库存"
+ok "故障期同步领券 2/2 成功（C1 链路不依赖 Redis 库存）"
 PASS=$((PASS + 1))
 
 # ---------------------------------------------------------------- 恢复故障
@@ -199,9 +215,14 @@ step "5'. 防线失效必须**看得见**（S3 第 6.5/7 步的承诺，在这�
 # ACTUATOR_AUTH 默认值=SecurityRbacIntegrationTest 同款 dev 凭据，生产用环境变量覆盖。
 ACTUATOR_AUTH="${ACTUATOR_AUTH:-actuator:it-actuator-pass}"
 SCRAPE_FILE="/tmp/newcoupon-drill-prometheus.txt"
-text=$(curl -sS --max-time 15 -u "$ACTUATOR_AUTH" "$BASE/actuator/prometheus" 2>/dev/null || echo "")
-printf '%s' "$text" > "$SCRAPE_FILE"
-warn "Prometheus 抓取 ${#text} 字符（落盘 $SCRAPE_FILE，凭据 $ACTUATOR_AUTH）"
+SCRAPE_HTTP=$(curl -sS --max-time 15 -u "$ACTUATOR_AUTH" -o "$SCRAPE_FILE" \
+    -w '%{http_code}' "$BASE/actuator/prometheus" 2>/dev/null || echo "000")
+if [[ "$SCRAPE_HTTP" != "200" ]]; then
+  fail "Prometheus 抓取 HTTP $SCRAPE_HTTP（凭据 $ACTUATOR_AUTH）——不要把 401 误当成'指标缺失'。
+按 make run 起的应用若没设 ACTUATOR_AUTH_PASSWORD，actuator Basic 密码是启动时随机生成的；
+用 ACTUATOR_AUTH=用户名:密码 重跑，或启动应用时显式设 ACTUATOR_AUTH_PASSWORD。"
+fi
+warn "Prometheus 抓取 HTTP 200（落盘 $SCRAPE_FILE，凭据 $ACTUATOR_AUTH）"
 # ① 风控闸（Redis 频控）在故障期间是 fail-open 的——但它必须留下痕迹，
 #    否则"风控闸已经失效"与"今天没人刷"在监控上完全一样。
 grep -q 'coupon_ratelimit_failopen_total{dimension="risk_ip"}' "$SCRAPE_FILE" \

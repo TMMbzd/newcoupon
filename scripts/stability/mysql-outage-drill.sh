@@ -15,8 +15,10 @@
 #     任务插入失败 → 补偿脚本退回预扣 → 返回 5000。**受理失败不落券、不泄漏库存**。
 #   · 核销 /api/coupons/confirm：占用单/券状态全在 MySQL，故障期返回 5000；恢复后同一
 #     usageNo 仍可正常核销（幂等/状态机不被故障改坏）。
-#   · mysql 熔断器：故障期由失败/慢调用推 OPEN，恢复后 HALF_OPEN → CLOSED；
-#     /api/switches/breakers 的 notPermitted 计数会增长（熔断真的在快速失败）。
+#   · mysql 熔断器：故障期由失败/慢调用推 OPEN，恢复后 HALF_OPEN → CLOSED。
+#     证据用 Prometheus `state="open"=1` + `kind="failed"` 调用数 ≥ min-calls=5 +
+#     应用日志 `CLOSED → OPEN` 三份独立观测；**不断言 notPermitted>0**——实测它可能
+#     是 0（缓存过期后请求在进入熔断段之前就因读 DB 失败而 5000，没被 breaker 拦下）。
 #
 # 三道护栏（照 scripts/open-api/drill.sh）：
 #   · BASE 必须是本机；确要远程请 ALLOW_REMOTE=1（不建议）。
@@ -33,13 +35,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# PORT/BASE 必须在 source lib.sh **之前**决定：lib.sh 里 BASE 默认值写死 8080，
+# source 之后再写 `${BASE:-...}` 永远拿不到 PORT 覆盖（2026-11-06 审查修正）。
+PORT="${PORT:-8080}"
+BASE="${BASE:-http://localhost:$PORT}"
 # shellcheck source=../open-api/lib.sh
 source "$SCRIPT_DIR/../open-api/lib.sh"
 
 MYSQL_CONTAINER="${MYSQL_CONTAINER:-newcoupon-mysql}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-newcoupon-redis}"
-PORT="${PORT:-8080}"
-BASE="${BASE:-http://localhost:$PORT}"
 STATE_FILE="${MYSQL_DRILL_STATE_FILE:-/tmp/newcoupon-mysql-drill.state}"
 LOGDIR="$REPO_DIR/target/stability"
 APP_LOG="$LOGDIR/mysql-drill-app.log"
@@ -87,20 +91,32 @@ stop_app() {
 # ---------------------------------------------------------------- 清理
 # 顺序：先恢复依赖（MySQL），再停应用——反过来会让应用在依赖不可用时收尾。
 cleanup() {
-  local rc=$?
+  local rc=$? start_failed=0
   warn "清理（脚本退出码 $rc）：确保 MySQL 已启动、脚本启动的应用已停止"
   if ! mysql_running; then
-    docker start "$MYSQL_CONTAINER" >/dev/null 2>&1 || true
-    for _ in $(seq 1 60); do
-      mysql_running && break
-      sleep 1
-    done
+    if ! docker start "$MYSQL_CONTAINER" >/dev/null 2>&1; then
+      start_failed=1
+    else
+      for _ in $(seq 1 60); do
+        mysql_running && break
+        sleep 1
+      done
+      mysql_running || start_failed=1
+    fi
   fi
   stop_app
   rm -rf "$TMPDIR_DRILL"
-  rm -f "$STATE_FILE"
-  ok "清理完成"
-  return $rc
+  if [[ "$start_failed" == "0" ]]; then
+    rm -f "$STATE_FILE"
+    ok "清理完成"
+  else
+    # 保留状态文件：下次运行会提示"上次可能被中断"，要求人工确认 MySQL 状态。
+    warn "清理未完成：MySQL 容器未能恢复运行；保留状态文件 $STATE_FILE，请手动 docker start 后删除"
+  fi
+  if [[ "$rc" == "0" && "$start_failed" == "1" ]]; then
+    rc=1
+  fi
+  return "$rc"
 }
 trap cleanup EXIT INT TERM
 
@@ -194,9 +210,8 @@ create_and_publish_template() {
   resp=$(curl -sS -X POST "$BASE/api/templates" \
     -H 'Content-Type: application/json' -H "X-Admin-Token: $ADMIN_TOKEN" \
     -d "{\"name\":\"$name\",\"activityId\":900150,\"couponType\":1,\"faceValue\":100,
-         \"threshold\":1000,\"totalCount\":1000,\"perUserLimit\":2,\"validType\":1,
-         \"validStart\":\"2026-11-01T00:00:00\",\"validEnd\":\"2026-12-31T23:59:59\",
-         \"dailyLimit\":0,\"perUserDailyLimit\":0}")
+         \"threshold\":1000,\"totalCount\":1000,\"perUserLimit\":2,\"validType\":2,
+         \"validDays\":7,\"dailyLimit\":0,\"perUserDailyLimit\":0}")
   tpl=$(printf '%s' "$resp" | json_get '["data"]["id"]' 2>/dev/null) \
     || fail "建模板失败：$resp"
   curl -sS -X POST "$BASE/api/templates/$tpl/publish" \
@@ -241,13 +256,15 @@ ok "MySQL / Redis 容器都在运行，MySQL 已可查询"
 printf 'DRILL=mysql\n' > "$STATE_FILE"
 
 # ---------------------------------------------------------------- 起应用
-step "1. 起应用（若已有服务在 $BASE 则直接复用，不重复起）"
+step "1. 起应用（演练必须由脚本自启，日志断言才可信）"
+# 2026-11-06 审查修正：删除"复用已有服务"分支。复用时不重写 APP_LOG，上一次运行
+# 残留的 "CLOSED → OPEN" 会让本轮"日志双证据"假通过；而干净环境又必然失败。
+# 脚本自启后 APP_LOG 是本轮专属，断言才有意义。
 if curl -sf --max-time 3 "$BASE/actuator/health" >/dev/null 2>&1; then
-  ok "已有服务在 $BASE，复用（演练结束不会停它）"
-else
-  start_app
-  ok "应用已启动（PID=$APP_PID，日志 $APP_LOG）"
+  fail "已有服务占用 $BASE：请先停掉它。演练必须由脚本自启应用（复用会让日志断言读到历史运行的假证据）。"
 fi
+start_app
+ok "应用已启动（PID=$APP_PID，日志 $APP_LOG）"
 
 # 故障期熔断器状态从 Prometheus 读；先把"能抓、且 mysql 熔断器序列存在"验掉，
 # 否则等 MySQL 停了才发现抓不到，演练已经进行到一半。
@@ -427,8 +444,8 @@ assert_true "恢复后同一 usageNo 核销成功（故障没有改坏状态机�
 
 # ---------------------------------------------------------------- 数据核对
 step "6. 数据核对：故障期请求零落券、零任务；库存守恒"
-# 用**请求 id** 精确核对而不是按用户：故障期失败的 10 个 requestId 里，
-# 只有 mysql-drill-fault-async-1 在恢复后被允许重试并成功；其余 9 个必须查无痕迹。
+# 用**请求 id** 精确核对而不是按用户：故障期共 11 个 requestId 失败
+# （8 个同步 + 3 个异步），其中 async-1 恢复后重试成功；其余 10 个必须查无痕迹。
 # （user_coupon.idempotent_key = 受理时的 requestId，可直接按请求核对。）
 out_req_ids=""
 for i in $(seq 1 8); do out_req_ids+="'$SYNC_FAULT_PREFIX-$i',"; done
@@ -441,7 +458,7 @@ out_coupons=$(mysql_sql "
         [[ $sh -lt 63 ]] && echo ' UNION ALL'
       done)
   ) x")
-assert_true "故障期 9 个未重试请求没有落任何券（实际 $out_coupons 张）" \
+assert_true "故障期 10 个未重试请求没有落任何券（实际 $out_coupons 张）" \
     "$([[ "${out_coupons:-0}" == "0" ]] && echo 1 || echo 0)"
 
 out_tasks=$(mysql_sql "SELECT COUNT(*) FROM coupon_issue_task WHERE request_id IN ($out_req_ids)")
