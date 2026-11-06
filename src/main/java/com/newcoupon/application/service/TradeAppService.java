@@ -416,6 +416,18 @@ public class TradeAppService {
                     ? tradeTxService.confirm(txReq, LocalDateTime.now(), split, lineShares)
                     : tradeTxService.confirm(txReq, accessibleUsage.getUserId(),
                             LocalDateTime.now(), split, lineShares, expectedCouponIds);
+        } catch (BizException e) {
+            // L75 审查 C1：事务内券集合重校验失败（4007，L75 锁后比对）时事务已回滚，
+            // 占用单仍 OCCUPYING、券仍 LOCKED。不钉住的话，L5 锁超时任务到点会把券
+            // 放回 USABLE——用户可能已按此券优惠付过钱，券又能再用=双重优惠。
+            // 与事务外 prepareConfirm 的 4007 出口同款钉住；L64 复算的 4002 保持
+            // 可重试（那只是券集合变了，调用方重新试算即可），不钉。
+            if (e.getErrorCode() == ErrorCode.PRICING_SNAPSHOT_INVALID
+                    && accessibleUsage != null) {
+                markConfirmExceptionQuietly(req.usageNo(), accessibleUsage.getUserId(),
+                        effectivePricingId, e.getMessage());
+            }
+            throw e;
         } catch (TradeCasRejectedException e) {
             // L2（2026-09-12）：券状态 CAS 拒绝且原因是"锁定期间过期"——
             // 先做收场（占用单过期关闭+券转已过期+事件），再按明确错误码拒绝。

@@ -22,6 +22,7 @@ import com.newcoupon.application.service.PricingSnapshotService;
 import com.newcoupon.application.service.ReceiveAppService;
 import com.newcoupon.application.service.TemplateAppService;
 import com.newcoupon.application.service.TradeAppService;
+import com.newcoupon.application.service.TradeTxService;
 import com.newcoupon.application.service.discount.DiscountCalculatorService;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
@@ -77,6 +78,7 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired private ReceiveAppService receiveAppService;
     @Autowired private CalculateAppService calculateAppService;
     @Autowired private TradeAppService tradeAppService;
+    @Autowired private TradeTxService tradeTxService;
     @Autowired private CouponUsageRepository couponUsageRepository;
     @Autowired private UserCouponRepository userCouponRepository;
 
@@ -177,7 +179,7 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("T1: 快照校验通过后窗口内 sibling 被释放 → confirm 拒绝（4007 券集合），目标单保持占用中")
+    @DisplayName("T1: 快照校验通过后窗口内 sibling 被释放 → confirm 拒绝（4007 券集合）且钉住异常单，超时不回可用")
     void siblingReleaseInWindowRejectsSnapshotConfirm() {
         Fixture f = lockBothWithSnapshot("REL");
         windowAction = () -> tradeAppService.release(
@@ -194,7 +196,14 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
 
         assertThat(windowArmed).as("窗口注入钩子确实触发过").isFalse();
         assertThat(usageStatus(f.platformUsageNo())).isEqualTo(UsageStatus.RELEASED);
-        assertThat(usageStatus(f.shopUsageNo())).isEqualTo(UsageStatus.OCCUPYING);
+        // L75 审查 C1：4007 必须把目标单钉在 CONFIRM_EXCEPTION。否则占用单停在
+        // OCCUPYING，L5 超时任务到点会把券放回 USABLE——用户已按此券优惠付过钱，
+        // 券又能再用=双重优惠。钉住后 timeoutClose 必须 no-op。
+        assertThat(usageStatus(f.shopUsageNo())).isEqualTo(UsageStatus.CONFIRM_EXCEPTION);
+        assertThat(tradeTxService.timeoutClose(f.shopUsageNo(),
+                LocalDateTime.now().plusMinutes(31)))
+                .as("异常单不得被锁超时任务收场").isFalse();
+        assertThat(usageStatus(f.shopUsageNo())).isEqualTo(UsageStatus.CONFIRM_EXCEPTION);
         assertThat(couponStatus(f.setup().shopCouponId())).isEqualTo(CouponStatus.LOCKED);
     }
 
