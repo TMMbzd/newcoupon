@@ -28,6 +28,8 @@
 目标值取自 V6 实施计划 §2.5 的建议值（核销/退款是动钱链路，目标收紧一档——
 失败一单的资损与客诉代价高于领券）。锁券/释放（lock/release）**不是独立 SLI**：
 它们是核销链路的中间步骤，单独测会把一次用户旅程拆成两半各背一半预算。
+延迟目标同样有执法：P99 超档位持续 10 分钟触发 ticket 告警（§5、ops/prometheus/），
+不是只有测量没有告警。
 
 ## 3. SLI 口径
 
@@ -42,6 +44,17 @@ SLI 在 **AppService 公开方法**（含异常出口）测量，由 `SliAspect`
 四条链路的异步变体（异步受理 202）不在本刀埋点范围：异步受理的 202 响应是**受理成功**
 （good 口径），受理被风控 7003 拒绝是 excluded——该口径在接入异步链路埋点时按此执行。
 
+**覆盖矩阵（审查 minor 修正后登记的盲区）**——receive journey 只覆盖同步领券 API：
+
+| 发券入口 | 是否进 SLI | 说明 |
+|---|---|---|
+| `POST /api/coupons/receive`（同步领券，ReceiveAppService 门面） | **是** | 本刀四埋点之一 |
+| 兑换码同步兑换（`CouponCodeService.redeem`） | **否（盲区）** | 直调 C1ReceiveAppService，不经挂注解的门面——**兑换码链路事故既不烧 receive 预算也不触发任何 SLO 告警**，对监控不可见 |
+| 批量发放 worker（`GrantTaskWorker`）、异步受理（`ReceiveAsyncAppService`） | **否（盲区）** | 同上，直调 C1；异步受理另有任务表/补偿指标可观测，但不在 SLI 口径内 |
+
+升级路径：各自补 journey（如 `redeem`/`grant`）或收敛到统一门面再挂注解——按流量形态
+决定（兑换码是用户侧入口，优先级高于批量 worker）。
+
 ### 3.2 判定表（good / bad / excluded）
 
 `coupon_sli_events_total{journey, outcome}` 的 outcome 判定规则，按全局错误码分段
@@ -51,7 +64,7 @@ SLI 在 **AppService 公开方法**（含异常出口）测量，由 `SliAspect`
 |---|---|---|---|
 | **good** | 业务码 0（正常返回） | SUCCESS(0) | 服务做对了。**幂等命中（duplicated=true）也返回业务码 0 → good**——重放拿回旧结果就是服务的正确行为，不是失败 |
 | **bad** | 5xxx 段 + 未捕获异常 | SYSTEM_ERROR(5000)、DEGRADED(5001)、FROZEN(5002)、REQUEST_BUDGET_EXHAUSTED(5003)、非 BizException 的未捕获异常 | 服务没做到：系统错误、依赖降级/熔断快速失败、时间预算耗尽（超时族）。**FROZEN 刻意归 bad**：冻结是防护动作触发的不提供，不是正常业务终点——冻结期间用户确实领不到券，烧预算才能让它在监控上可见（与售罄相反） |
-| **excluded** | 其余全部 | 1xxx 参数/通用（含 REQUEST_DUPLICATED 1001——同 requestId 用到别的模板是调用方错误）、2xxx 模板态、3xxx 领券域业务拒绝（售罄 3001/3003、限领 3002、预算耗尽 3009…）、4xxx 用券域状态冲突、6xxx 接入层、7003 风控拒绝、7010-7012 管理面 | 服务**正确地拒绝了**——不是服务失败，不进可用性分母 |
+| **excluded** | 其余全部 | 1xxx 参数/通用（含 REQUEST_DUPLICATED 1001——同 requestId 用到别的模板是调用方错误）、2xxx 模板态、3xxx 领券域业务拒绝（售罄 3001、限领 3002、每日发放上限 3003、预算耗尽 3009…）、4xxx 用券域状态冲突、6xxx 接入层、7003 风控拒绝、7010-7012 管理面 | 服务**正确地拒绝了**——不是服务失败，不进可用性分母 |
 
 两点边界说明：
 
@@ -125,7 +138,8 @@ latency = histogram_quantile(0.99, sum by (journey, le) (rate(coupon_sli_duratio
 |---|---|---|---|
 | CouponSloFastBurn | 1h 燃烧率 > 14.4×，持续 2m | **page**（立即处理/值班） | 约 2%/小时在烧预算——定位 bad 来源（5xxx 分布/未捕获异常日志），必要时降级止血 |
 | CouponSloSlowBurn | 6h 燃烧率 > 6×，持续 15m | **ticket**（工作时段建单） | 6 小时烧了约 5% 预算——查趋势根因，不急着叫醒任何人 |
-| CouponSliStreamMissing | 任一 journey 的 events 指标 10 分钟无样本 | **page** | SLI 失明（实例宕/抓取断/埋点被改）——先恢复可见性，失明期间 SLO 全部不可判 |
+| CouponSloLatencyBudgetTicket | 链路 P99（5m 窗）超其档位（300/150/500ms），持续 10m | **ticket** | 延迟劣化是趋势性问题（慢查询/缓存失效/GC）——建单查慢源；真雪崩会先由快烧 page 兜住 |
+| CouponSliStreamMissing | 任一 journey 的 events 指标 10 分钟无样本 | **page** | SLI 失明：实例宕机或 Prometheus 抓取失败——先恢复可见性，失明期间 SLO 全部不可判。**边界**：@SliJourney 注解被误删时序列仍暴露（恒 0），本告警不响——埋点回归由 `SliMetricsIntegrationTest` 的四链路接线用例防，不在本告警承诺内 |
 
 阈值依据 Google SRE 工作簿多窗燃烧率法（28 天窗口）。标准做法里快烧还配 5m 短窗
 二次确认（双窗 AND）防单点抖动，本刀按裁剪线用单窗 + `for` 持续时间替代（登记在 §7）。
@@ -142,7 +156,7 @@ latency = histogram_quantile(0.99, sum by (journey, le) (rate(coupon_sli_duratio
 
 | 不做 | 理由 | 升级路径 |
 |---|---|---|
-| Grafana 大盘 JSON | promtool 规则 + 本文档已可防守（指标/记录/告警三级齐备）；大盘是呈现层，不产生新口径 | 5B/后续：按 SLO.md 的公式直配面板；provisioning JSON 进 Git |
+| Grafana 大盘 JSON | 可用性/预算/燃烧率/延迟四类口径都已有 recording + alerting 执法（ops/prometheus/），大盘是呈现层不产生新口径 | 5B/后续：按 SLO.md 的公式直配面板；provisioning JSON 进 Git |
 | Tracing 全家 | 刀 2（5B）登记总口径：Micrometer Tracing + OTel bridge + OTLP，与 SLI 分开交付 | 见 V6 计划 5B 分节 |
 | 告警路由分级实现（Alertmanager） | 规则里已写 severity: page/ticket（§5 口径），路由是部署侧组件；本地无告警通道可接 | 部署 Alertmanager：page → 值班渠道（电话/IM 加急），ticket → 工单系统；route 按 severity 分组 |
 | 快烧双窗确认（1h AND 5m） | 单窗 + `for: 2m` 已挡记录评估边沿抖动；双窗的边际收益在当前流量形态下不显著 | 流量上来后把 expr 改为 `burn:1h > 14.4 and burn:5m > 14.4`（需补 5m 窗记录） |
@@ -164,4 +178,5 @@ sum by (journey, outcome) (rate(coupon_sli_events_total[5m]))
 ```
 
 测试侧对应：`SliMetricsTest`（判定表码表驱动）、`SliMetricsIntegrationTest`
-（三 outcome 计数 + 抓取暴露）、`MetricsCardinalityConfigTest`（基数防线）。
+（三 outcome 计数 + 四链路接线 + 抓取暴露 + 基数防线不误杀内建 HTTP 指标）、
+`MetricsCardinalityConfigTest`（基数防线，含"拒新不烧总量预算"语义）。
