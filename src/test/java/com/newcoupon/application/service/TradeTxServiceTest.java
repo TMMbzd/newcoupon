@@ -102,8 +102,11 @@ class TradeTxServiceTest {
     @Test
     @DisplayName("核销幂等：占用单已核销 → 直接当成功返回（不产生第二次核销事件）")
     void confirmIdempotent() {
-        when(couponUsageRepository.findByUsageNo("ORD-1:5"))
-                .thenReturn(Optional.of(usage(UsageStatus.CONFIRMED, 1000L)));
+        CouponUsage confirmed = usage(UsageStatus.CONFIRMED, 1000L);
+        when(couponUsageRepository.findByUsageNo("ORD-1:5")).thenReturn(Optional.of(confirmed));
+        // L75：事务先锁同订单占用单，幂等判断基于锁后读到的那一行
+        when(couponUsageRepository.findByOrderNoForUpdate(42L, "ORD-1"))
+                .thenReturn(List.of(confirmed));
 
         var r = service.confirm(new ConfirmRequest("ORD-1:5", null), NOW, null);
 
@@ -115,8 +118,10 @@ class TradeTxServiceTest {
     @Test
     @DisplayName("核销：编排层已给 userId 时按单分片读，事务层不再广播")
     void confirmWithUserIdReadsSingleShard() {
-        when(couponUsageRepository.findByUsageNo("ORD-1:5", 42L))
-                .thenReturn(Optional.of(usage(UsageStatus.CONFIRMED, 1000L)));
+        CouponUsage confirmed = usage(UsageStatus.CONFIRMED, 1000L);
+        when(couponUsageRepository.findByUsageNo("ORD-1:5", 42L)).thenReturn(Optional.of(confirmed));
+        when(couponUsageRepository.findByOrderNoForUpdate(42L, "ORD-1"))
+                .thenReturn(List.of(confirmed));
 
         var r = service.confirm(new ConfirmRequest("ORD-1:5", null), 42L, NOW, null, List.of());
 
@@ -240,8 +245,10 @@ class TradeTxServiceTest {
     @Test
     @DisplayName("已退款的占用单收到重复核销 → 4004 明确拒绝（防\"请刷新重试\"落在死状态上、调用方无限重试）")
     void confirmOnRefundedUsageGetsDefinitiveRejection() {
-        when(couponUsageRepository.findByUsageNo("ORD-1:5"))
-                .thenReturn(Optional.of(usage(UsageStatus.REFUNDED, 2000L)));
+        CouponUsage refunded = usage(UsageStatus.REFUNDED, 2000L);
+        when(couponUsageRepository.findByUsageNo("ORD-1:5")).thenReturn(Optional.of(refunded));
+        when(couponUsageRepository.findByOrderNoForUpdate(42L, "ORD-1"))
+                .thenReturn(List.of(refunded));
 
         assertThatThrownBy(() -> service.confirm(new ConfirmRequest("ORD-1:5", 1000L), NOW, null))
                 .isInstanceOf(BizException.class)

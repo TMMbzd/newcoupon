@@ -42,6 +42,13 @@ public class CouponUsageRepositoryImpl implements CouponUsageRepository {
     }
 
     @Override
+    public java.util.List<CouponUsage> findByOrderNoForUpdate(long userId, String orderNo) {
+        return mapper.selectByOrderNoForUpdate(userId, orderNo).stream()
+                .map(CouponUsagePOConverter::toDomain)
+                .toList();
+    }
+
+    @Override
     public Optional<CouponUsage> findByUsageNoForUpdate(String usageNo, long userId) {
         return Optional.ofNullable(mapper.selectByUsageNoForUpdate(usageNo, userId))
                 .map(CouponUsagePOConverter::toDomain);

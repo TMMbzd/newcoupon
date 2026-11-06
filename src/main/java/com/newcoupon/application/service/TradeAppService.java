@@ -42,8 +42,10 @@ import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
@@ -277,6 +279,9 @@ public class TradeAppService {
         FundingSplit split = null;
         List<LineShare> lineShares = List.of();
         ConfirmRequest txReq = req;   // 不重赋值参数 req（lambda 要求 effectively final）
+        // L75：把“算钱时依据的订单券集合”带进事务，锁内重校验用。null=纯旧式金额核销
+        // （调用方直接给金额，没有订单级集合可校验，事务层仍做售后态/目标单状态重校验）
+        Set<Long> expectedCouponIds = null;
         if (pricingRequested || itemsPresent) {
             CouponUsage usage = accessibleUsage;
             if (usage == null) {
@@ -351,6 +356,8 @@ public class TradeAppService {
                 split = calculateFundingSplit(snapshot.budgetOwner(), snapshot.budgetRatio(),
                         snapshot.discountAmt());
                 lineShares = buildLineShares(snapshot.lineShares(), split);
+                // 快照冻结的 APPLIED 集合——锁内与订单当前生效集合比对（快照路径按 4007 拒绝）
+                expectedCouponIds = snapshot.appliedCouponIds();
                 txReq = new ConfirmRequest(req.usageNo(), snapshot.discountAmt(), null,
                         effectivePricingId);
             } else {
@@ -394,6 +401,8 @@ public class TradeAppService {
 
                 split = calculateFundingSplit(calc.template(), calc.discountAmt());
                 lineShares = buildLineShares(calc.lineShares(), split);
+                // L64 复算实际用到的券集合——锁内比对，防止复算后兄弟券被释放/新锁
+                expectedCouponIds = new LinkedHashSet<>(orderCoupons.keySet());
 
                 // 用平台计算出的金额（调用方传入的 discountAmt 被忽略）
                 txReq = new ConfirmRequest(req.usageNo(), calc.discountAmt(), null, null);
@@ -406,7 +415,7 @@ public class TradeAppService {
             return accessibleUsage == null
                     ? tradeTxService.confirm(txReq, LocalDateTime.now(), split, lineShares)
                     : tradeTxService.confirm(txReq, accessibleUsage.getUserId(),
-                            LocalDateTime.now(), split, lineShares);
+                            LocalDateTime.now(), split, lineShares, expectedCouponIds);
         } catch (TradeCasRejectedException e) {
             // L2（2026-09-12）：券状态 CAS 拒绝且原因是"锁定期间过期"——
             // 先做收场（占用单过期关闭+券转已过期+事件），再按明确错误码拒绝。

@@ -177,7 +177,7 @@ public class TradeTxService {
 
     @Transactional
     public ConfirmResult confirm(ConfirmRequest req, LocalDateTime now, FundingSplit split) {
-        return doConfirm(req, null, now, split, java.util.List.of());
+        return doConfirm(req, null, now, split, java.util.List.of(), null);
     }
 
     /**
@@ -190,7 +190,7 @@ public class TradeTxService {
     @Transactional
     public ConfirmResult confirm(ConfirmRequest req, LocalDateTime now, FundingSplit split,
                                  java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares) {
-        return doConfirm(req, null, now, split, lineShares);
+        return doConfirm(req, null, now, split, lineShares, null);
     }
 
     /**
@@ -201,19 +201,48 @@ public class TradeTxService {
     @Transactional
     public ConfirmResult confirm(ConfirmRequest req, long userId, LocalDateTime now, FundingSplit split,
                                  java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares) {
-        return doConfirm(req, userId, now, split, lineShares);
+        return doConfirm(req, userId, now, split, lineShares, null);
+    }
+
+    /**
+     * L75 版本：多带一个“核销金额所依据的订单券集合”。
+     *
+     * <p>事务会先锁住同订单全部占用单，再把集合与当下的生效集合比对——事务外
+     * prepareConfirm / L64 复算之后、本事务开始之前，兄弟券可能已被释放或退款；
+     * 只信事务外那份旧集合就会按失效报价核销。expectedCouponIds=null 表示调用方
+     * 没有订单级集合可校验（纯旧式金额核销），仍会做售后态与目标单状态重校验。
+     */
+    @Transactional
+    public ConfirmResult confirm(ConfirmRequest req, long userId, LocalDateTime now, FundingSplit split,
+                                 java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares,
+                                 Set<Long> expectedCouponIds) {
+        return doConfirm(req, userId, now, split, lineShares, expectedCouponIds);
     }
 
     private ConfirmResult doConfirm(ConfirmRequest req, Long userId, LocalDateTime now, FundingSplit split,
-                                    java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares) {
-        CouponUsage usage = readUsage(req.usageNo(), userId)
+                                    java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares,
+                                    Set<Long> expectedCouponIds) {
+        CouponUsage snapshot = readUsage(req.usageNo(), userId)
+                .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
+        // L75（TOCTOU）：交易外校验通过 → 本事务开始之间仍有窗口，兄弟券可能被释放/退款。
+        // 先按 id 升序锁住同订单全部占用单，之后读到的状态才是权威值；校验不过就整体拒绝，
+        // 绝不让一条基于失效券集合的报价落账。
+        List<CouponUsage> orderUsages = lockOrderUsages(snapshot);
+        CouponUsage usage = orderUsages.stream()
+                .filter(u -> u.getUsageNo().equals(req.usageNo()))
+                .findFirst()
                 .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, req.usageNo()));
         if (usage.getStatus() == UsageStatus.CONFIRMED) {
-            // 幂等：支付回调重复推送，第一次已核销——直接当成功返回
+            // 幂等优先：支付回调重复推送，第一次已核销——直接当成功返回。
+            // 这一步放在券集合/售后校验之前：已成功的核销即使后来兄弟券退款，
+            // 重放也必须拿回首次结果，不能被新的拒绝语义误伤。
             return new ConfirmResult(req.usageNo(), CouponStatus.USED.getDesc(),
                     usage.getDiscountAmt(), true);
         }
-        usage.checkConfirmable();   // RELEASED → 拒绝
+        usage.checkConfirmable();   // RELEASED/REFUNDED/EXPIRED/超时 → 拒绝
+        assertNoAfterSales(orderUsages);   // L75：锁内重校验售后态
+        // 普通核销的生效集合=占用中+已核销（CONFIRM_EXCEPTION 不算，与 L70 口径一致）
+        assertExpectedCouponSet(orderUsages, expectedCouponIds, req.pricingId() != null, false);
         if (!couponUsageRepository.casConfirm(req.usageNo(), usage.getUserId(), req.discountAmt(), now)) {
             throw new TradeCasRejectedException("usage-confirm", req.usageNo());
         }
@@ -237,6 +266,73 @@ public class TradeTxService {
         }
 
         return new ConfirmResult(req.usageNo(), CouponStatus.USED.getDesc(), req.discountAmt(), false);
+    }
+
+    /**
+     * 按 id 升序读出并锁住同一订单的全部占用单（L75）。
+     *
+     * <p>同订单的两条核销可能同时发生，双方都按 id 升序申请行锁，不会出现
+     * “各自握着一行、再等对方的行”的交叉等待。返回的是锁后读到的最新已提交状态——
+     * 事务开始时那次普通读只用于拿路由键（userId/orderNo），不能拿来判状态。
+     */
+    private List<CouponUsage> lockOrderUsages(CouponUsage usage) {
+        return couponUsageRepository.findByOrderNoForUpdate(usage.getUserId(), usage.getOrderNo());
+    }
+
+    /**
+     * 售后态重校验（L75）：同订单只要有一张券处于退款中/已退款，就拒绝核销其他券。
+     * 事务外的同名校验保留（快速失败、少拿锁），这里是拿锁后的权威判定。
+     */
+    private static void assertNoAfterSales(List<CouponUsage> orderUsages) {
+        boolean afterSales = orderUsages.stream().anyMatch(u ->
+                u.getStatus() == UsageStatus.REFUNDED
+                        || u.getStatus() == UsageStatus.PARTIALLY_REFUNDED);
+        if (afterSales) {
+            throw new BizException(ErrorCode.STATE_CONFLICT,
+                    "订单已进入售后（部分/全部退款），不能再核销其他券");
+        }
+    }
+
+    /**
+     * 券集合重校验（L75）：锁内重新计算订单的“生效券集合”，与事务外算钱时使用的集合比对。
+     *
+     * <p>生效集合 = 占用中 + 已核销（与 L70 口径一致；已核销的兄弟券仍然算本单
+     * 已使用的优惠，不能从集合里消失）。管理面核销异常单时目标单是
+     * CONFIRM_EXCEPTION，调用方按 includeExceptionStatus 口径传入的集合会包含它，
+     * 因此这里由调用方决定状态口径，不硬编码。
+     *
+     * @param expectedCouponIds      算钱时使用的券集合；null = 纯旧式金额核销，无集合可校验
+     * @param snapshotBacked         true=集合来自价格快照（不符按 4007 fail-closed），
+     *                               false=集合来自 L64 订单级复算（不符按 4002 状态冲突，可重试）
+     * @param includeExceptionStatus 人工核销异常单时为 true——目标单正处于
+     *                               CONFIRM_EXCEPTION，集合口径必须包含它
+     */
+    private static void assertExpectedCouponSet(List<CouponUsage> orderUsages,
+                                                Set<Long> expectedCouponIds,
+                                                boolean snapshotBacked,
+                                                boolean includeExceptionStatus) {
+        if (expectedCouponIds == null) {
+            return;
+        }
+        Set<Long> active = new HashSet<>();
+        for (CouponUsage u : orderUsages) {
+            if (u.getStatus() == UsageStatus.OCCUPYING
+                    || u.getStatus() == UsageStatus.CONFIRMED
+                    || (includeExceptionStatus && u.getStatus() == UsageStatus.CONFIRM_EXCEPTION)) {
+                active.add(u.getUserCouponId());
+            }
+        }
+        if (active.equals(expectedCouponIds)) {
+            return;
+        }
+        if (snapshotBacked) {
+            throw new BizException(ErrorCode.PRICING_SNAPSHOT_INVALID,
+                    "价格快照券集合与订单占用单不一致（核销期间订单券集合发生变化）: 快照="
+                            + expectedCouponIds + " 订单=" + active);
+        }
+        throw new BizException(ErrorCode.STATE_CONFLICT,
+                "订单占用单集合在核销计算后发生变化，请重新试算后重试: 计算用="
+                        + expectedCouponIds + " 当前=" + active);
     }
 
     /** 订单粒度分账（有 split 但没有行级分摊时的兼容路径：没有行号/行金额/行数量） */
@@ -422,12 +518,43 @@ public class TradeTxService {
                                               java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares,
                                               String pricingId, String resolveReason,
                                               LocalDateTime now) {
-        CouponUsage usage = couponUsageRepository.findByUsageNo(usageNo)
+        return doConfirmFromException(usageNo, discountAmt, split, lineShares, pricingId,
+                resolveReason, now, null);
+    }
+
+    /**
+     * L75 版本：管理面人工核销也带“快照券集合”，在事务内锁后重校验。
+     * 该路径同样先过 prepareConfirm（ConfirmExceptionService），所以窗口同样存在。
+     */
+    @Transactional
+    public ConfirmResult confirmFromException(String usageNo, long discountAmt, FundingSplit split,
+                                              java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares,
+                                              String pricingId, String resolveReason,
+                                              LocalDateTime now, Set<Long> expectedCouponIds) {
+        return doConfirmFromException(usageNo, discountAmt, split, lineShares, pricingId,
+                resolveReason, now, expectedCouponIds);
+    }
+
+    private ConfirmResult doConfirmFromException(String usageNo, long discountAmt, FundingSplit split,
+                                                 java.util.List<com.newcoupon.application.dto.TradeDtos.LineShare> lineShares,
+                                                 String pricingId, String resolveReason,
+                                                 LocalDateTime now, Set<Long> expectedCouponIds) {
+        CouponUsage snapshot = couponUsageRepository.findByUsageNo(usageNo)
+                .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, usageNo));
+        // L75：与普通核销同一条锁序——先按 id 升序锁住同订单占用单，再重校验。
+        // 人工核销与用户核销可能并发；锁内读到的售后态/券集合才是权威值。
+        List<CouponUsage> orderUsages = lockOrderUsages(snapshot);
+        CouponUsage usage = orderUsages.stream()
+                .filter(u -> u.getUsageNo().equals(usageNo))
+                .findFirst()
                 .orElseThrow(() -> new BizException(ErrorCode.USAGE_NOT_FOUND, usageNo));
         if (usage.getStatus() != UsageStatus.CONFIRM_EXCEPTION) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
                     "占用单状态=" + usage.getStatus().getDesc() + "，仅核销异常可人工核销");
         }
+        assertNoAfterSales(orderUsages);
+        // 人工核销的目标单正处于 CONFIRM_EXCEPTION，生效集合口径包含该状态
+        assertExpectedCouponSet(orderUsages, expectedCouponIds, true, true);
         if (!couponUsageRepository.casConfirmFromException(usageNo, usage.getUserId(), discountAmt, now)) {
             throw new TradeCasRejectedException("usage-confirm-exception", usageNo);
         }

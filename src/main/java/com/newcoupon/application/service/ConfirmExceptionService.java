@@ -112,7 +112,8 @@ public class ConfirmExceptionService {
         List<LineShare> lines = TradeAppService.buildLineShares(snapshot.lineShares(), split);
         try {
             var confirmed = tradeTxService.confirmFromException(usageNo, snapshot.discountAmt(),
-                    split, lines, row.getPricingId(), note, LocalDateTime.now());
+                    split, lines, row.getPricingId(), note, LocalDateTime.now(),
+                    snapshot.appliedCouponIds());
             return new ResolveResult(usageNo, normalized, UsageStatus.CONFIRMED.getDesc(),
                     confirmed.couponStatus(), confirmed.discountAmt());
         } catch (TradeCasRejectedException e) {

@@ -350,7 +350,7 @@ public class PricingSnapshotService {
                 .mapToLong(PricingSnapshotPayload.Line::lineAmount).sum();
         return new SnapshotConfirm(snapshot.pricingId(), current.discountAmount(),
                 current.budgetOwner(), current.budgetRatio(), shares, orderAmount,
-                payload.maxDiscountRatio());
+                payload.maxDiscountRatio(), applied);
     }
 
     private Set<Long> activeCouponSet(CouponUsage usage, boolean includeExceptionStatus) {
@@ -563,11 +563,16 @@ public class PricingSnapshotService {
     /**
      * 核销所需的冻结结果。TradeAppService 用 budgetOwner/budgetRatio 做出资拆分，
      * 用 lineShares 落行级分账；orderAmount 供申报防线（优惠占比上限）使用。
+     *
+     * <p>{@code appliedCouponIds} 是快照冻结的“可用券集合”（APPLIED 部分）——事务层
+     * L75 拿它在锁内重校验“快照券集合 = 订单当前生效占用单集合”。事务外的同名校验
+     * 保留做快速失败，但只有锁后比对才是权威。
      */
     public record SnapshotConfirm(String pricingId, long discountAmt, String budgetOwner,
                                   Integer budgetRatio, List<ConfirmLineShare> lineShares,
                                   long orderAmount,
                                   /** 生成快照时生效的优惠占比上限；核销按冻结值判，不读当前配置 */
-                                  int maxDiscountRatio) {
+                                  int maxDiscountRatio,
+                                  Set<Long> appliedCouponIds) {
     }
 }

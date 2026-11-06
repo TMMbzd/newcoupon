@@ -33,6 +33,20 @@ public interface CouponUsageMapper extends BaseMapper<CouponUsagePO> {
     java.util.List<CouponUsagePO> selectByOrderNo(@Param("userId") long userId,
                                                   @Param("orderNo") String orderNo);
 
+    /**
+     * L75：核销事务内按 id 升序锁住同一订单的全部占用单，再重校验券集合与售后态。
+     *
+     * <p>{@code ORDER BY id ... FOR UPDATE} 让行锁按 id 从小到大申请：同一订单的
+     * 兄弟券可能同时被两条核销链路处理，双方申请顺序一致就不会出现
+     * “A 持小 id 等大 id、B 持大 id 等小 id”的交叉等待（死锁）。
+     * 命中路径是 (user_id, order_no) 等值（V21 idx_user_order）——InnoDB 二级索引
+     * 在等值前缀内本就按主键 id 排序，实际加锁顺序与 ORDER BY 一致。
+     */
+    @Select("SELECT * FROM coupon_usage WHERE user_id = #{userId} AND order_no = #{orderNo} "
+            + "ORDER BY id FOR UPDATE")
+    java.util.List<CouponUsagePO> selectByOrderNoForUpdate(@Param("userId") long userId,
+                                                           @Param("orderNo") String orderNo);
+
     @Update("UPDATE coupon_usage SET status = 1, discount_amt = #{discountAmt}, use_time = #{useTime} "
             + "WHERE usage_no = #{usageNo} AND user_id = #{userId} AND status = 0")
     int casConfirm(@Param("usageNo") String usageNo,

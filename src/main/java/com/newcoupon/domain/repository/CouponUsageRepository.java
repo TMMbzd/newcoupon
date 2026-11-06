@@ -27,6 +27,13 @@ public interface CouponUsageRepository {
      */
     java.util.List<CouponUsage> findByOrderNo(long userId, String orderNo);
 
+    /**
+     * L75：核销事务内按 id 升序锁住同一订单的全部占用单（{@code SELECT ... FOR UPDATE}）。
+     * 锁后读到的状态才是权威值——事务外校验之后、真正写核销之前的窗口里，
+     * 兄弟券可能已被释放/退款。统一按 id 升序申请行锁，避免兄弟链交叉加锁死锁。
+     */
+    java.util.List<CouponUsage> findByOrderNoForUpdate(long userId, String orderNo);
+
     /** 新建占用单（初始=占用中）；撞 uk_usage_no 抛 DuplicateKeyException */
     CouponUsage save(CouponUsage usage);
 

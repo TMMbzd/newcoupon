@@ -155,13 +155,13 @@ class TradeAppServiceTest {
     void confirmPassesResolvedUserIdToTransaction() {
         when(couponUsageRepository.findByUsageNo("ORD-1:5")).thenReturn(Optional.of(usage()));
         when(userCouponRepository.findByIdForUser(5L, 42L)).thenReturn(Optional.of(usableCoupon()));
-        when(tradeTxService.confirm(any(ConfirmRequest.class), eq(42L), any(), any(), any()))
+        when(tradeTxService.confirm(any(ConfirmRequest.class), eq(42L), any(), any(), any(), any()))
                 .thenReturn(new ConfirmResult("ORD-1:5", "已使用", 1000L, false));
 
         ConfirmResult result = service.confirm(new ConfirmRequest("ORD-1:5", 1000L));
 
         assertThat(result.duplicated()).isFalse();
-        verify(tradeTxService).confirm(any(ConfirmRequest.class), eq(42L), any(), any(), any());
+        verify(tradeTxService).confirm(any(ConfirmRequest.class), eq(42L), any(), any(), any(), any());
         verify(tradeTxService, never()).confirm(any(ConfirmRequest.class), any(), any(), any());
     }
 
@@ -223,7 +223,7 @@ class TradeAppServiceTest {
         when(couponUsageRepository.findByUsageNo("ORD-1:5")).thenReturn(Optional.of(u));
         when(userCouponRepository.findByIdForUser(5L, 42L)).thenReturn(Optional.of(lockedExpired));
         // 券状态 CAS 被拒（锁定期间过期）→ 编排层走收场路径
-        when(tradeTxService.confirm(any(ConfirmRequest.class), eq(42L), any(), any(), any()))
+        when(tradeTxService.confirm(any(ConfirmRequest.class), eq(42L), any(), any(), any(), any()))
                 .thenThrow(new TradeCasRejectedException("coupon-confirm", 5L));
         // 收场又被别人抢先（竞态）——expireOnLock 内部 CAS 同样失败
         org.mockito.Mockito.doThrow(new TradeCasRejectedException("usage-expire", "ORD-1:5"))
