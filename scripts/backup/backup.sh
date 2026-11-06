@@ -39,9 +39,16 @@ DB_NAME="${DB_NAME:-newcoupon}"
 BACKUP_DIR="${BACKUP_DIR:-$REPO_DIR/target/backup}"
 
 # 在容器里跑 mysql 客户端；密码走环境变量 MYSQL_PWD，避免每条命令都出现 -p 警告。
+# $1=数据库名（空串表示不指定库，跨库 information_schema 查询用），其余参数透传 mysql。
 mysql_exec() {
-  docker exec -e MYSQL_PWD="$MYSQL_PASSWORD" "$MYSQL_CONTAINER" \
-    mysql -u"$MYSQL_USER" -N -B "$@"
+  local db="${1:-}"; shift || true
+  if [[ -n "$db" ]]; then
+    docker exec -e MYSQL_PWD="$MYSQL_PASSWORD" "$MYSQL_CONTAINER" \
+      mysql -u"$MYSQL_USER" -N -B "$db" "$@"
+  else
+    docker exec -e MYSQL_PWD="$MYSQL_PASSWORD" "$MYSQL_CONTAINER" \
+      mysql -u"$MYSQL_USER" -N -B "$@"
+  fi
 }
 
 # ---------------------------------------------------------------- 护栏
@@ -59,6 +66,22 @@ mysql_exec -e "SELECT 1 FROM \`$DB_NAME\`.flyway_schema_history LIMIT 1" >/dev/n
   || fail "库 $DB_NAME 不存在或没有 flyway_schema_history——库名是否写错？"
 ok "业务库可读：$DB_NAME"
 
+# 跨分表合计（元信息与恢复脚本共用口径）。$1=库名 $2=表名前缀。
+# 先枚举再拼 UNION ALL，不写死表名——分表布局变化时仍成立。
+sum_prefix_sql() {
+  local db="$1" prefix="$2" first=1 sql="" t
+  for t in $(mysql_exec "" -e \
+      "SELECT table_name FROM information_schema.tables WHERE table_schema='$db' AND table_name LIKE '${prefix}%' ORDER BY table_name"); do
+    [[ $first -eq 1 ]] && first=0 || sql+=" UNION ALL "
+    sql+="SELECT COUNT(*) AS c FROM \`$db\`.\`$t\`"
+  done
+  if [[ -z "$sql" ]]; then
+    echo "SELECT 0 WHERE FALSE"
+  else
+    echo "SELECT SUM(c) FROM ($sql) x"
+  fi
+}
+
 mkdir -p "$BACKUP_DIR"
 
 # ---------------------------------------------------------------- 元信息（备份前）
@@ -72,7 +95,18 @@ TEMPLATE_ROWS=$(mysql_exec -e "SELECT COUNT(*) FROM \`$DB_NAME\`.coupon_template
 STOCK_USED=$(mysql_exec -e "SELECT COALESCE(SUM(used),0) FROM \`$DB_NAME\`.coupon_stock_shard")
 AUDIT_ROWS=$(mysql_exec -e "SELECT COUNT(*) FROM \`$DB_NAME\`.audit_log")
 TASK_ROWS=$(mysql_exec -e "SELECT COUNT(*) FROM \`$DB_NAME\`.coupon_issue_task")
+# GROUP_CONCAT 默认 1024 字节，43 行 flyway 历史会被截断；摘要前显式放大。
+GC_PREFIX="SET SESSION group_concat_max_len=1000000; "
+FLYWAY_DIGEST=$(mysql_exec "$DB_NAME" -e "${GC_PREFIX}SELECT MD5(GROUP_CONCAT(CONCAT_WS(':', installed_rank, version, description, type, script, checksum, success) ORDER BY installed_rank SEPARATOR '|')) FROM flyway_schema_history")
+TEMPLATE_NAME_DIGEST=$(mysql_exec "$DB_NAME" -e "${GC_PREFIX}SELECT MD5(GROUP_CONCAT(CONCAT_WS(':', id, template_code, name, HEX(name)) ORDER BY id SEPARATOR '|')) FROM coupon_template")
+TEMPLATE_NONASCII=$(mysql_exec "$DB_NAME" -e \
+  "SELECT COUNT(*) FROM coupon_template WHERE HEX(name) REGEXP '(8|9|A|B|C|D|E|F)[0-9A-F]'")
+USER_COUPON_ROWS=$(mysql_exec -e "$(sum_prefix_sql "$DB_NAME" 'user_coupon_')")
+COUPON_USAGE_ROWS=$(mysql_exec -e "$(sum_prefix_sql "$DB_NAME" 'coupon_usage_')")
+EXPIRE_TASK_ROWS=$(mysql_exec -e "$(sum_prefix_sql "$DB_NAME" 'coupon_expire_task_')")
+RELEASE_TASK_ROWS=$(mysql_exec -e "$(sum_prefix_sql "$DB_NAME" 'coupon_release_task_')")
 ok "表数=$TABLE_COUNT，数据量≈${DB_MB}MB，flyway=$FLYWAY_ROWS 行，模板=$TEMPLATE_ROWS，Σused=$STOCK_USED，audit=$AUDIT_ROWS，异步任务=$TASK_ROWS"
+ok "分表合计：user_coupon=$USER_COUPON_ROWS，coupon_usage=$COUPON_USAGE_ROWS，expire_task=$EXPIRE_TASK_ROWS，release_task=$RELEASE_TASK_ROWS"
 
 # ---------------------------------------------------------------- dump
 step "2. mysqldump（单事务一致性快照）"
@@ -108,27 +142,38 @@ SHA256=$(sha256sum "$OUT" | cut -d' ' -f1)
 SOURCE_LINE=$(zgrep -m1 -E '^-- CHANGE (MASTER|REPLICATION SOURCE) TO' "$OUT" || echo "-- (no source-data line)")
 META="$OUT.meta"
 python3 - "$META" "$OUT" "$SIZE_BYTES" "$SHA256" "$DUMP_MS" "$TABLE_COUNT" "$DB_MB" \
-  "$FLYWAY_ROWS" "$TEMPLATE_ROWS" "$STOCK_USED" "$AUDIT_ROWS" "$TASK_ROWS" "$SOURCE_LINE" <<'PY'
+  "$FLYWAY_ROWS" "$TEMPLATE_ROWS" "$STOCK_USED" "$AUDIT_ROWS" "$TASK_ROWS" "$SOURCE_LINE" \
+  "$DB_NAME" "$FLYWAY_DIGEST" "$TEMPLATE_NAME_DIGEST" "$TEMPLATE_NONASCII" \
+  "$USER_COUPON_ROWS" "$COUPON_USAGE_ROWS" "$EXPIRE_TASK_ROWS" "$RELEASE_TASK_ROWS" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
 
 (meta_path, out, size_bytes, sha256, dump_ms, table_count, db_mb,
- flyway_rows, template_rows, stock_used, audit_rows, task_rows, source_line) = sys.argv[1:]
+ flyway_rows, template_rows, stock_used, audit_rows, task_rows, source_line,
+ db_name, flyway_digest, template_name_digest, template_nonascii,
+ user_coupon_rows, coupon_usage_rows, expire_task_rows, release_task_rows) = sys.argv[1:]
 payload = {
     "file": out,
     "createdAt": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
     "bytes": int(size_bytes),
     "sha256": sha256,
     "dumpSeconds": round(int(dump_ms) / 1000.0, 3),
-    "database": "newcoupon",
+    "database": db_name,
     "tableCount": int(table_count),
     "approxSizeMb": float(db_mb),
     "flywayRows": int(flyway_rows),
+    "flywayDigest": flyway_digest,
     "couponTemplates": int(template_rows),
+    "templateNameDigest": template_name_digest,
+    "templateNonAsciiCount": int(template_nonascii),
     "stockUsedSum": int(stock_used),
     "auditLogRows": int(audit_rows),
     "issueTaskRows": int(task_rows),
+    "userCouponRows": int(user_coupon_rows),
+    "couponUsageRows": int(coupon_usage_rows),
+    "couponExpireTaskRows": int(expire_task_rows),
+    "couponReleaseTaskRows": int(release_task_rows),
     "sourceDataLine": source_line.strip(),
 }
 with open(meta_path, "w", encoding="utf-8") as f:
