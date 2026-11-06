@@ -243,6 +243,39 @@ class GateCounterReconcileJobTest {
     }
 
     @Test
+    @DisplayName("dly 默认容差恰好 1：diff=2 属于真漂移，必须修（锁定不能放大成 2）")
+    void dlyDefaultToleranceIsExactlyOne() {
+        LocalDate today = LocalDate.now();
+        String key = "c:issue:dly:{501}:" + today;
+        when(counterRepairService.computeTemplateDailyTarget(501L, today)).thenReturn(10L);
+
+        when(valueOps.get(key)).thenReturn("8");   // diff=+2
+        job.reconcileTemplateDailyKey(key);
+        verify(issueGate).repairTemplateDaily(501L, today, 10L, 172800L);
+    }
+
+    @Test
+    @DisplayName("dly 配置阈值>1 时沿用配置值（threshold=2：diff=2 不修，diff=3 修）")
+    void dlyConfiguredThresholdAboveOneIsRespected() {
+        LocalDate today = LocalDate.now();
+        String key = "c:issue:dly:{501}:" + today;
+        GateCounterReconcileJob tolerant = new GateCounterReconcileJob(redis, issueGate,
+                counterRepairService, gateRebuildTxService, gateRebuildService,
+                driftLog, scanLock, mock(MeterRegistry.class),
+                2, 500, 300000, 604800, 172800);
+        when(counterRepairService.computeTemplateDailyTarget(501L, today)).thenReturn(10L);
+
+        when(valueOps.get(key)).thenReturn("8");   // diff=+2：在配置阈值内
+        tolerant.reconcileTemplateDailyKey(key);
+        verify(issueGate, never())
+                .repairTemplateDaily(anyLong(), any(), anyLong(), anyLong());
+
+        when(valueOps.get(key)).thenReturn("7");   // diff=+3：超配置阈值
+        tolerant.reconcileTemplateDailyKey(key);
+        verify(issueGate).repairTemplateDaily(501L, today, 10L, 172800L);
+    }
+
+    @Test
     @DisplayName("dly 往日键与缺失键都跳过；今日键照常对账")
     void dlyPastDayAndMissingSkipped() {
         LocalDate today = LocalDate.now();
