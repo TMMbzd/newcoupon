@@ -11,6 +11,7 @@ import com.newcoupon.infrastructure.metrics.SliMetrics;
 import com.newcoupon.infrastructure.resilience.DependencyCircuitBreakers;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.DisplayName;
@@ -74,6 +75,10 @@ class SliMetricsIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired
     private ReceiveAppService receiveAppService;
     @Autowired
+    private com.newcoupon.application.service.CalculateAppService calculateAppService;
+    @Autowired
+    private com.newcoupon.application.service.TradeAppService tradeAppService;
+    @Autowired
     private TemplateAppService templateAppService;
     @Autowired
     private DependencyCircuitBreakers breakers;
@@ -123,6 +128,80 @@ class SliMetricsIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
+    @DisplayName("接线防线：confirm/refund/calculate 三链路各一例——注解丢失会让埋点回归在这里先红（审查 major 修正）")
+    void confirmRefundCalculateJourneysAreWired() {
+        // 三条链路都走"最小路径直调 AppService 公开方法"：不需要真模板/真占用单——
+        // 本用例防的是"@SliJourney 注解被误删"这类接线回归（构造期预建的序列恒 0，
+        // 注解丢了断流告警也不会响，必须由测试防），断言计数递增即证明切面在链路上
+        String unknownUsage = "UNKNOWN-SLI-" + SEQ.incrementAndGet();
+        double confirmEvents = events(SliMetrics.Journey.CONFIRM, SliMetrics.Outcome.EXCLUDED);
+        double confirmTimer = journeyTimerCount(SliMetrics.Journey.CONFIRM);
+        try {
+            // 空金额/无 items/无 pricingId → 1000 参数错（excluded）——走到了服务边界即够
+            tradeAppService.confirm(new com.newcoupon.application.dto.TradeDtos.ConfirmRequest(
+                    unknownUsage, null, null, null));
+            throw new AssertionError("空核销请求应被参数校验拒绝");
+        } catch (BizException e) {
+            assertThat(e.getErrorCode().getCode()).isEqualTo(1000);
+        }
+        assertThat(events(SliMetrics.Journey.CONFIRM, SliMetrics.Outcome.EXCLUDED))
+                .as("confirm 链路计数递增=切面在位").isEqualTo(confirmEvents + 1);
+        assertThat(journeyTimerCount(SliMetrics.Journey.CONFIRM)).isEqualTo(confirmTimer + 1);
+
+        double refundEvents = events(SliMetrics.Journey.REFUND, SliMetrics.Outcome.EXCLUDED);
+        double refundTimer = journeyTimerCount(SliMetrics.Journey.REFUND);
+        try {
+            // 占用单不存在 → 4003（excluded）
+            tradeAppService.refund(new com.newcoupon.application.dto.TradeDtos.RefundRequest(
+                    "UNKNOWN-SLI-" + SEQ.incrementAndGet()));
+            throw new AssertionError("未知占用单退款应被拒");
+        } catch (BizException e) {
+            assertThat(e.getErrorCode().getCode()).isEqualTo(4003);
+        }
+        assertThat(events(SliMetrics.Journey.REFUND, SliMetrics.Outcome.EXCLUDED))
+                .as("refund 链路计数递增=切面在位").isEqualTo(refundEvents + 1);
+        assertThat(journeyTimerCount(SliMetrics.Journey.REFUND)).isEqualTo(refundTimer + 1);
+
+        double calculateEvents = events(SliMetrics.Journey.CALCULATE, SliMetrics.Outcome.EXCLUDED);
+        double calculateTimer = journeyTimerCount(SliMetrics.Journey.CALCULATE);
+        try {
+            // 超长订单号在服务内被 normalizeOrderNo 拒 → 1000（excluded）
+            calculateAppService.calculate(new com.newcoupon.open.api.dto.CalculateRequest(
+                    1L, List.of(new com.newcoupon.open.api.dto.CalculateRequest.OrderItem(
+                            "SKU1", "CAT1", 100L, 1)),
+                    List.of(1L), "x".repeat(65)));
+            throw new AssertionError("超长订单号应被参数校验拒绝");
+        } catch (BizException e) {
+            assertThat(e.getErrorCode().getCode()).isEqualTo(1000);
+        }
+        assertThat(events(SliMetrics.Journey.CALCULATE, SliMetrics.Outcome.EXCLUDED))
+                .as("calculate 链路计数递增=切面在位").isEqualTo(calculateEvents + 1);
+        assertThat(journeyTimerCount(SliMetrics.Journey.CALCULATE)).isEqualTo(calculateTimer + 1);
+    }
+
+    @Test
+    @DisplayName("基数防线不误杀内建 HTTP 指标：真实观测链下 http.server.requests 可查且进抓取面（审查 critical 回归钉）")
+    void cardinalityGuardDoesNotKillBuiltInHttpMetrics() {
+        // 先发一个真实 HTTP 请求触发 ServerHttpObservationFilter 注册 http.server.requests
+        // （Boot 3.3.5 / Micrometer 1.13.6 下它带 6 个标签：method/uri/status/exception/
+        //  outcome + DefaultMeterObservationHandler 追加的 error——若防线按 5 设限，
+        // 首个请求就把它整族拒掉，下面的断言全红）
+        rest.getForEntity("/actuator/health", String.class);
+
+        HttpHeaders basic = new HttpHeaders();
+        basic.setBasicAuth("actuator", "it-actuator-pass");
+        var metricsQuery = rest.exchange("/actuator/metrics/http.server.requests",
+                HttpMethod.GET, new HttpEntity<>(basic), String.class);
+        assertThat(metricsQuery.getStatusCode().value())
+                .as("细粒度指标端点必须能查到 http.server.requests（被基数防线误杀=404）")
+                .isEqualTo(200);
+
+        assertThat(scrape())
+                .as("抓取文本必须含 http_server_requests_seconds——防线只该拦无界标签，不该拦内建指标")
+                .contains("http_server_requests_seconds");
+    }
+
+    @Test
     @DisplayName("抓取面暴露：coupon_sli_events_total 与 coupon_deployment_info 在 /actuator/prometheus 可见")
     void sliMetricsAreExposedOnScrapeEndpoint() {
         String text = scrape();
@@ -155,15 +234,23 @@ class SliMetricsIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     private double events(SliMetrics.Outcome outcome) {
+        return events(SliMetrics.Journey.RECEIVE, outcome);
+    }
+
+    private double events(SliMetrics.Journey journey, SliMetrics.Outcome outcome) {
         return meterRegistry.get("coupon.sli.events")
-                .tag("journey", SliMetrics.Journey.RECEIVE.tag())
+                .tag("journey", journey.tag())
                 .tag("outcome", outcome.tag())
                 .counter().count();
     }
 
     private double receiveTimerCount() {
+        return journeyTimerCount(SliMetrics.Journey.RECEIVE);
+    }
+
+    private double journeyTimerCount(SliMetrics.Journey journey) {
         return meterRegistry.get("coupon.sli.duration")
-                .tag("journey", SliMetrics.Journey.RECEIVE.tag())
+                .tag("journey", journey.tag())
                 .timer().count();
     }
 

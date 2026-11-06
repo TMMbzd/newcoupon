@@ -1,7 +1,7 @@
 # promtool test rules 用例（V6 5A）——每条 alert 至少一例 + 记录规则数值抽查。
 # 运行：见 ops/prometheus/README.md（本机无 promtool 二进制，用 prom/prometheus 容器跑）。
 #
-# 三个 alert 用例的设计意图：
+# 四个 alert 用例的设计意图：
 #   1. 快烧：receive 全 bad（满足 1h 窗低流量下限 10 事件）→ CouponSloFastBurn page；
 #      同时 6h 窗也全 bad，但 CouponSloSlowBurn 的 for:15m 在 eval 时刻未满 → 不触发
 #      （验证 page 比 ticket 快，两级不会同时抢）。
@@ -10,6 +10,9 @@
 #   3. 断流：receive 有样本、其余三条链路序列完全缺失 → 仅缺失链路报
 #      CouponSliStreamMissing，且告警带 journey 标签可区分。
 #   4. 低流量保护：confirm 窗口内仅 1 个事件 → availability 序列不产出（空而非噪声）。
+#   5. 延迟执法（审查 minor 修正）：receive 的 P99 落在 (0.3, 0.5]（90% 样本 ≤0.3，
+#      10% 在 0.3~0.5）→ 直方图插值 P99≈0.48 > 0.3 持续 10m → 延迟 ticket；
+#      同窗 refund 全部样本 ≤0.1（P99=0.1 ≤ 0.5）必须安静。
 rule_files:
   - slo-recording.rules.yml
   - slo-alerts.rules.yml
@@ -112,19 +115,19 @@ tests:
               severity: page
             exp_annotations:
               summary: "SLI 断流（page）：calculate 的 coupon_sli_events_total 10 分钟无样本"
-              description: "SliMetrics 预建序列不该消失。三选一：实例宕机、Prometheus 抓取失败、埋点/指标名被改动。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"
+              description: "SliMetrics 预建序列不该消失。两选一：实例宕机、Prometheus 抓取失败。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"
           - exp_labels:
               journey: confirm
               severity: page
             exp_annotations:
               summary: "SLI 断流（page）：confirm 的 coupon_sli_events_total 10 分钟无样本"
-              description: "SliMetrics 预建序列不该消失。三选一：实例宕机、Prometheus 抓取失败、埋点/指标名被改动。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"
+              description: "SliMetrics 预建序列不该消失。两选一：实例宕机、Prometheus 抓取失败。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"
           - exp_labels:
               journey: refund
               severity: page
             exp_annotations:
               summary: "SLI 断流（page）：refund 的 coupon_sli_events_total 10 分钟无样本"
-              description: "SliMetrics 预建序列不该消失。三选一：实例宕机、Prometheus 抓取失败、埋点/指标名被改动。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"
+              description: "SliMetrics 预建序列不该消失。两选一：实例宕机、Prometheus 抓取失败。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"
 
   # ── 用例 4：低流量保护（confirm 1h 窗内仅 1 个事件 → availability 不产出）──
   - interval: 1m
@@ -142,3 +145,47 @@ tests:
       - expr: coupon:sli_burn_rate:1h
         eval_time: 45m
         exp_samples: []
+
+  # ── 用例 5：延迟执法（receive P99≈0.48 > 0.3 劣化；refund 健康 P99=0.1 安静）──
+  - interval: 1m
+    input_series:
+      # receive：90% 样本 ≤0.1/0.3（两个桶同速率=0.1~0.3 间无样本），10% 在 (0.3, 0.5]
+      - series: 'coupon_sli_duration_seconds_bucket{journey="receive",le="0.1"}'
+        values: '0+90x30'
+      - series: 'coupon_sli_duration_seconds_bucket{journey="receive",le="0.3"}'
+        values: '0+90x30'
+      - series: 'coupon_sli_duration_seconds_bucket{journey="receive",le="0.5"}'
+        values: '0+100x30'
+      - series: 'coupon_sli_duration_seconds_bucket{journey="receive",le="+Inf"}'
+        values: '0+100x30'
+      # refund：全部样本 ≤0.1 → P99=0.1，远低于 0.5 档位（对照组）
+      - series: 'coupon_sli_duration_seconds_bucket{journey="refund",le="0.1"}'
+        values: '0+100x30'
+      - series: 'coupon_sli_duration_seconds_bucket{journey="refund",le="+Inf"}'
+        values: '0+100x30'
+    promql_expr_test:
+      # 直方图线性插值：0.3 + (0.99-0.9)/(1.0-0.9)×(0.5-0.3) = 0.48。
+      # 浮点上会得到 0.4799999…，round 到毫秒位再断言，避免把浮点误差写进期望值
+      - expr: round(coupon:sli_latency_p99_seconds:5m{journey="receive"}, 0.001)
+        eval_time: 15m
+        exp_samples:
+          - labels: '{journey="receive"}'
+            value: 0.48
+      # 对照组：refund 全部样本 ≤0.1，P99 在桶内线性插值 = 0.99×0.1 = 0.099（远低于 0.5 档位）
+      - expr: round(coupon:sli_latency_p99_seconds:5m{journey="refund"}, 0.001)
+        eval_time: 15m
+        exp_samples:
+          - labels: '{journey="refund"}'
+            value: 0.099
+    alert_rule_test:
+      # receive 劣化：P99>0.3 从首个记录评估即成立，for:10m 后转 firing
+      - eval_time: 15m
+        alertname: CouponSloLatencyBudgetTicket
+        exp_alerts:
+          - exp_labels:
+              journey: receive
+              severity: ticket
+            exp_annotations:
+              summary: "SLO 延迟劣化（ticket）：receive 链路 P99 超目标持续 10 分钟"
+              description: "receive 链路全事件 P99（5m 窗）已持续 10 分钟高于 SLO 档位（receive 0.3s / calculate 0.15s / confirm、refund 0.5s）。工作时段建单排查慢源：DB 慢查询、缓存失效、GC、依赖劣化。"
+      # 只列 receive = 同窗的 refund 必须不在 firing 集合里（对照组断言）

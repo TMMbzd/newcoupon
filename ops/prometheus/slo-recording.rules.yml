@@ -90,3 +90,9 @@ groups:
             or (1 - coupon:sli_availability_ratio:3d{journey="calculate"}) / 0.001
             or (1 - coupon:sli_availability_ratio:3d{journey="confirm"}) / 0.0005
             or (1 - coupon:sli_availability_ratio:3d{journey="refund"}) / 0.0005
+
+      # ── 延迟 SLI：全事件 P99（5m 窗，审查 minor 修正——延迟不能只有测量没有执法）──
+      # 口径见 SLO.md §3.4：bad 事件正是最慢的事件，全事件 P99 让超时烧延迟目标。
+      # SLO 档位桶（150/300/500ms）由 Timer 的 serviceLevelObjectives 保证边界精度。
+      - record: coupon:sli_latency_p99_seconds:5m
+        expr: histogram_quantile(0.99, sum by (journey, le) (rate(coupon_sli_duration_seconds_bucket[5m])))

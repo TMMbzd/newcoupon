@@ -8,9 +8,9 @@
 
 | 文件 | 作用 |
 |---|---|
-| `slo-recording.rules.yml` | 可用性比率（1h/6h/3d/28d 四窗）、28d 错误预算剩余、燃烧率（1h/6h/3d） |
-| `slo-alerts.rules.yml` | 快烧（page 1h 窗 14.4×）/ 慢烧（ticket 6h 窗 6×）/ SLI 断流（absent_over_time 10m）三条告警 |
-| `slo-rules.tests.yml` | `promtool test rules` 用例：三类告警各至少一例 + 记录规则数值抽查 + 低流量保护 |
+| `slo-recording.rules.yml` | 可用性比率（1h/6h/3d/28d 四窗）、28d 错误预算剩余、燃烧率（1h/6h/3d）、延迟 P99（5m 窗） |
+| `slo-alerts.rules.yml` | 快烧（page 1h 窗 14.4×）/ 慢烧（ticket 6h 窗 6×）/ 延迟劣化（ticket，P99 超档位持续 10m）/ SLI 断流（page，absent_over_time 10m）四条告警 |
+| `slo-rules.tests.yml` | `promtool test rules` 用例：四条告警各至少一例（含对照组）+ 记录规则数值抽查 + 低流量保护 |
 
 ## 本机校验（promtool 两命令）
 
@@ -19,11 +19,11 @@
 ```bash
 cd ops/prometheus
 
-# 1. 语法/lint 校验（8 条 recording + 3 条 alerting 规则）
+# 1. 语法/lint 校验（9 条 recording + 4 条 alerting 规则）
 docker run --rm -v "$PWD":/rules --entrypoint /bin/promtool \
   prom/prometheus check rules /rules/slo-recording.rules.yml /rules/slo-alerts.rules.yml
 
-# 2. 合成序列触发的行为测试（快烧/慢烧/断流/低流量四组用例）
+# 2. 合成序列触发的行为测试（快烧/慢烧/断流/低流量/延迟劣化五组用例）
 docker run --rm -v "$PWD":/rules --entrypoint /bin/promtool \
   prom/prometheus test rules /rules/slo-rules.tests.yml
 ```

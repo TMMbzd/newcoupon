@@ -32,9 +32,28 @@ groups:
           summary: "SLO 慢烧（ticket）：{{ $labels.journey }} 链路 6h 燃烧率超 6 倍"
           description: "{{ $labels.journey }} 链路 6 小时已烧约 5% 错误预算。工作时段建单排查趋势根因；若持续将先于 28 天窗口耗尽预算。"
 
+      # 延迟执法（审查 minor 修正）：各链路 P99 超其 SLO 档位持续 10 分钟 → ticket。
+      # 为什么不是 page：延迟劣化多是趋势性问题（慢查询/缓存失效/GC），10 分钟确认持续性
+      # 后建单排查；真雪崩会先由可用性快烧 page 兜住。
+      - alert: CouponSloLatencyBudgetTicket
+        expr: |
+          coupon:sli_latency_p99_seconds:5m{journey="receive"} > 0.3
+            or coupon:sli_latency_p99_seconds:5m{journey="calculate"} > 0.15
+            or coupon:sli_latency_p99_seconds:5m{journey="confirm"} > 0.5
+            or coupon:sli_latency_p99_seconds:5m{journey="refund"} > 0.5
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "SLO 延迟劣化（ticket）：{{ $labels.journey }} 链路 P99 超目标持续 10 分钟"
+          description: "{{ $labels.journey }} 链路全事件 P99（5m 窗）已持续 10 分钟高于 SLO 档位（receive 0.3s / calculate 0.15s / confirm、refund 0.5s）。工作时段建单排查慢源：DB 慢查询、缓存失效、GC、依赖劣化。"
+
       - alert: CouponSliStreamMissing
         # 断流≠零流量：SliMetrics 启动即预建 12 条 events 序列，只要实例活着且抓取正常，
-        # 序列必然存在——absent_over_time 10 分钟即"实例没了/抓取断了/埋点被改掉"三选一。
+        # 序列必然存在——absent_over_time 10 分钟即"实例没了/抓取断了"。
+        # **边界（审查 major 修正后口径）**：@SliJourney 注解被误删时序列仍在暴露（恒 0），
+        # 本告警不会响——埋点回归由 SliMetricsIntegrationTest 的四链路接线用例防，
+        # 不在本告警的承诺范围内（它防的是可见性失明，不是埋点正确性）。
         # absent_over_time 会把选择器里的等值匹配标签（journey）带回结果，告警可区分链路。
         expr: |
           absent_over_time(coupon_sli_events_total{journey="receive"}[10m])
@@ -45,4 +64,4 @@ groups:
           severity: page
         annotations:
           summary: "SLI 断流（page）：{{ $labels.journey }} 的 coupon_sli_events_total 10 分钟无样本"
-          description: "SliMetrics 预建序列不该消失。三选一：实例宕机、Prometheus 抓取失败、埋点/指标名被改动。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"
+          description: "SliMetrics 预建序列不该消失。两选一：实例宕机、Prometheus 抓取失败。SLI 失明期间 SLO 全部不可判——先恢复可见性再谈别的。"
