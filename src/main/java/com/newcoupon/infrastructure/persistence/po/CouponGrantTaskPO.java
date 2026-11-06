@@ -31,12 +31,17 @@ public class CouponGrantTaskPO {
     /** 5 已取消 */
     public static final int STATUS_CANCELED = 5;
 
+    /** 批量发放（1A 既有入口）：调用方给一批 userId，逐人发一张 */
+    public static final int GRANT_TYPE_BATCH = 1;
+    /** 定向发放（阶段 6 补齐）：调用方指定 userId 列表，逐人发一张；与批量共用全链 */
+    public static final int GRANT_TYPE_TARGETED = 2;
+
     @TableId(type = IdType.AUTO)
     private Long id;
     private String taskNo;
     private String appId;
     private Long templateId;
-    /** 1=批量 2=定向（本刀仅 1） */
+    /** 1=批量 2=定向（两型共用 task/chunk/item/worker，仅受理语义标记不同） */
     private Integer grantType;
     /** 1=API（本刀仅开放/内部 API） */
     private Integer sourceType;

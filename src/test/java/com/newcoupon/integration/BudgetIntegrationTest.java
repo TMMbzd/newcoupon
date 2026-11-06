@@ -576,4 +576,26 @@ class BudgetIntegrationTest extends ShardedIntegrationTestSupport {
                 Long.class);
         return count == null ? 0 : count;
     }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("定向发放接预算：grant_type=2 的 chunk 预占按目标人数，发完确认消耗")
+    void targetedGrant_reservesAndConfirmsChunkBudget() throws Exception {
+        long activityId = createActivity(100, true);                 // 5 张 × 20 分
+        long templateId = createTemplateUnder(activityId, 20, 3, 1); // 库存 3 → 有效 3 片
+        List<Long> users = sameShardUsers(3, 3);                     // 单 chunk
+
+        GrantTaskCreateResult created = grantTaskService.createTargetedTask(
+                new GrantTaskCreateRequest("bud-targeted-" + templateId, templateId,
+                        users, "tester"));
+        CouponGrantTaskPO task = taskMapper.selectByTaskNo(created.taskNo());
+        assertThat(task.getGrantType()).isEqualTo(2);
+        assertThat(accountOf(activityId).getReserved())
+                .as("定向任务按 chunk 预占：3 张 × 20 分").isEqualTo(60);
+
+        CouponGrantTaskPO done = drainUntilTerminal(created.taskNo(), 60_000);
+        assertThat(done.getSuccessCount()).isEqualTo(3);
+        assertThat(accountOf(activityId).getReserved()).isZero();
+        assertThat(accountOf(activityId).getConsumed()).isEqualTo(60);
+    }
 }

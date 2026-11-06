@@ -1,6 +1,7 @@
 package com.newcoupon.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
 
 import com.newcoupon.application.dto.ReceiveRequest;
@@ -833,5 +834,120 @@ class GrantTaskIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(done.getSkipCount()).isEqualTo(3);
         assertThat(userCouponRepository.countByTemplate(templateId)).isZero();
         assertConservation(done);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑦ 定向发放（V6 阶段 6，grant_type=2）
+    // ------------------------------------------------------------------
+
+    @Test
+    @Timeout(120)
+    @DisplayName("定向发放：grant_type=2，N 个 userId 逐人发一张，worker/幂等/守恒全链复用")
+    void targetedTaskIssuesOneCouponPerUser() throws Exception {
+        long templateId = createPublishedTemplate(20, 1);
+        List<Long> users = newUsers(3);
+        GrantTaskCreateResult created = grantTaskService.createTargetedTask(
+                new GrantTaskCreateRequest("gt-targeted-" + templateId, templateId, users, "tester"));
+
+        assertThat(created.idempotent()).isFalse();
+        assertThat(created.totalCount()).isEqualTo(3);
+        CouponGrantTaskPO task = taskMapper.selectByTaskNo(created.taskNo());
+        assertThat(task.getGrantType()).as("定向任务必须落 grant_type=2").isEqualTo(2);
+
+        CouponGrantTaskPO done = drainUntilTerminal(created.taskNo(), 60_000);
+        assertThat(done.getStatus()).isEqualTo(2);
+        assertThat(done.getSuccessCount()).isEqualTo(3);
+        assertThat(done.getPendingCount()).isZero();
+        assertConservation(done);
+        for (Long user : users) {
+            assertThat(userCouponRepository.countByUserAndTemplate(user, templateId))
+                    .as("定向用户 %s 应恰好一张", user).isEqualTo(1);
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("定向发放幂等：同 requestId 重放返回同一任务；跨发放类型复用 requestId 拒绝")
+    void targetedRequestIdIdempotent_andCrossTypeRejected() throws Exception {
+        long templateId = createPublishedTemplate(20, 1);
+        List<Long> users = newUsers(2);
+        String requestId = "gt-targeted-idem-" + templateId;
+
+        GrantTaskCreateResult first = grantTaskService.createTargetedTask(
+                new GrantTaskCreateRequest(requestId, templateId, users, "tester"));
+        GrantTaskCreateResult again = grantTaskService.createTargetedTask(
+                new GrantTaskCreateRequest(requestId, templateId, users, "tester"));
+
+        assertThat(again.taskNo()).isEqualTo(first.taskNo());
+        assertThat(again.idempotent()).isTrue();
+        assertThat(again.totalCount()).isEqualTo(2);
+        assertThat(itemMapper.selectByTask(taskMapper.selectByTaskNo(first.taskNo()).getId()))
+                .hasSize(2);
+
+        // 同一个 requestId 已用于定向，不能拐去批量（幂等键是"受理语义"的一部分）
+        assertThatThrownBy(() -> grantTaskService.createTask(
+                new GrantTaskCreateRequest(requestId, templateId, users, "tester")))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getErrorCode())
+                .isEqualTo(ErrorCode.REQUEST_DUPLICATED);
+
+        // 收尾：本类其它用例依赖 worker.runChunks(1) 精确控制领取，遗留 PENDING
+        // 任务会抢走那一轮 chunk（全量联跑暴露的跨用例污染）
+        grantTaskService.cancel(first.taskNo());
+        drainUntilTerminal(first.taskNo(), 60_000);
+    }
+
+    @Test
+    @DisplayName("定向参数护栏：空列表/超过 10000 人 → 400 参数错误，不落任何任务")
+    void targetedInputBoundaries() {
+        assertThatThrownBy(() -> grantTaskService.createTargetedTask(
+                new GrantTaskCreateRequest("gt-targeted-empty", 1L, List.of(), "tester")))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("userIds 不能为空")
+                .extracting(e -> ((BizException) e).getErrorCode())
+                .isEqualTo(ErrorCode.PARAM_ERROR);
+
+        List<Long> tooMany = IntStream.rangeClosed(1, 10_001)
+                .mapToObj(i -> (long) i).toList();
+        assertThatThrownBy(() -> grantTaskService.createTargetedTask(
+                new GrantTaskCreateRequest("gt-targeted-over", 1L, tooMany, "tester")))
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("10000")
+                .extracting(e -> ((BizException) e).getErrorCode())
+                .isEqualTo(ErrorCode.PARAM_ERROR);
+    }
+
+    @Test
+    @Timeout(120)
+    @DisplayName("定向端点：开面包建/查/取消可用；乙应用查甲任务 → 403+6011")
+    void targetedEndpoint_contractAndOwnership() throws Exception {
+        provisionOnce();
+        long tplA = readLong(client.post("/open/v1/templates", """
+                {"name":"甲的定向券","activityId":1001,"couponType":1,"faceValue":1000,
+                 "threshold":10000,"totalCount":100,"perUserLimit":1,
+                 "validType":2,"validDays":7}""", APP_A, secretA, "gt-tgt-tpl-1").body(), "/data/id");
+        client.post("/open/v1/templates/" + tplA + "/publish", "", APP_A, secretA, "gt-tgt-pub-1");
+
+        OpenApiTestClient.Response created = client.post("/open/v1/grant/targeted",
+                "{\"requestId\":\"gt-tgt-a-1\",\"templateId\":" + tplA
+                        + ",\"userIds\":[940071,940072]}",
+                APP_A, secretA, "gt-tgt-a-tok");
+        assertThat(created.status()).as(created.body()).isEqualTo(200);
+        String taskNo = objectMapper.readTree(created.body()).at("/data/taskNo").asText();
+        assertThat(taskNo).startsWith("GT");
+
+        OpenApiTestClient.Response asA = client.get(
+                "/open/v1/grant/targeted/" + taskNo, null, APP_A, secretA);
+        assertThat(asA.status()).as(asA.body()).isEqualTo(200);
+        OpenApiTestClient.Response asB = client.get(
+                "/open/v1/grant/targeted/" + taskNo, null, APP_B, secretB);
+        assertThat(asB.status()).as(asB.body()).isEqualTo(403);
+        assertThat(asB.body()).contains("6011");
+
+        OpenApiTestClient.Response canceled = client.post(
+                "/open/v1/grant/targeted/" + taskNo + "/cancel", "", APP_A, secretA,
+                "gt-tgt-cancel-tok");
+        assertThat(canceled.status()).as(canceled.body()).isEqualTo(200);
+        drainUntilTerminal(taskNo, 60_000);
     }
 }

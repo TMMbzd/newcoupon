@@ -89,6 +89,22 @@ public class GrantTaskService {
      * 并发同 requestId 双写时输家在这里被翻译成"返回现状"而不是报错。
      */
     public GrantTaskCreateResult createTask(GrantTaskCreateRequest req) {
+        return createTask(req, CouponGrantTaskPO.GRANT_TYPE_BATCH);
+    }
+
+    /**
+     * 受理定向发放任务（grant_type=2）：给指定 userId 列表逐人发一张券。
+     *
+     * <p>与批量共用同一套 task/chunk/item 三表、分片分组、worker、幂等键
+     * （grant-{taskNo}-{seq}）、预算 chunk 预占与失败重试——差异只在
+     * {@code grant_type} 标记（运营报表/调用方据此区分受理语义），
+     * 不建第二条发放链路。
+     */
+    public GrantTaskCreateResult createTargetedTask(GrantTaskCreateRequest req) {
+        return createTask(req, CouponGrantTaskPO.GRANT_TYPE_TARGETED);
+    }
+
+    private GrantTaskCreateResult createTask(GrantTaskCreateRequest req, int grantType) {
         List<Long> users = dedupUsers(req.userIds());
         // 模板加载与归属/发布态检查照 TemplateAppService.publish 的模式：
         // 先取到行、再判归属（过滤器阶段不知道模板属于谁）
@@ -108,17 +124,19 @@ public class GrantTaskService {
             // 拒绝并指回原任务，而不是静默返回别人的任务。
             // 必须 equals：两侧都是装箱 Long，!= 是引用比较——模板 id 超出
             // Long 缓存区（>127）后同模板重放会被误判成键复用而拒绝
-            if (!existing.getTemplateId().equals(req.templateId())) {
+            if (!existing.getTemplateId().equals(req.templateId())
+                    || !Integer.valueOf(grantType).equals(existing.getGrantType())) {
                 throw new BizException(ErrorCode.REQUEST_DUPLICATED,
                         "该 requestId 已用于 templateId=" + existing.getTemplateId()
-                                + " 的批量发放，不可用于其他模板");
+                                + "、grantType=" + existing.getGrantType()
+                                + " 的发放，不可复用到其他模板或发放类型");
             }
             return new GrantTaskCreateResult(existing.getTaskNo(), existing.getStatus(),
                     existing.getTotalCount(), true);
         }
 
         String taskNo = "GT" + idGenerator.next();
-        TaskArtifacts artifacts = buildArtifacts(appId, taskNo, req, users, template);
+        TaskArtifacts artifacts = buildArtifacts(appId, taskNo, req, users, template, grantType);
         // 预算闸门（V6 阶段 1C）：按 chunk 预估额预占（单张成本×chunk item 数），
         // 先到先得。预占打不中预算→任务整体不建（BUDGET_EXHAUSTED 原样抛出）——
         // "建了再发一半"不符合预算硬顶语义；任务落库失败（并发/异常）同样回池。
@@ -331,7 +349,7 @@ public class GrantTaskService {
 
     /** 组装任务/分片/明细三组 PO（未落库；task.id 与子表关联在事务内回填）。 */
     private TaskArtifacts buildArtifacts(String appId, String taskNo, GrantTaskCreateRequest req,
-                                         List<Long> users, CouponTemplate template) {
+                                         List<Long> users, CouponTemplate template, int grantType) {
         int shardCount = template.getStockShardCount();
         if (shardCount < 1) {
             shardCount = FALLBACK_SHARD_COUNT;
@@ -342,7 +360,7 @@ public class GrantTaskService {
         task.setTaskNo(taskNo);
         task.setAppId(appId);
         task.setTemplateId(req.templateId());
-        task.setGrantType(1);
+        task.setGrantType(grantType);
         task.setSourceType(1);
         task.setRequestId(req.requestId());
         task.setTotalCount((long) users.size());

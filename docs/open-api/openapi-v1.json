@@ -285,6 +285,60 @@
         }
       }
     },
+    "/open/v1/grant/targeted/{taskNo}/cancel" : {
+      "post" : {
+        "tags" : [ "grant-targeted-controller" ],
+        "operationId" : "cancel_1",
+        "parameters" : [ {
+          "name" : "taskNo",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultGrantTaskCancelResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/grant/targeted" : {
+      "post" : {
+        "tags" : [ "grant-targeted-controller" ],
+        "operationId" : "create_2",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/GrantTaskCreateRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultGrantTaskCreateResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/open/v1/coupons/release" : {
       "post" : {
         "tags" : [ "trade-controller" ],
@@ -622,6 +676,32 @@
       "get" : {
         "tags" : [ "grant-task-controller" ],
         "operationId" : "get_1",
+        "parameters" : [ {
+          "name" : "taskNo",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResultGrantTaskStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open/v1/grant/targeted/{taskNo}" : {
+      "get" : {
+        "tags" : [ "grant-targeted-controller" ],
+        "operationId" : "get_2",
         "parameters" : [ {
           "name" : "taskNo",
           "in" : "path",
