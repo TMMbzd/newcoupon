@@ -53,7 +53,7 @@
 
 | # | 证据件 | 一句话 | 关键数字 |
 |---|---|---|---|
-| 16 | [L75ConfirmToctouIntegrationTest](../../src/test/java/com/newcoupon/integration/L75ConfirmToctouIntegrationTest.java) | confirm 事务内 TOCTOU + 审查整改：窗口注入、两线程行锁、事务层幂等、跨租户、部分退款 | **10 例**；主体修复前 **4 例红**（T1/T2/T5/T6），修复后 6/6；审查后 T7 两线程行锁（摘 `FOR UPDATE` 变异红）、T8 事务层幂等（duplicated 后移变异红）、T9 部分退款（摘分支变异红）、T10 跨租户；最终 **10/10 绿**；指定回归面 **55/55**，其余 confirm 相关 **80/80** |
+| 16 | [L75ConfirmToctouIntegrationTest](../../src/test/java/com/newcoupon/integration/L75ConfirmToctouIntegrationTest.java) | confirm 事务内 TOCTOU + 审查整改：窗口注入、两线程行锁、事务层幂等、跨租户、部分退款 | **10 例**；主体修复前 **4 例红**（T1/T2/T5/T6），修复后 6/6；审查后 T7 两线程行锁（摘 `FOR UPDATE` 变异红）、T8 事务层幂等（duplicated 后移变异红）、T9 部分退款（摘分支变异红）、T10 跨租户；最终 **10/10 绿**；单分片路由由 `ShardingRouteAssertionTest` **8/8** 钉住；指定回归面 **55/55**，其余 confirm 相关 **80/80** |
 | 17 | [2026-11-06-L75红绿取证.md](2026-11-06-L75红绿取证.md) | L75 主体 + 25-agent 审查整改（C1/C2/C3/C5/C6）的红/绿与变异自检全记录 | 红：**6 例 / 4 失败（EXIT=1）**；绿：**6/6**；审查后 **10/10**；变异自检 3 处（摘 `FOR UPDATE` / 后移 duplicated / 摘 PARTIALLY_REFUNDED）均先红后绿；回归 **55/55 + 80/80 + 22/22** |
 | 18 | [GrantTaskIntegrationTest](../../src/test/java/com/newcoupon/integration/GrantTaskIntegrationTest.java) + [BudgetIntegrationTest](../../src/test/java/com/newcoupon/integration/BudgetIntegrationTest.java) | C4 定向发放（grant_type=2）全链证据：发 N 张/幂等/越权/端点/预算 | 定向 4 例 + 预算 1 例；GrantTask 全类 **16/16**、Budget **11/11**；基线 25→**28 path**（仅新增 3 条定向路径） |
 

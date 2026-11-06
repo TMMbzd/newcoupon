@@ -87,10 +87,13 @@ class ShardingRouteAssertionTest extends ShardedIntegrationTestSupport {
     }
 
     @Test
-    @DisplayName("coupon_usage 按 userId+orderNo 查询只命中 1 张物理表")
+    @DisplayName("coupon_usage 按 userId+orderNo 查询/订单行锁只命中 1 张物理表")
     void usageByOrderNoAndUserHitsOneTable() {
         assertSingleTable("coupon_usage_", USER_ID,
                 () -> usageMapper.selectByOrderNo(USER_ID, "route-order-1"));
+        // L75：核对销事务内按 id 升序锁订单全部占用单——同样只命中 1 张物理表
+        assertSingleTable("coupon_usage_", USER_ID,
+                () -> usageMapper.selectByOrderNoForUpdate(USER_ID, "route-order-1"));
     }
 
     @Test
