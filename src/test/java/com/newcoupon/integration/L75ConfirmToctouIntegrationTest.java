@@ -15,6 +15,7 @@ import com.newcoupon.application.dto.TemplateCreateRequest;
 import com.newcoupon.application.dto.TradeDtos.ConfirmRequest;
 import com.newcoupon.application.dto.TradeDtos.LockRequest;
 import com.newcoupon.application.dto.TradeDtos.LockResult;
+import com.newcoupon.application.dto.TradeDtos.RefundItem;
 import com.newcoupon.application.dto.TradeDtos.RefundRequest;
 import com.newcoupon.application.dto.TradeDtos.ReleaseRequest;
 import com.newcoupon.application.service.CalculateAppService;
@@ -26,6 +27,7 @@ import com.newcoupon.application.service.TradeTxService;
 import com.newcoupon.application.service.discount.DiscountCalculatorService;
 import com.newcoupon.common.BizException;
 import com.newcoupon.common.ErrorCode;
+import com.newcoupon.common.context.RequestContext;
 import com.newcoupon.domain.coupon.CouponStatus;
 import com.newcoupon.domain.coupon.CouponUsage;
 import com.newcoupon.domain.coupon.UsageStatus;
@@ -35,10 +37,16 @@ import com.newcoupon.open.api.dto.CalculateRequest;
 import com.newcoupon.open.api.dto.CalculateResponse;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.test.context.TestPropertySource;
@@ -79,8 +87,10 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
     @Autowired private CalculateAppService calculateAppService;
     @Autowired private TradeAppService tradeAppService;
     @Autowired private TradeTxService tradeTxService;
-    @Autowired private CouponUsageRepository couponUsageRepository;
     @Autowired private UserCouponRepository userCouponRepository;
+
+    /** 仓储 spy：C2 用它把核销事务挂在 casConfirm 之前，证明订单行锁被持有到提交 */
+    @SpyBean private CouponUsageRepository couponUsageRepository;
 
     /** 快照路径的窗口注入点：prepareConfirm 真实校验通过之后、事务开始之前 */
     @SpyBean private PricingSnapshotService pricingSnapshotService;
@@ -92,6 +102,11 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
     private final AtomicBoolean legacyWindowArmed = new AtomicBoolean(false);
     private volatile Runnable windowAction = () -> { };
     private volatile Runnable legacyWindowAction = () -> { };
+
+    /** C2 两线程取证：A 到达 casConfirm 前挂起（此时订单行锁已持有），B 必须被阻塞 */
+    private final AtomicBoolean confirmBlockArmed = new AtomicBoolean(false);
+    private final CountDownLatch confirmBlocked = new CountDownLatch(1);
+    private final CountDownLatch confirmResume = new CountDownLatch(1);
 
     @BeforeEach
     void installWindowHooks() {
@@ -111,6 +126,20 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
             }
             return result;
         }).when(discountCalculatorService).calculateForOrderConfirm(anyLong(), anyList(), anyList());
+
+        // C2：核销事务在“锁行之后、CAS 之前”挂起——此间订单行锁必须一直持有，
+        // 并发 sibling 释放/退款会被数据库阻塞。摘掉 FOR UPDATE 时这里不再持有行锁，
+        // 并发操作会立即完成，用例即红（变异自检）。
+        doAnswer(invocation -> {
+            if (confirmBlockArmed.compareAndSet(true, false)) {
+                confirmBlocked.countDown();
+                if (!confirmResume.await(20, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("C2 测试闩超时：执行线程未被放行");
+                }
+            }
+            return invocation.callRealMethod();
+        }).when(couponUsageRepository).casConfirm(anyString(), anyLong(), anyLong(),
+                any(LocalDateTime.class));
     }
 
     private record Setup(long userId, long shopCouponId, long platformCouponId) {
@@ -141,15 +170,35 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
     }
 
     private static List<CalculateRequest.OrderItem> items() {
-        return List.of(new CalculateRequest.OrderItem("SKU1", "CAT1", 10000L, 1, "L1", "A"));
+        return items(1);
+    }
+
+    private static List<CalculateRequest.OrderItem> items(int quantity) {
+        return List.of(new CalculateRequest.OrderItem("SKU1", "CAT1", 10000L, quantity, "L1", "A"));
+    }
+
+    /** 单张券：建模板→发布→领券（归属跟随当前 RequestContext 的租户） */
+    private long issueCoupon(String suffix, long userId) {
+        LocalDateTime start = LocalDateTime.now().minusDays(1);
+        LocalDateTime end = LocalDateTime.now().plusDays(30);
+        TemplateAppService.CreatedTemplate t = templateAppService.create(
+                new TemplateCreateRequest("L75-跨租户券-" + suffix, 9500L, 1, 500L, null, 5000L,
+                        100L, 1, 1, start, end, null, 0L, 0, null, null, 0, null, 1, null, null));
+        templateAppService.publish(t.id());
+        return receiveAppService.receive(new ReceiveRequest("l75-xt-" + suffix, userId, t.id()))
+                .couponId();
     }
 
     /** 两张券同单、带价格快照锁好（快照 APPLIED={店铺券, 平台券}） */
     private Fixture lockBothWithSnapshot(String suffix) {
+        return lockBothWithSnapshot(suffix, 1);
+    }
+
+    private Fixture lockBothWithSnapshot(String suffix, int quantity) {
         Setup s = issueTwoCoupons(suffix);
         String orderNo = "ORD-L75-" + suffix;
         CalculateResponse calc = calculateAppService.calculate(
-                new CalculateRequest(s.userId(), items(),
+                new CalculateRequest(s.userId(), items(quantity),
                         List.of(s.shopCouponId(), s.platformCouponId()), orderNo));
         assertThat(calc.pricingId()).isNotBlank();
         LockResult shopLock = tradeAppService.lock(new LockRequest(orderNo, s.userId(),
@@ -305,4 +354,67 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(usageStatus(f.platformUsageNo())).isEqualTo(UsageStatus.RELEASED);
         assertThat(usageStatus(f.shopUsageNo())).isEqualTo(UsageStatus.OCCUPYING);
     }
+
+    private record Res(Object result, String code) {
+    }
+
+    private Res call(java.util.function.Supplier<Object> action) {
+        try {
+            return new Res(action.get(), "OK");
+        } catch (BizException e) {
+            return new Res(null, String.valueOf(e.getErrorCode().getCode()));
+        }
+    }
+
+    @Test
+    @Timeout(180)
+    @DisplayName("T7: 两线程证明事务内订单行锁真实存在——A 核销持锁时 B 释放 sibling 必须阻塞")
+    void confirmHoldsOrderRowLocksUntilCommit() throws Exception {
+        Fixture f = lockBothLegacy("LOCK");
+        confirmBlockArmed.set(true);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<Res> confirm = pool.submit(() -> call(() ->
+                    tradeAppService.confirm(new ConfirmRequest(f.shopUsageNo(), 500L))));
+            assertThat(confirmBlocked.await(30, TimeUnit.SECONDS))
+                    .as("A 应到达“锁行之后、CAS 之前”的挂起点").isTrue();
+
+            Future<Res> release = pool.submit(() -> call(() ->
+                    tradeAppService.release(new ReleaseRequest(f.platformUsageNo(), "并发释放"))));
+            Thread.sleep(500);
+            assertThat(release.isDone())
+                    .as("B 必须被 A 持有的订单占用单行锁阻塞"
+                            + "（摘掉 FOR UPDATE 时这里会立即完成——C2 变异自检）")
+                    .isFalse();
+
+            confirmResume.countDown();
+            assertThat(confirm.get(30, TimeUnit.SECONDS).code()).isEqualTo("OK");
+            assertThat(release.get(30, TimeUnit.SECONDS).code()).isEqualTo("OK");
+            assertThat(usageStatus(f.shopUsageNo())).isEqualTo(UsageStatus.CONFIRMED);
+            assertThat(usageStatus(f.platformUsageNo())).isEqualTo(UsageStatus.RELEASED);
+        } finally {
+            confirmResume.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    @DisplayName("T8: 纯旧式金额路径的事务层幂等——目标已核销+兄弟已退款，重放 duplicated 先于售后")
+    void legacyReplayHitsTransactionDuplicateBeforeAfterSales() {
+        Fixture f = lockBothLegacy("IDEM");
+        assertThat(tradeAppService.confirm(
+                new ConfirmRequest(f.shopUsageNo(), 500L)).duplicated()).isFalse();
+        assertThat(tradeAppService.confirm(
+                new ConfirmRequest(f.platformUsageNo(), 300L)).duplicated()).isFalse();
+        tradeAppService.refund(new RefundRequest(f.shopUsageNo(), "RF-L75-LEGACY-REPLAY", null));
+
+        // 纯旧式金额路径不走编排层的计价分支，会真正进入事务层——证明 duplicated
+        // 判断位于售后/券集合校验之前：已成功的核销不能被兄弟退款误伤成 4002。
+        var replay = tradeAppService.confirm(new ConfirmRequest(f.platformUsageNo(), 300L));
+
+        assertThat(replay.duplicated()).isTrue();
+        assertThat(replay.discountAmt()).isEqualTo(300L);
+        assertThat(usageStatus(f.platformUsageNo())).isEqualTo(UsageStatus.CONFIRMED);
+    }
+
 }
