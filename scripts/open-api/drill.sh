@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 #
 # 三级预案演练（S2 第 10 步，RQ-9）——一条命令跑完：
-#     注入故障 → 观察熔断打开 → 恢复故障 → 套用黄预案 → 行为验证 → 恢复预案
+#     注入 Redis 故障 → 观察 fail-closed/fail-open → 恢复 → 套用黄预案 → 行为验证 → 恢复预案
+#
+# 2026-11-06 更新（V6 阶段 5B 复跑取证）：C1 之后 Redis 不再是库存权威——同步领券的
+# 库存/落库都在 MySQL，Redis 只做售罄提示（try/catch 降级）。旧版脚本"暂停 Redis 后
+# 同步领券应 5000→5001、redis 熔断器 OPEN"的断言已经不成立（redis 熔断器也没有接线点）。
+# 现在验证的是真实强依赖：异步准入 gate（receive-async）在 Redis 故障时 fail-closed
+# 返回 5001（reject 策略），以及风控闸 fail-open 指标必须可见。
 #
 # **为什么演练脚本要当成交付物**（与 demo.sh / negative.sh 同样的理由）：
 # 治理能力的价值不在"配好了"，而在**出事时真的管用**。能一条命令跑完
@@ -19,9 +25,9 @@
 #   make up && make run            # 另一个终端
 #   CONFIRM=yes bash scripts/open-api/drill.sh
 #
-# 关于 IP 频控：POST /api/coupons/receive 默认限 60 秒 30 次。本脚本把总请求数
-# 控制在 25 次以内、并拉长轮询间隔来规避；万一仍撞上 429/7001，脚本会明确报出来
-# （而不是把它误判成熔断现象），此时用 -Dcoupon.risk.ip-rate.enabled=false 重启应用再跑。
+# 关于 IP 频控：领券入口默认限 60 秒 30 次。本脚本把总请求数控制在 25 次以内、
+# 并拉长轮询间隔来规避；万一仍撞上 7001，脚本会明确报出来（而不是把它误判成
+# 故障现象），此时用 -Dcoupon.risk.ip-rate.enabled=false 重启应用再跑。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -133,73 +139,86 @@ step "3. 注入故障：暂停 Redis 容器"
 docker pause "$REDIS_CONTAINER" >/dev/null
 ok "Redis 已暂停（TCP 仍可连、命令不再响应——这正是熔断该保护的形态）"
 
-# ---------------------------------------------------------------- 观察熔断
-step "4. 观察熔断：**走内部面**"
-warn "开放面此时读不到——Redis 一挂，nonce 校验 fail-closed 会把请求先拒掉（5000/503），"
-warn "这是**有意的安全行为**（防重放不能因为 Redis 挂就放行），不是缺陷。"
-saw_timeout=0; saw_open=0
-for i in $(seq 1 8); do
-  body=$(curl -sS -X POST "$BASE/api/coupons/receive" -H "Content-Type: application/json" \
-      -d "{\"requestId\":\"drill-fault-$i\",\"userId\":$USER_A,\"templateId\":$TPL_A}" 2>/dev/null || echo '{}')
+# ---------------------------------------------------------------- 观察故障期行为
+step "4. 观察故障期行为：异步准入 gate 是 Redis 的唯一强依赖路径"
+warn "C1 之后 Redis 不再是库存权威：同步领券的库存/落库都在 MySQL，Redis 只做售罄提示"
+warn "（try/catch 降级），所以它会继续成功——旧版脚本在这里等 5000/5001 已经过时。"
+warn "Redis 的强依赖点是异步准入：预扣失败按 reject 策略返回 5001（可重试、fail-closed）。"
+saw_degraded=0; saw_success=0
+for i in $(seq 1 3); do
+  body=$(curl -sS -X POST "$BASE/api/coupons/receive-async" -H "Content-Type: application/json" \
+      -d "{\"requestId\":\"drill-async-fault-$i-$(date +%s%3N)\",\"userId\":$USER_A,\"templateId\":$TPL_A}" 2>/dev/null || echo '{}')
   code=$(printf '%s' "$body" | json_get '["code"]' 2>/dev/null || echo "?")
   if [[ "$code" == "7001" ]]; then
     fail "被 IP 频控拦下（7001）——用 -Dcoupon.risk.ip-rate.enabled=false 重启应用再跑。
 （脚本只在第 4 步就撞上限，说明频控阈值比预期低。）"
   fi
-  [[ "$code" == "5000" ]] && saw_timeout=$((saw_timeout + 1))
-  [[ "$code" == "5001" ]] && saw_open=$((saw_open + 1))
-  [[ $saw_open -gt 0 ]] && break
-  sleep 2
+  [[ "$code" == "5001" ]] && saw_degraded=$((saw_degraded + 1))
+  [[ "$code" == "0" ]] && saw_success=$((saw_success + 1))
+  sleep 1
 done
-[[ $saw_timeout -gt 0 ]] || fail "没有观察到依赖超时（5000）——故障注入可能没生效"
-ok "观察到依赖超时（5000）$saw_timeout 次"
-[[ $saw_open -gt 0 ]] || fail "熔断始终没有打开（未见到 5001）"
-ok "观察到熔断快速失败（5001）"
+[[ $saw_degraded -gt 0 ]] || fail "Redis 暂停期间异步受理没有返回 5001——故障注入没生效或 reject 策略被绕过"
+[[ $saw_success -eq 0 ]] || fail "Redis 暂停期间异步受理仍成功（预扣路径不该 fail-open）"
+ok "故障期异步受理 fail-closed：5001 共 $saw_degraded 次，成功 0 次"
+PASS=$((PASS + 1))
 
-state=$(breaker_state redis || echo "?")
-[[ "$state" == "OPEN" ]] || fail "熔断器状态期望 OPEN，实际 $state"
-ok "熔断器状态 = OPEN（读 /api/switches/breakers 得到）"
-PASS=$((PASS + 3))
+# ---------------------------------------------------------------- 恢复故障
+step "5. 恢复故障：Redis 恢复后异步 gate 重新可用"
+docker unpause "$REDIS_CONTAINER" >/dev/null
+sleep 1
+[[ "$(docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | tr -d '\r')" == "PONG" ]] \
+  || fail "Redis 恢复后 PING 不是 PONG"
+ok "Redis 已恢复（PING=PONG）"
+PASS=$((PASS + 1))
 
-# ---------------------------------------------------------------- 新增：防线失效的可见性
-step "4'. 防线失效必须**看得见**（S3 第 6.5/7 步的承诺，在这里验）"
+# 用新用户，避免"基线已经领过"的限领码混进恢复判据。
+RECOVER_USER=97001
+body=$(curl -sS -X POST "$BASE/api/coupons/receive-async" -H "Content-Type: application/json" \
+    -d "{\"requestId\":\"drill-async-heal-$(date +%s%3N)\",\"userId\":$RECOVER_USER,\"templateId\":$TPL_A}" 2>/dev/null || echo '{}')
+code=$(printf '%s' "$body" | json_get '["code"]' 2>/dev/null || echo "?")
+[[ "$code" == "0" ]] || fail "Redis 恢复后异步受理仍失败：$body"
+ok "异步受理恢复（code=0）"
+PASS=$((PASS + 1))
+
+RECOVER_SYNC_USER=97002
+body=$(curl -sS -X POST "$BASE/api/coupons/receive" -H "Content-Type: application/json" \
+    -d "{\"requestId\":\"drill-sync-heal-$(date +%s%3N)\",\"userId\":$RECOVER_SYNC_USER,\"templateId\":$TPL_A}" 2>/dev/null || echo '{}')
+code=$(printf '%s' "$body" | json_get '["code"]' 2>/dev/null || echo "?")
+[[ "$code" == "0" ]] || fail "Redis 恢复后同步领券失败：$body"
+ok "同步领券正常（code=0）"
+PASS=$((PASS + 1))
+
+# ---------------------------------------------------------------- 防线失效的可见性
+step "5'. 防线失效必须**看得见**（S3 第 6.5/7 步的承诺，在这里验）"
+# 为什么放在恢复之后读：这些是**累计计数器**（故障期间已 +N），恢复后读到的仍是同一份事实；
+# 计数器不会因为恢复而清零，证据不丢。抓取结果落盘，断言全部 grep 文件而不是管道
+# （2026-11-06 实测踩坑：`printf '%s' "$text" | grep -q` 在响应约 99KB > 管道缓冲时，
+#  grep 提前退出会让 printf 收到 SIGPIPE，pipefail 把整条管道判成失败——指标明明在文本里，
+#  断言却报"没有出现"）。grep 文件没有这个信号问题。
 # 2A-2 起 prometheus 需要 Basic 凭据（与 SecurityConfig 的 actuator 链一致）；
-# ACTUATOR_AUTH 默认值=SecurityRbacIntegrationTest 同款 dev 凭据，生产用环境变量覆盖
+# ACTUATOR_AUTH 默认值=SecurityRbacIntegrationTest 同款 dev 凭据，生产用环境变量覆盖。
 ACTUATOR_AUTH="${ACTUATOR_AUTH:-actuator:it-actuator-pass}"
-text=$(curl -sS -u "$ACTUATOR_AUTH" "$BASE/actuator/prometheus" 2>/dev/null || echo "")
+SCRAPE_FILE="/tmp/newcoupon-drill-prometheus.txt"
+text=$(curl -sS --max-time 15 -u "$ACTUATOR_AUTH" "$BASE/actuator/prometheus" 2>/dev/null || echo "")
+printf '%s' "$text" > "$SCRAPE_FILE"
+warn "Prometheus 抓取 ${#text} 字符（落盘 $SCRAPE_FILE，凭据 $ACTUATOR_AUTH）"
 # ① 风控闸（Redis 频控）在故障期间是 fail-open 的——但它必须留下痕迹，
 #    否则"风控闸已经失效"与"今天没人刷"在监控上完全一样。
-printf '%s' "$text" | grep -q 'coupon_ratelimit_failopen_total{dimension="risk_ip"}' \
+grep -q 'coupon_ratelimit_failopen_total{dimension="risk_ip"}' "$SCRAPE_FILE" \
   || fail "Redis 故障期间没有出现 fail-open 指标（dimension=risk_ip）——防线失效变成静默的了"
 ok "fail-open 指标已出现：coupon_ratelimit_failopen_total{dimension=\"risk_ip\"}"
 # ② Sentinel 自身那两条 gauge（全局开关 / 处理链数量）——它们回答的是"整套限流还在不在"
-printf '%s' "$text" | grep -q 'coupon_sentinel_enabled' \
+grep -q 'coupon_sentinel_enabled' "$SCRAPE_FILE" \
   || fail "抓取里没有 coupon_sentinel_enabled（Sentinel 全局开关不可见）"
-printf '%s' "$text" | grep -q 'coupon_sentinel_slot_chain_count' \
+grep -q 'coupon_sentinel_slot_chain_count' "$SCRAPE_FILE" \
   || fail "抓取里没有 coupon_sentinel_slot_chain_count（处理链数量不可见）"
 ok "Sentinel 自身状态可见（全局开关 + 处理链数量）"
-PASS=$((PASS + 3))
-
-# ---------------------------------------------------------------- 恢复故障
-step "5. 恢复故障：熔断应当自己闭合（半开探测 → 闭合）"
-docker unpause "$REDIS_CONTAINER" >/dev/null
-ok "Redis 已恢复"
-recovered=0
-for i in $(seq 1 10); do
-  body=$(curl -sS -X POST "$BASE/api/coupons/receive" -H "Content-Type: application/json" \
-      -d "{\"requestId\":\"drill-heal-$i\",\"userId\":$USER_A,\"templateId\":$TPL_A}" 2>/dev/null || echo '{}')
-  code=$(printf '%s' "$body" | json_get '["code"]' 2>/dev/null || echo "?")
-  [[ "$code" == "7001" ]] && fail "被 IP 频控拦下（7001）——见第 4 步的说明"
-  if [[ "$code" == "0" ]]; then recovered=$((recovered + 1)); fi
-  if [[ $recovered -ge 1 && "$(breaker_state redis)" == "CLOSED" ]]; then break; fi
-  sleep 5
-done
-[[ $recovered -gt 0 ]] || fail "故障恢复后请求仍未成功——检查 Redis 是否真的恢复了"
-ok "业务已恢复（成功 $recovered 次）"
-state=$(breaker_state redis || echo "?")
-[[ "$state" == "CLOSED" ]] || warn "熔断器状态为 $state（半开探测需要几次成功才闭合，可稍后复查）"
-[[ "$state" == "CLOSED" ]] && ok "熔断器状态 = CLOSED"
-PASS=$((PASS + 2))
+# ③ Redis 故障策略路径也必须是"看得见"的：reject 策略命中会打这个计数。
+#    没有它，我们只知道"返回了 5001"，不知道是 gate 的 reject 策略还是别的降级码。
+grep -q 'issue_gate_result_total{result="redis_down_reject"' "$SCRAPE_FILE" \
+  || fail "抓取里没有 issue_gate_result_total{result=\"redis_down_reject\"}——无法证明走的是 Redis-down reject 策略"
+ok "Redis-down 策略路径可见：issue_gate_result_total{result=\"redis_down_reject\"}"
+PASS=$((PASS + 4))
 
 # ---------------------------------------------------------------- 套用预案
 step "6. 套用黄预案（租户 A）并验证"
