@@ -240,14 +240,18 @@ public class TradeTxService {
                     usage.getDiscountAmt(), true);
         }
         usage.checkConfirmable();   // RELEASED/REFUNDED/EXPIRED/超时 → 拒绝
-        assertNoAfterSales(orderUsages);   // L75：锁内重校验售后态
+        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
+                .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
+        // L75 审查 C5：coupon_usage 没有 app_id，同 user_id+order_no 可能是两个租户的
+        // 独立订单（分片键只有 user_id，落在同一张物理表）。只有与目标券同租户的
+        // 占用单才算本单的兄弟券，否则 A 租户的退款会误杀 B 租户的旧式核销。
+        List<CouponUsage> tenantUsages = sameTenantUsages(orderUsages, usage, coupon.getAppId());
+        assertNoAfterSales(tenantUsages);   // L75：锁内重校验售后态
         // 普通核销的生效集合=占用中+已核销（CONFIRM_EXCEPTION 不算，与 L70 口径一致）
-        assertExpectedCouponSet(orderUsages, expectedCouponIds, req.pricingId() != null, false);
+        assertExpectedCouponSet(tenantUsages, expectedCouponIds, req.pricingId() != null, false);
         if (!couponUsageRepository.casConfirm(req.usageNo(), usage.getUserId(), req.discountAmt(), now)) {
             throw new TradeCasRejectedException("usage-confirm", req.usageNo());
         }
-        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
-                .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
         if (!userCouponRepository.casConfirm(usage.getUserCouponId(), usage.getUserId())) {
             throw new TradeCasRejectedException("coupon-confirm", usage.getUserCouponId());
         }
@@ -277,6 +281,33 @@ public class TradeTxService {
      */
     private List<CouponUsage> lockOrderUsages(CouponUsage usage) {
         return couponUsageRepository.findByOrderNoForUpdate(usage.getUserId(), usage.getOrderNo());
+    }
+
+    /**
+     * 只保留与目标券同租户的占用单（L75 审查 C5）。
+     *
+     * <p>{@code coupon_usage} 没有 {@code app_id} 列，分片键只有 {@code user_id}——
+     * 两个租户各自命名空间里的同一个 userId 用了同一个订单号时，两边的占用单会落在
+     * 同一张物理分表并被同一条订单锁查询捞出来。目标券那一行直接采信；其余行按
+     * {@code user_coupon.app_id} 过滤。兄弟券数量=叠加层数（个位数），
+     * 这里用点查换正确性，不做跨表 JOIN。
+     */
+    private List<CouponUsage> sameTenantUsages(List<CouponUsage> orderUsages,
+                                               CouponUsage target, String appId) {
+        List<CouponUsage> same = new ArrayList<>(orderUsages.size());
+        for (CouponUsage u : orderUsages) {
+            if (u.getUsageNo().equals(target.getUsageNo())) {
+                same.add(u);
+                continue;
+            }
+            UserCoupon sibling = userCouponRepository
+                    .findByIdForUser(u.getUserCouponId(), u.getUserId())
+                    .orElse(null);
+            if (sibling != null && appId.equals(sibling.getAppId())) {
+                same.add(u);
+            }
+        }
+        return same;
     }
 
     /**
@@ -552,14 +583,16 @@ public class TradeTxService {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
                     "占用单状态=" + usage.getStatus().getDesc() + "，仅核销异常可人工核销");
         }
-        assertNoAfterSales(orderUsages);
+        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
+                .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
+        // C5：同 user+orderNo 可能跨租户共存，售后/集合判定只认同租户的占用单
+        List<CouponUsage> tenantUsages = sameTenantUsages(orderUsages, usage, coupon.getAppId());
+        assertNoAfterSales(tenantUsages);
         // 人工核销的目标单正处于 CONFIRM_EXCEPTION，生效集合口径包含该状态
-        assertExpectedCouponSet(orderUsages, expectedCouponIds, true, true);
+        assertExpectedCouponSet(tenantUsages, expectedCouponIds, true, true);
         if (!couponUsageRepository.casConfirmFromException(usageNo, usage.getUserId(), discountAmt, now)) {
             throw new TradeCasRejectedException("usage-confirm-exception", usageNo);
         }
-        UserCoupon coupon = userCouponRepository.findByIdForUser(usage.getUserCouponId(), usage.getUserId())
-                .orElseThrow(() -> new BizException(ErrorCode.USER_COUPON_NOT_FOUND));
         if (coupon.getStatus() != CouponStatus.LOCKED) {
             throw new BizException(ErrorCode.USAGE_STATE_CONFLICT,
                     "券状态=" + coupon.getStatus().getDesc()

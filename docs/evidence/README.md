@@ -34,7 +34,7 @@
 
 | # | 证据件 | 一句话 | 关键数字 |
 |---|---|---|---|
-| 7 | [../open-api/openapi-v1.json](../open-api/openapi-v1.json) | OpenAPI v1 黄金基线（机器生成） | **23 条 path**；只含 `/open/v1/**`（泄漏防守用例钉住） |
+| 7 | [../open-api/openapi-v1.json](../open-api/openapi-v1.json) | OpenAPI v1 黄金基线（机器生成；C4 定向端点已再生成） | **28 条 path**；只含 `/open/v1/**`（泄漏防守用例钉住） |
 | 8 | [OpenApiContractIntegrationTest](../../src/test/java/com/newcoupon/integration/OpenApiContractIntegrationTest.java) + [OpenApiDriftComparator](../../src/test/java/com/newcoupon/integration/OpenApiDriftComparator.java) | "只增不改"契约门禁：基线再生成前先 diff，破坏性变更拒绝写文件 | **10 例**契约测试；比较器 **18 条破坏性规则**；自检 **33 条破坏变异逐条命中 + 17 条 additive 放行**；匿名拉 spec 401；默认组端点 404 |
 | 9 | [ops/prometheus](../../ops/prometheus/)（[README](../../ops/prometheus/README.md)） | SLO recording/alerting 规则 + promtool 行为测试 | **9 条 recording + 4 条 alerting**；`promtool check rules` 与 `promtool test rules` 两条命令均 **EXIT=0**（快烧/慢烧/断流/低流量/延迟劣化五组用例） |
 | 10 | [docs/operations/SLO.md](../operations/SLO.md) | 四链路 SLI/SLO 口径、错误预算政策与"不做"清单 | receive/calculate/confirm/refund 四链路；28 天滚动预算；>100% 冻结发布、单日 >20% postmortem；单实例声明 `ha="false"` |
@@ -53,8 +53,9 @@
 
 | # | 证据件 | 一句话 | 关键数字 |
 |---|---|---|---|
-| 16 | [L75ConfirmToctouIntegrationTest](../../src/test/java/com/newcoupon/integration/L75ConfirmToctouIntegrationTest.java) | confirm 事务内 TOCTOU 窗口攻击模拟（`@SpyBean` 在 prepareConfirm/复算返回后注入 sibling 释放/退款） | **6 例**；修复前 **4 例红**（T1/T2/T5/T6，窗口内释放/退款/旧式两条路径），修复后 **6/6 绿**；指定回归面 **55/55**（PricingSnapshot 14、Trade 8、OrderLevelConfirm 3、ConfirmByPlatform 4、Refund 15、LockTimeout 11），另跑其余 confirm 相关集成类 **80/80** |
-| 17 | [2026-11-06-L75红绿取证.md](2026-11-06-L75红绿取证.md) | L75 修复前后的命令输出、失败用例清单与回归面 | 红：**6 例 / 4 失败（EXIT=1）**；绿：**6/6（EXIT=0）**；回归 **55/55 + 80/80 + 22/22**；实现提交 `0a963bb`（事务内 `SELECT ... FOR UPDATE ... ORDER BY id`；锁后重校验目标状态/售后态/算券集合；管理面 `confirmFromException` 同享） |
+| 16 | [L75ConfirmToctouIntegrationTest](../../src/test/java/com/newcoupon/integration/L75ConfirmToctouIntegrationTest.java) | confirm 事务内 TOCTOU + 审查整改：窗口注入、两线程行锁、事务层幂等、跨租户、部分退款 | **10 例**；主体修复前 **4 例红**（T1/T2/T5/T6），修复后 6/6；审查后 T7 两线程行锁（摘 `FOR UPDATE` 变异红）、T8 事务层幂等（duplicated 后移变异红）、T9 部分退款（摘分支变异红）、T10 跨租户；最终 **10/10 绿**；指定回归面 **55/55**，其余 confirm 相关 **80/80** |
+| 17 | [2026-11-06-L75红绿取证.md](2026-11-06-L75红绿取证.md) | L75 主体 + 25-agent 审查整改（C1/C2/C3/C5/C6）的红/绿与变异自检全记录 | 红：**6 例 / 4 失败（EXIT=1）**；绿：**6/6**；审查后 **10/10**；变异自检 3 处（摘 `FOR UPDATE` / 后移 duplicated / 摘 PARTIALLY_REFUNDED）均先红后绿；回归 **55/55 + 80/80 + 22/22** |
+| 18 | [GrantTaskIntegrationTest](../../src/test/java/com/newcoupon/integration/GrantTaskIntegrationTest.java) + [BudgetIntegrationTest](../../src/test/java/com/newcoupon/integration/BudgetIntegrationTest.java) | C4 定向发放（grant_type=2）全链证据：发 N 张/幂等/越权/端点/预算 | 定向 4 例 + 预算 1 例；GrantTask 全类 **16/16**、Budget **11/11**；基线 25→**28 path**（仅新增 3 条定向路径） |
 
 ---
 

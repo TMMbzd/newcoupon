@@ -107,6 +107,9 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
     private final AtomicBoolean confirmBlockArmed = new AtomicBoolean(false);
     private final CountDownLatch confirmBlocked = new CountDownLatch(1);
     private final CountDownLatch confirmResume = new CountDownLatch(1);
+    /** 证明 B 真的走到了占用单 UPDATE（而不是还没启动就被判成“阻塞”） */
+    private final AtomicBoolean releaseProbeArmed = new AtomicBoolean(false);
+    private final CountDownLatch releaseAttempted = new CountDownLatch(1);
 
     @BeforeEach
     void installWindowHooks() {
@@ -140,6 +143,15 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
             return invocation.callRealMethod();
         }).when(couponUsageRepository).casConfirm(anyString(), anyLong(), anyLong(),
                 any(LocalDateTime.class));
+
+        // B 侧探针：信号发生在真正执行 UPDATE 之前；随后 callRealMethod 会在行锁上等待。
+        // 主线程先等这个信号，再断言“B 未完成”，排除“B 还没启动”的假绿。
+        doAnswer(invocation -> {
+            if (releaseProbeArmed.compareAndSet(true, false)) {
+                releaseAttempted.countDown();
+            }
+            return invocation.callRealMethod();
+        }).when(couponUsageRepository).casRelease(anyString(), anyLong(), any(LocalDateTime.class));
     }
 
     private record Setup(long userId, long shopCouponId, long platformCouponId) {
@@ -379,8 +391,11 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
             assertThat(confirmBlocked.await(30, TimeUnit.SECONDS))
                     .as("A 应到达“锁行之后、CAS 之前”的挂起点").isTrue();
 
+            releaseProbeArmed.set(true);
             Future<Res> release = pool.submit(() -> call(() ->
                     tradeAppService.release(new ReleaseRequest(f.platformUsageNo(), "并发释放"))));
+            assertThat(releaseAttempted.await(20, TimeUnit.SECONDS))
+                    .as("B 应已到达占用单 UPDATE（排除“B 还没启动”的假绿）").isTrue();
             Thread.sleep(500);
             assertThat(release.isDone())
                     .as("B 必须被 A 持有的订单占用单行锁阻塞"
@@ -417,4 +432,61 @@ class L75ConfirmToctouIntegrationTest extends ShardedIntegrationTestSupport {
         assertThat(usageStatus(f.platformUsageNo())).isEqualTo(UsageStatus.CONFIRMED);
     }
 
+    @Test
+    @DisplayName("T9: 窗口内 sibling 被部分退款 → confirm 拒绝（4002 售后态），目标单保持占用中")
+    void siblingPartialRefundInWindowRejectsSnapshotConfirm() {
+        Fixture f = lockBothWithSnapshot("PART", 2);
+        assertThat(tradeAppService.confirm(new ConfirmRequest(
+                f.platformUsageNo(), null, null, f.pricingId())).duplicated()).isFalse();
+        windowAction = () -> tradeAppService.refund(new RefundRequest(
+                f.platformUsageNo(), "RF-L75-PARTIAL", List.of(new RefundItem("L1", 1))));
+        windowArmed.set(true);
+
+        assertThatThrownBy(() -> tradeAppService.confirm(new ConfirmRequest(
+                f.shopUsageNo(), null, null, f.pricingId())))
+                .as("部分退款也是售后（状态机 checkConfirmable 同口径）")
+                .isInstanceOf(BizException.class)
+                .hasMessageContaining("已进入售后")
+                .extracting(e -> ((BizException) e).getErrorCode())
+                .isEqualTo(ErrorCode.STATE_CONFLICT);
+
+        assertThat(windowArmed).as("窗口注入钩子确实触发过").isFalse();
+        assertThat(usageStatus(f.platformUsageNo())).isEqualTo(UsageStatus.PARTIALLY_REFUNDED);
+        assertThat(usageStatus(f.shopUsageNo())).isEqualTo(UsageStatus.OCCUPYING);
+    }
+
+    @Test
+    @DisplayName("T10: 跨租户同 user+orderNo 不误杀——A 租户退款不影响 B 租户旧式核销")
+    void crossTenantSameUserAndOrderDoesNotBlockLegacyConfirm() {
+        long userId = System.nanoTime();
+        String orderNo = "ORD-L75-XT-" + userId;
+        long aCoupon;
+        String aUsage;
+        RequestContext.set(new RequestContext("tenant-A", "xt-a", Long.MAX_VALUE, false));
+        try {
+            aCoupon = issueCoupon("A-" + userId, userId);
+            aUsage = tradeAppService.lock(new LockRequest(orderNo, userId, aCoupon)).usageNo();
+            assertThat(tradeAppService.confirm(
+                    new ConfirmRequest(aUsage, 500L)).duplicated()).isFalse();
+            tradeAppService.refund(new RefundRequest(aUsage, "RF-XT-A-" + userId, null));
+        } finally {
+            RequestContext.clear();
+        }
+
+        long bCoupon;
+        String bUsage;
+        RequestContext.set(new RequestContext("tenant-B", "xt-b", Long.MAX_VALUE, false));
+        try {
+            bCoupon = issueCoupon("B-" + userId, userId);
+            bUsage = tradeAppService.lock(new LockRequest(orderNo, userId, bCoupon)).usageNo();
+            // 同 user_id+order_no 落到同一物理分表：A 的 REFUNDED 行会出现在锁集合里。
+            // coupon_usage 没有 app_id，必须按目标券归属过滤，否则 B 的旧式核销被误杀 4002。
+            assertThat(tradeAppService.confirm(
+                    new ConfirmRequest(bUsage, 500L)).duplicated()).isFalse();
+        } finally {
+            RequestContext.clear();
+        }
+        assertThat(usageStatus(aUsage)).isEqualTo(UsageStatus.REFUNDED);
+        assertThat(usageStatus(bUsage)).isEqualTo(UsageStatus.CONFIRMED);
+    }
 }
