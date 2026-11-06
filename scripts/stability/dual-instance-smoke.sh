@@ -129,8 +129,7 @@ create_and_publish_template() {   # $1=port → stdout: templateId
     -H 'Content-Type: application/json' -H "X-Admin-Token: $ADMIN_TOKEN" \
     -d "{\"name\":\"DUAL-SMOKE-$RUN_ID\",\"activityId\":900160,\"couponType\":1,
          \"faceValue\":100,\"threshold\":1000,\"totalCount\":10000,\"perUserLimit\":1,
-         \"validType\":1,\"validStart\":\"2026-11-01T00:00:00\",
-         \"validEnd\":\"2026-12-31T23:59:59\",\"dailyLimit\":0,\"perUserDailyLimit\":0}")
+         \"validType\":2,\"validDays\":7,\"dailyLimit\":0,\"perUserDailyLimit\":0}")
   tpl=$(printf '%s' "$resp" | json_get '["data"]["id"]' 2>/dev/null) \
     || fail "建模板失败：$resp"
   curl -sS -X POST "http://127.0.0.1:$port/api/templates/$tpl/publish" \
@@ -195,6 +194,7 @@ python3 -I "$SCRIPT_DIR/dual_instance_client.py" \
   --stop-file "$STOP_FILE" \
   --user-base "$((990000000000 + RUN_ID % 100000 * 1000))" \
   --request-prefix "dual-smoke-$RUN_ID" \
+  --max-seconds 900 \
   --output "$CLIENT_JSON" \
   > "$CLIENT_LOG" 2>&1 &
 CLIENT_PID=$!
@@ -251,6 +251,7 @@ MIDFLIGHT=$(json_field "$CLIENT_JSON" 'd["midflightResets"]')
 HTTP5XX=$(json_field "$CLIENT_JSON" 'd["http5xx"]')
 BIZERR=$(json_field "$CLIENT_JSON" 'd["bizErrors"]')
 BOTHDOWN=$(json_field "$CLIENT_JSON" 'd["bothEndpointsDown"]')
+STOP_SEEN=$(json_field "$CLIENT_JSON" 'd["stopFileSeen"]')
 A_OK=$(json_field "$CLIENT_JSON" "d['perEndpointSuccess'].get('http://127.0.0.1:$PORT_A', 0)")
 B_OK=$(json_field "$CLIENT_JSON" "d['perEndpointSuccess'].get('http://127.0.0.1:$PORT_B', 0)")
 
@@ -259,6 +260,10 @@ ok "按实例成功数：A=$A_OK B=$B_OK"
 
 assert_true "流量覆盖足够（请求数 $REQUESTS >= 100）" \
     "$([[ "$REQUESTS" -ge 100 ]] && echo 1 || echo 0)"
+# 客户端因 max-seconds 提前退出时，stopFileSeen=false——那说明滚动重启还没结束
+# 流量就断了，后面的"零 5xx"只是覆盖了前半段，不能算 PASS。
+assert_true "客户端正常看到停机标记（stopFileSeen=$STOP_SEEN；不是 max-seconds 提前退出）" \
+    "$([[ "$STOP_SEEN" == "True" || "$STOP_SEEN" == "true" ]] && echo 1 || echo 0)"
 assert_true "两个实例都实际服务过请求（A=$A_OK, B=$B_OK）" \
     "$([[ "$A_OK" -gt 0 && "$B_OK" -gt 0 ]] && echo 1 || echo 0)"
 assert_true "滚动重启期间发生过至少一次流量迁移（failover=$FAILOVERS > 0）" \
