@@ -13,9 +13,26 @@ services:
       MYSQL_ROOT_PASSWORD: root123456
       MYSQL_DATABASE: newcoupon
       TZ: Asia/Shanghai
+    # binlog 参数（V6 5C 刀 B2：binlog 归档 + PITR 的前提）——显式钉住四个值，
+    # 不裸奔在 MySQL 8.0 默认上（8.0 默认 log_bin=ON/ROW/server_id=1/sync_binlog=1，
+    # 但默认 binlog 文件基名是 binlog.*；这里定为 mysql-bin.*，归档脚本按它取文件）：
+    #   --log-bin=mysql-bin       开 binlog，文件基名 mysql-bin.NNNNNN
+    #   --binlog-format=ROW       行级（PITR 重放安全：重放的是行变更不是 SQL 文本）
+    #   --server-id=1             binlog 必需（GTID 未开——单机最简配置，与生产的差距
+    #                             见 scripts/backup/README.md）
+    #   --sync-binlog=1           每次提交 fsync binlog（掉电不丢已提交事件；RPO 口径
+    #                             里"事务提交即可恢复"靠它）
+    # ⚠ 对既有容器的影响：command 变更 = 容器**重建**（docker compose up -d mysql 会
+    #   recreate），不是原地升级。数据在 named volume mysql-data 里不受影响（2026-11-10
+    #   实测：重建前后表数/关键行数一致，见 docs/evidence/2026-11-10-PITR演练.md §2）；
+    #   但旧基名的 binlog.* 文件留在卷里不进新序列（新序列从 mysql-bin.000001 起）。
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --server-id=1
+      - --sync-binlog=1
     ports:
       - "3306:3306"
     volumes:
