@@ -14,6 +14,19 @@ import org.springframework.stereotype.Component;
  * {@code POST /internal/admin/drain} 置位后，本指示器让 /actuator/health 的聚合状态变
  * DOWN（HTTP 503）；undrain 或进程重启后回 UP。仅此而已——不拒绝请求、不断连接。
  *
+ * <p><b>两条部署口径（审查 m3，别混）</b>：
+ * <ul>
+ *   <li><b>nginx（本演练，ops/nginx/）</b>：探测聚合口 /actuator/health——drain 让聚合
+ *       状态 DOWN → 503，nginx 被动摘除生效。这是**现行单机演练的可用语义**，
+ *       不依赖 health 分组配置；</li>
+ *   <li><b>K8s（部署形态）</b>：走 readiness 分组（application.yml 配了
+ *       {@code group.readiness.include: readinessState,drain}——drain 参与 readiness）；
+ *       **liveness 分组不含 drain**：摘流量是"把我请出 LB"，不是"我该被重启"——
+ *       liveness 被 drain 打红会让 K8s 重启一个被主动摘除的实例，摘除变成复活，
+ *       恰是反语义。注意：若不在 K8s 里且没配分组，聚合口 503 会同时打红
+ *       "liveness 式"的探测——所以 K8s 部署必须用分组端点而不是聚合口摘流量。</li>
+ * </ul>
+ *
  * <p><b>为什么用 health 503 摘流量，而不是直接关监听端口</b>：
  * <ul>
  *   <li>LB 的摘除依据就是健康检查（nginx 被动摘除 / K8s readiness / HAProxy check）。

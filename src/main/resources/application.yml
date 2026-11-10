@@ -324,6 +324,21 @@ management:
   endpoint:
     health:
       show-details: never        # 健康详情不对外暴露（含中间件拓扑，属于敏感信息）
+      # K8s 探针口径（V6 5B 刀 A 审查 m3）：显式打开 availability 探针贡献者
+      # （livenessState/readinessState）——不在 K8s 里跑也生成 /actuator/health/{liveness,readiness}
+      # 两个分组端点，部署形态的语义先在单机演练里钉住。
+      probes:
+        enabled: true
+      # readiness 组 = readinessState + drain：**摘流量只打红 readiness 不打红 liveness**。
+      # drain 是"把我请出 LB"，不是"我该被重启"——K8s 下 liveness 若被 drain 打红，
+      # 摘除会变成"重启复活"，恰是反语义；liveness 组因此显式只含 livenessState。
+      # nginx 演练（ops/nginx/）探测的是聚合口 /actuator/health（DOWN→503），
+      # 与 readiness 组同向——两条部署形态共用同一个 drain 标志。
+      group:
+        readiness:
+          include: readinessState,drain
+        liveness:
+          include: livenessState
 
 logging:
   level:
