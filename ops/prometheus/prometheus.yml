@@ -1,0 +1,33 @@
+# Prometheus 抓取配置（V6 5C 生产化模拟刀 B1）——compose profile `observe` 专用。
+# 规则三件套（slo-recording / slo-alerts / tests）仍是本目录主角，本文件只是把它们
+# 挂进一个真实跑起来的 Prometheus（5A 时代只做 promtool 离线校验，B1 补上在线形态）。
+#
+# 凭据说明（docs/runbook/管理面认证翻面.md §4）：自 2A-2 起 /actuator/prometheus 要
+# Basic。Prometheus 配置文件**不支持环境变量展开**，所以密码不写在这里，而是用
+# basic_auth_password_file 指向 /tmp/basic-auth-password——该文件由 compose 里
+# prometheus 服务的启动命令从环境变量 ACTUATOR_AUTH_PASSWORD 写出（密码不进 git）。
+# 用户名不是机密，直接写死 actuator；若应用侧 ACTUATOR_AUTH_USER 不是它，改这里。
+
+global:
+  # 15s 与 5A README"挂载进已有 Prometheus"给出的样例一致：SLI 事件是低速率计数器，
+  # 15s 足够；更密的抓取只是白耗内存（WSL2 预算见 ops/grafana/README.md）。
+  scrape_interval: 15s
+  # 规则组自带 interval: 1m（见 slo-recording.rules.yml groups），这里的全局值兜底
+  evaluation_interval: 1m
+
+rule_files:
+  # 5A 的 recording/alerting 规则原样挂载（compose 把两个文件挂到 /etc/prometheus/rules/）
+  - /etc/prometheus/rules/slo-recording.rules.yml
+  - /etc/prometheus/rules/slo-alerts.rules.yml
+
+scrape_configs:
+  - job_name: newcoupon
+    scrape_interval: 15s
+    metrics_path: /actuator/prometheus
+    basic_auth:
+      username: actuator
+      password_file: /tmp/basic-auth-password
+    static_configs:
+      # 应用在宿主机（make run / 演练脚本起的 java，8080）。容器访问宿主走
+      # host.docker.internal（compose 里 extra_hosts: host-gateway 映射，Linux Docker 必需）。
+      - targets: ['host.docker.internal:8080']

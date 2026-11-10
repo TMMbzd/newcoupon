@@ -99,6 +99,73 @@ services:
     volumes:
       - ./ops/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
 
+  # ---------- V6 5C 生产化模拟刀 B1：观测栈（Prometheus + Grafana，profile observe） ----------
+  # 默认不起（不带 --profile observe 时这两个服务不存在）；起停/内存预算见 ops/grafana/README.md。
+  # 拓扑：应用跑在**宿主机**（make run / 演练脚本，8080），prometheus 容器经
+  # host.docker.internal 抓 /actuator/prometheus——自 2A-2 起该端点要 Basic
+  # （docs/runbook/管理面认证翻面.md §4），凭据经环境变量传入，不进 git：
+  #   ACTUATOR_AUTH_USER / ACTUATOR_AUTH_PASSWORD —— 与应用启动时的同名变量同源。
+  # prometheus.yml 用 basic_auth_password_file 引密码文件；prometheus 配置本身不支持
+  # 环境变量展开，密码文件由容器启动命令从环境变量写出（见下方 command）。
+  prometheus:
+    image: prom/prometheus:latest   # 本机已就位 = v3.15.1；规则三件套的 promtool 校验用的就是它
+    container_name: newcoupon-prometheus
+    restart: unless-stopped
+    profiles: ["observe"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # 凭据：环境变量 ACTUATOR_AUTH_PASSWORD 优先（真实部署走它，密码不进 git）；
+    # 缺省回落仓库惯例 dev 凭据 it-actuator-pass（与演练脚本/SecurityRbacIntegrationTest
+    # 同款默认，见 scripts/stability/lb-rolling-drill.sh）。曾有教训（2026-11-10 B1 首跑）：
+    # 若这里 default 留空，任何一次没带环境变量的 compose up 都会把容器重建成无凭据
+    # 崩溃循环——缺省 dev 凭据让 `--profile observe up` 永远可跑，生产再显式覆盖。
+    environment:
+      ACTUATOR_AUTH_PASSWORD: ${ACTUATOR_AUTH_PASSWORD:-it-actuator-pass}
+    # 镜像默认 ENTRYPOINT 是 /bin/prometheus，这里改用 sh 包装（先从环境变量写出
+    # 密码文件再 exec prometheus），所以 entrypoint 必须一并覆盖
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        printf '%s' "$${ACTUATOR_AUTH_PASSWORD:?}" > /tmp/basic-auth-password
+        exec prometheus --config.file=/etc/prometheus/prometheus.yml \
+          --storage.tsdb.retention.time=15d --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/slo-recording.rules.yml:/etc/prometheus/rules/slo-recording.rules.yml:ro
+      - ./ops/prometheus/slo-alerts.rules.yml:/etc/prometheus/rules/slo-alerts.rules.yml:ro
+      # TSDB 落 named volume：容器重建（compose up 对配置漂移的默认动作）不丢数据——
+      # 2026-11-10 B1 首跑就丢过一次取证窗口
+      - prometheus-data:/prometheus
+    mem_limit: 256m
+
+  # Grafana：数据源与大盘走 provisioning（进 git 的声明式配置，容器起来即就绪，
+  # 不在 UI 里手工点）——数据源 ops/grafana/provisioning/datasources/prometheus.yml，
+  # 大盘 ops/grafana/slo-dashboard.json（SLO 盘，面板清单见其 README）。
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: newcoupon-grafana
+    restart: unless-stopped
+    profiles: ["observe"]
+    depends_on:
+      - prometheus
+    environment:
+      # 本地演练便利默认 admin/admin；生产/对外暴露时用 GRAFANA_ADMIN_PASSWORD 覆盖
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      # 只挂数据源/大盘两个子目录（不整目录盖掉 /etc/grafana/provisioning——
+      # 那会把镜像自带的 plugins/ alerting/ 子目录遮没，启动日志报错）
+      - ./ops/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./ops/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./ops/grafana/slo-dashboard.json:/var/lib/grafana/dashboards/slo-dashboard.json:ro
+    mem_limit: 256m
+
 volumes:
   mysql-data:
   redis-data:
+  prometheus-data:

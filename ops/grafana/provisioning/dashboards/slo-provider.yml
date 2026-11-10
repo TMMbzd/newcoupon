@@ -1,0 +1,13 @@
+# Grafana 大盘 provisioning（V6 5C 刀 B1）：从 /var/lib/grafana/dashboards 加载
+# JSON（compose 把 ops/grafana/slo-dashboard.json 挂到那里）。大盘进 git、provisioning
+# 进 git——观测形态对仓库可见，换机器 compose up 即得同一张盘，不依赖任何 UI 操作。
+apiVersion: 1
+
+providers:
+  - name: slo
+    folder: SLO
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

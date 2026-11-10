@@ -1,0 +1,14 @@
+# Grafana 数据源 provisioning（V6 5C 刀 B1）：容器起来即指向同 profile 的 prometheus，
+# 不在 UI 手工配。uid 固定为 prometheus——大盘 JSON 里的 datasource 引用写的就是它
+# （{"type":"prometheus","uid":"prometheus"}），两边一处改要同步另一处。
+apiVersion: 1
+
+datasources:
+  - name: prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    # compose 网络内的服务名互访（与 prometheus 容器同 profile 同网络）
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
