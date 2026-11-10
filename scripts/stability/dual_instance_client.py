@@ -164,7 +164,10 @@ def main():
                     counters["biz_errors"] += 1
                 break
             except ConnectFailed:
-                if attempt == 0:
+                # 双端点：第一台连不上换另一台（failover）；单端点（经 LB）没有
+                # "另一台"——连不上就是 LB 不可达，直接计入 both_down（否则这个
+                # 计数器在 LB 模式下结构性恒零，"LB 不可达=0" 断言就成了空话）
+                if attempt == 0 and len(endpoints) > 1:
                     connect_failures += 1
                     continue        # 换另一台
                 counters["connect_errors_both_down"] += 1
@@ -184,6 +187,10 @@ def main():
             counters["failovers"] += 1
 
         if result is None:
+            # 哪台都没打成（双端点双连不上 / LB 连不上）：与下面的失败退避同款——
+            # 不退避的话"连接秒失败"会让单线程客户端自旋（实测 ~950 rps），
+            # 把一次几秒的故障放大成每秒近千请求的洪峰
+            time.sleep(0.1)
             continue
 
         status, biz, label, served_by = result

@@ -53,6 +53,7 @@ RUN_ID="$(date +%s)"
 STOP_FILE="$LOGDIR/lb-drill-$RUN_ID.stop"
 PROBE_STOP_FILE="$LOGDIR/lb-drill-$RUN_ID.probe-stop"
 PROBE_PAUSE_FILE="$LOGDIR/lb-drill-$RUN_ID.probe-pause"
+PROBE_ACK_FILE="$LOGDIR/lb-drill-$RUN_ID.probe-ack"
 CLIENT_JSON="$LOGDIR/lb-drill-$RUN_ID.json"
 CLIENT_LOG="$LOGDIR/lb-drill-$RUN_ID-client.log"
 PROBE_LOG="$LOGDIR/lb-drill-$RUN_ID-probes.log"
@@ -97,7 +98,7 @@ cleanup() {
   [[ -n "$PROBE_PID" ]] && kill -TERM "$PROBE_PID" 2>/dev/null || true
   stop_pid "$PID_A" "实例 A" || true
   stop_pid "$PID_B" "实例 B" || true
-  rm -f "$STOP_FILE" "$PROBE_STOP_FILE" "$PROBE_PAUSE_FILE"
+  rm -f "$STOP_FILE" "$PROBE_STOP_FILE" "$PROBE_PAUSE_FILE" "$PROBE_ACK_FILE"
   if [[ "$NGINX_STARTED" == "1" ]]; then
     ( cd "$REPO_DIR" && docker compose --profile "$NGINX_PROFILE" stop nginx ) >/dev/null 2>&1 || true
   fi
@@ -165,29 +166,41 @@ lb_probe_once() {
     | tr -d '\r' | awk 'tolower($1)=="x-served-by:"{$1=""; print substr($0,2)}'
 }
 
+# 暂停后台探针并**等在途探针静止**（审查 m2）：touch 暂停文件本身不追已派发的
+# 在途探针——host-gateway 的 0.25% 停滞探针（curl 挂十几秒）可能在暂停生效后才
+# 完成，它的 503 重试会抢走"失败标记权"，让 wait_lb_marked 25s 假红。
+# 判定依据 ACK 文件：probe_loop 是单线程循环（一次只有一个 curl），它在暂停分支
+# 里 touch ACK = 上一个探针已完整结束且循环已让路——此刻起 health 流量只剩
+# 本函数自己的探针，标记权确定归它。
+pause_probes_and_wait_quiescent() {
+  local i
+  rm -f "$PROBE_ACK_FILE"
+  touch "$PROBE_PAUSE_FILE"
+  for i in $(seq 1 100); do    # 20s 上界：盖住 max-time 15s 的在途探针 + 1s 间隔
+    [[ -f "$PROBE_ACK_FILE" ]] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
 # 等 LB 记下失败（出池证据）：本函数探针的 X-Served-By 出现"尝试列表"——即被摘
 # 实例被咨询过、503 了、探针被重试到存活实例。max_fails=1：这一次失败就把它标记
-# 出池 fail_timeout（30s）。
+# 出池 fail_timeout（120s）。
 #
-# **进入本函数先暂停后台探针**（PROBE_PAUSE_FILE）：health 请求只有本函数在发，
-# "标记失败"必然出自本函数自己的探针、必然被本函数观察到重试列表——判定从
-# 概率性变成确定性。不暂停的竞态（2026-11-10 首跑实测，roll B 假红）：后台探针
-# 抢先打到被摘实例完成了标记，本函数的探针就永远只打到存活实例（单地址响应），
-# 25 秒等不到重试列表。业务流量不受暂停影响照常跑（打到被摘实例的业务请求 200，
-# 不参与标记也不被标记）。
+# **前置**：调用方必须已 pause_probes_and_wait_quiescent（drain 前就暂停，见
+# roll_instance）——否则后台探针抢先打到被摘实例完成标记（2026-11-10 前两轮实测
+# 假红），本函数的探针就永远只看到单地址响应。业务流量不受暂停影响照常跑
+# （打到被摘实例的业务请求 200，不参与标记也不被标记）。
 wait_lb_marked() {   # $1=端口 $2=名称
   local port="$1" name="$2" hdr
-  touch "$PROBE_PAUSE_FILE"
   for _ in $(seq 1 25); do
     hdr=$(lb_probe_once)
     if [[ "$hdr" == *", "* && "$hdr" == *":$port"* ]]; then
-      rm -f "$PROBE_PAUSE_FILE"
-      ok "LB 已对 $name 计失败并出池 30s（探针尝试列表：$hdr）"
+      ok "LB 已对 $name 计失败并出池 120s（探针尝试列表：$hdr）"
       return 0
     fi
     sleep 1
   done
-  rm -f "$PROBE_PAUSE_FILE"
   return 1
 }
 
@@ -219,10 +232,11 @@ confirm_removed_distribution() {   # $1=端口 $2=名称
 
 # 等 LB 回池：轮询业务 GET 直到**实际服务者**（X-Served-By 末项）是被等实例且 200。
 # 不能用整列表判断：重启失败期间的请求列表是"A, B"（A 连不上被重试到 B），
-# 末项才是真正服务的实例。
+# 末项才是真正服务的实例。240s 上界 = fail_timeout 120s（池内禁令全程）+ 重启
+# 启动/健康 ~60s + 余量——禁令期内实例不会被路由，回池最早发生在标记+120s。
 wait_lb_rejoined() {   # $1=端口 $2=名称
   local port="$1" name="$2" line code served last
-  for _ in $(seq 1 90); do
+  for _ in $(seq 1 240); do
     line=$(lb_ping_once)
     code=$(awk '{print $1}' <<<"$line")
     served=$(awk '{print $2}' <<<"$line")
@@ -326,12 +340,17 @@ ok "模板已发布：$TPL_ID（经 $LB）"
 
 # ---------------------------------------------------------------- 流量与探针
 step "3. 开始持续领券流量（经 LB）+ 每秒健康探针（模拟 LB 主动探测）"
-rm -f "$STOP_FILE" "$PROBE_STOP_FILE" "$PROBE_PAUSE_FILE" "$PROBE_LOG"
+rm -f "$STOP_FILE" "$PROBE_STOP_FILE" "$PROBE_PAUSE_FILE" "$PROBE_ACK_FILE" "$PROBE_LOG"
 probe_loop() {
   local code
   while [[ ! -f "$PROBE_STOP_FILE" ]]; do
-    # wait_lb_marked 打开暂停闸时让路：health 探测的"失败标记权"归它独占（见该函数注释）
-    if [[ -f "$PROBE_PAUSE_FILE" ]]; then sleep 0.2; continue; fi
+    # 暂停闸打开时让路并 touch ACK：probe_loop 单线程（一次只有一个 curl），
+    # 走到这里 = 上一个探针已完整结束——pause_probes 用 ACK 判定"在途探针已静止"
+    if [[ -f "$PROBE_PAUSE_FILE" ]]; then
+      : > "$PROBE_ACK_FILE"
+      sleep 0.2
+      continue
+    fi
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$LB/actuator/health" || echo 000)
     printf '%s %s\n' "$(date +%s%3N)" "$code" >> "$PROBE_LOG"
     sleep 1
@@ -361,22 +380,28 @@ roll_instance() {   # $1=端口 $2=名称 $3=pid变量名（nameref）
   local port="$1" name="$2" t0 t1 stop_ms
 
   warn "── 滚动 $name：drain → 确认出池 → SIGTERM → 重启 → 回池 ──"
-  # 暂停后台探针要**早于 drain**：后台探针在 drain 与暂停之间的空档抢先打到
-  # 503 的话，"失败标记"就归了它，wait_lb_marked 自己的探针永远观察不到重试
-  # 列表（两轮实跑 roll B 都栽在这个空档）。从 drain 前就暂停，health 流量
-  # 全程只有 wait_lb_marked 自己的探针，标记权确定归它。
-  touch "$PROBE_PAUSE_FILE"
+  # 暂停后台探针要**早于 drain**（且等在途探针静止，见 pause_probes 注释）：
+  # 否则后台探针在空档里抢先打到 503，"失败标记"归了它，wait_lb_marked 自己的
+  # 探针永远观察不到重试列表（2026-11-10 前两轮实跑 roll B 假红的根因）。
+  assert_true "后台探针已暂停且在途探针静止（ACK 收到）" \
+      "$(pause_probes_and_wait_quiescent && echo 1 || echo 0)"
   drain_instance "$port" "$name"
   assert_true "$name drain 后实例侧 health=503" \
       "$(wait_drained "$port" && echo 1 || echo 0)"
   assert_true "LB 对 $name 计失败出池（观察到 503 重试列表）" \
       "$(wait_lb_marked "$port" "$name" && echo 1 || echo 0)"
+  rm -f "$PROBE_PAUSE_FILE"   # 标记完成，探针恢复（出池 120s 窗口内不会打扰判定）
   confirm_removed_distribution "$port" "$name"
 
   t0=$(date +%s%3N)
   if stop_pid "$pid_ref" "$name"; then local graceful=1; else local graceful=0; fi
   t1=$(date +%s%3N); stop_ms=$((t1 - t0))
   assert_true "$name SIGTERM 后在 35s 内优雅退出（实际 ${stop_ms}ms）" "$graceful"
+  # 等待点核实（审查 M2②）：stop_pid 上面已经**等进程完全消失**才返回（kill -0
+  # 轮询至进程退出，非只发信号）；这里再钉一道端口级断言——进程退出=监听socket
+  # 关闭，"端口还开着但 Tomcat paused"的 graceful 尾窗从此刻起不可能出现在路径上。
+  assert_true "$name 进程退出后端口 :$port 已关闭（重启前不存在 paused 尾窗）" \
+      "$(ss -ltn 2>/dev/null | grep -q ":$port " && echo 0 || echo 1)"
 
   pid_ref=$(start_app "$port" "lbdrill-$(tr 'A-Z' 'a-z' <<<"$name")" "$LOGDIR/lb-$name.log")
   wait_health "$port" "$name" "$pid_ref"
