@@ -312,12 +312,15 @@ step "1. 起 nginx（profile $NGINX_PROFILE）与两个实例"
 ( cd "$REPO_DIR" && docker compose --profile "$NGINX_PROFILE" up -d nginx ) \
   || fail "nginx 起不来（看 docker compose 输出；配置 ops/nginx/nginx.conf）"
 NGINX_STARTED=1
-# nginx 本身秒起；等它开始应答（后端没起时回 502，只证明监听已就绪）
-for _ in $(seq 1 20); do
-  curl -s -o /dev/null --max-time 2 "$LB/actuator/health" && break
+# nginx 的就绪等待**只看宿主侧端口**，绝不能经 LB 发探测：后端没起时端口关闭是
+# RST 秒拒，一次探测就把两台都"被动标记"（fail_timeout=120s 禁令）——实例起来后
+# 仍在禁令期内，后续"LB 可路由"断言必红（run6 实测假红；30s 窗口时代靠实例
+# 启动比禁令到期慢而侥幸掩盖）。
+for _ in $(seq 1 40); do
+  ss -ltn 2>/dev/null | grep -q ":$NGINX_PORT " && break
   sleep 0.5
 done
-curl -s -o /dev/null --max-time 2 "$LB/actuator/health" || fail "nginx 没有在 $LB 监听"
+ss -ltn 2>/dev/null | grep -q ":$NGINX_PORT " || fail "nginx 没有在宿主侧监听 :$NGINX_PORT"
 
 PID_A=$(start_app "$PORT_A" "lbdrill-a" "$LOGDIR/lb-A.log")
 wait_health "$PORT_A" "A" "$PID_A"
@@ -330,8 +333,17 @@ ok "实例 B 已就绪（:$PORT_B, worker-id=$WID_B）"
 assert_true "两个实例都通过健康检查" 1
 assert_true "两个实例的 Snowflake workerId 不同（A=$WID_A, B=$WID_B）" \
     "$([[ "$WID_A" != "$WID_B" ]] && echo 1 || echo 0)"
-assert_true "LB 视角两实例都可路由（探针 200）" \
-    "$( [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$LB/actuator/health")" == "200" ]] && echo 1 || echo 0)"
+
+# 这是本演练**第一条**经 LB 的请求（此后 LB 才第一次接触后端）。轮询至 200：
+# 单次 straggler 停滞会被 nginx 重试绕开（客户端见 200），双停滞的极端情形由
+# 脚本侧重试吸收——不把它当断言失败。
+for _ in $(seq 1 15); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$LB/actuator/health" || echo 000)
+  [[ "$code" == "200" ]] && break
+  sleep 1
+done
+assert_true "LB 视角两实例都可路由（首探针 200）" \
+    "$([[ "$code" == "200" ]] && echo 1 || echo 0)"
 
 # ---------------------------------------------------------------- 准备模板（经 LB）
 step "2. 经 LB 建并发布模板（顺带验证 LB 的 POST 通路）"

@@ -24,11 +24,14 @@
 |---|---|---|---|
 | 3 | [2026-11-06-MySQL故障演练.md](2026-11-06-MySQL故障演练.md) | MySQL 硬故障（`docker stop`）+ 恢复自愈 + Redis 复跑 | MySQL **DRILL PASS assertions=21**：故障期同步/异步/核销 5000、熔断 OPEN、恢复 code=0、10 请求零落券零任务、库存守恒；Redis **DRILL PASS assertions=14**：异步 5001、故障期同步 2/2 成功、fail-open/reject 计数可见 |
 | 4 | [2026-11-06-双实例冒烟.md](2026-11-06-双实例冒烟.md) | 两实例共享 MySQL/Redis，滚动重启 A/B | **DRILL PASS assertions=18**；**1056/1056 成功**、failover **444**、**5xx 0 / 在途 reset 0 / 业务失败 0**、`stopFileSeen=true`；A/B 优雅停机 **311 ms / 311 ms**；库存守恒 |
+| 4b | [2026-11-10-经LB滚动重启演练.md](2026-11-10-经LB滚动重启演练.md) | 生产形态刀 A：nginx 入口 + drain 摘流量，经 LB 全链路滚动重启（run7，审查修复后重跑） | **DRILL PASS assertions=30**；**9966/9966 成功**、**5xx 0 / 在途 reset 0 / 业务失败 0 / LB 不可达 0**；A=4754/B=5212；**探针 230 次全 200**；A/B 优雅停机 **207/208 ms**；readiness 503/liveness 200；库存守恒；附五轮假红排障与 host-gateway 停滞实测（~0.25%） |
 | 5 | [2026-11-06-备份恢复演练.md](2026-11-06-备份恢复演练.md) | 逻辑备份 + 恢复到 `newcoupon_restore` + 20 条断言 | dump **1.918 s**（305 表 / 24.78 MB / 14876 张券）；restore **44.784 s**；verify **5.613 s**；**RTO 50.397 s**；**RESTORE PASS assertions=20**（基准=dump 时刻 `.meta`，不做源库对比；导入前断言 dump 内嵌库名防误伤源库） |
 | 6 | [2026-11-06-运维实证汇总.md](2026-11-06-运维实证汇总.md) | 四件套的汇总索引 + 裁剪登记 + 审查反驳核实 | 四件证据索引、脚本清单、11 项裁剪/未认证项、5 项审查反驳核实结论 |
 
 复跑入口：`scripts/stability/mysql-outage-drill.sh`、`scripts/open-api/drill.sh`（Redis）、
-`scripts/stability/dual-instance-smoke.sh`、`scripts/backup/{backup,restore}.sh`。
+`scripts/stability/dual-instance-smoke.sh`、`scripts/stability/lb-rolling-drill.sh`（经 LB 滚动重启）、
+`scripts/stability/host-gateway-stall-probe.sh`（容器→宿主通道停滞率探测）、
+`scripts/backup/{backup,restore}.sh`。
 
 ## 3. 契约与门禁
 

@@ -42,7 +42,7 @@ curl -sD - -o /dev/null http://127.0.0.1:8080/actuator/health | grep -i x-served
 | 配置 | 值 | 为什么 |
 |---|---|---|
 | upstream 地址 | `host.docker.internal:1809x` | Linux Docker 没有这个自动解析，compose 里 `extra_hosts: host.docker.internal:host-gateway` 把它指到宿主网关（2026-11-10 实测容器→宿主 java 可达） |
-| 被动健康摘除 | `max_fails=1 fail_timeout=30s` | 开源 nginx 无主动探测；drain 后实例 health 503，演练脚本每秒经 LB 打一次 health（模拟主动探测），失败一次即出池 30s。30s 与"drain→确认→SIGTERM→重启完成"整段窗口对齐 |
+| 被动健康摘除 | `max_fails=1 fail_timeout=120s` | 开源 nginx 无主动探测；drain 后实例 health 503，演练脚本每秒经 LB 打一次 health（模拟主动探测），失败一次即出池。120s 覆盖"标记→确认→SIGTERM→graceful≤30s→重启 15~60s→回池"真窗口（30s 会在 graceful 尾窗/启动中途放行，keepalive 缓存连接+禁令解除会让新 POST 打进 Tomcat paused 的实例）；取舍=真故障回池最迟 120s，注释见 nginx.conf |
 | **upstream keepalive** | `keepalive 16` + `Connection ""` | 生产最佳实践；在本机（WSL2 + Docker Desktop）另有硬理由，见下节"本机实测坑" |
 | `proxy_connect_timeout` | 10s | 见下节"本机实测坑"——吸收 host-gateway 的短暂停滞；死实例检测不受拖累（端口关闭是 RST 秒拒，且编排里 SIGTERM 前已 drain 摘除） |
 | `proxy_next_upstream` | `error timeout http_502 http_503 http_504`，**不开** `non_idempotent` | POST（领券）已发给后端就不重试——LB 层无从知道后端是否已受理，盲目重试造成双发；幂等性交给应用层 requestId 幂等键（有意识取舍）。连接阶段失败（未发出）仍换台，不构成双发 |
@@ -67,13 +67,17 @@ curl -sD - -o /dev/null http://127.0.0.1:8080/actuator/health | grep -i x-served
 
 ## 与演练脚本的关系
 
-- `lb-rolling-drill.sh`：起 A/B 两实例 → 起本 nginx → 经 8080 打流量与探测 →
-  滚动 drain/SIGTERM/重启 → 停 nginx 还原。
+- `lb-rolling-drill.sh`：起 A/B 两实例 → 起本 nginx（就绪只看宿主端口——**后端没起前
+  不能经 LB 发任何请求**，一次 RST 秒拒会把两台都标记出池 120s，run6 实测教训）→
+  经 8080 打流量与探测 → 滚动 drain/SIGTERM/重启 → 停 nginx 还原。
 - 摘除探测方式（选型说明）：脚本每 1 秒经 nginx GET `/actuator/health`
   （模拟 K8s/HAProxy 的主动探测），nginx 的被动摘除靠这些探测打到 503 才触发；
-  "已被 LB 摘除"的断言 = 经 nginx 连发 20 个带令牌的 GET `/api/ping`，
-  `X-Served-By` 里被摘实例的端口一次都不出现。
-- 回池等待 = 轮询直到 `X-Served-By` 重新出现该实例端口。
+  判定阶段后台探针暂停（ACK 确认在途探针静止），"失败标记"由判定探针独占打出——
+  "已被 LB 摘除"的实锤 = 探针响应头出现重试列表（"A, B" 形状且含被摘实例），
+  随后 20 个带令牌的 GET `/api/ping` 全部 200 且 `X-Served-By` 里被摘实例的
+  端口一次都不出现。
+- 回池等待 = 轮询直到 `X-Served-By` **末项**（实际服务者）重新出现该实例端口
+  （最早发生在失败标记 + fail_timeout 120s）。
 
 ## 与既有演练的关系
 
