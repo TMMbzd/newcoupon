@@ -82,6 +82,23 @@ services:
       - "10911:10911"
       - "10909:10909"
 
+  # ---------- V6 5B 生产化模拟刀 A：nginx 负载均衡入口 ----------
+  # 默认不起（profile lbe2e）：这是滚动重启演练（scripts/stability/lb-rolling-drill.sh）
+  # 专用入口——应用实例在宿主机上（不是本 compose 的服务），nginx 在容器里反代它们。
+  # 起：docker compose --profile lbe2e up -d nginx   停：docker compose --profile lbe2e stop nginx
+  # 容器访问宿主：host.docker.internal:host-gateway（Linux Docker 必需；
+  # upstream 用 host.docker.internal:18091/18092，2026-11-10 实测可达）。
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: newcoupon-nginx
+    profiles: ["lbe2e"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./ops/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
 volumes:
   mysql-data:
   redis-data:
