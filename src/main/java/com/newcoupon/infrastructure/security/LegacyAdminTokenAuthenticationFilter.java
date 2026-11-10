@@ -190,9 +190,15 @@ public class LegacyAdminTokenAuthenticationFilter extends OncePerRequestFilter {
      * 全部敏感信息都在 /console/api/** 与 /api/** 的认证后面。挡静态资源只会让
      * 未登录的人拿不到登录页。结构性守卫（AdminSurfaceProtectionTest）仍遍历全部
      * /console 控制器映射：将来有人在 /console/api/ 之外加数据接口，测试直接红。
+     *
+     * <p><b>internal 前缀（V6 5B 刀 A）</b>：/internal/admin/** 同样归管理面——
+     * drain/undrain 是"把实例请出/放回集群"的能力，裸奔等于任何人都能源源不断地
+     * 把集群逐台摘光（等效 DoS），与 /api 写口同一认证判据（旧令牌或会话）。
+     * 结构性守卫同步覆盖 /internal/**：在 /internal 下加新端点而不进判据，测试直接红。
      */
     public static boolean isProtected(String method, String servletPath) {
-        return (servletPath.startsWith("/api/") || servletPath.startsWith("/console/api/"))
+        return (servletPath.startsWith("/api/") || servletPath.startsWith("/console/api/")
+                || servletPath.startsWith("/internal/admin/"))
                 && !BUSINESS_WRITE_PATHS.contains(servletPath)
                 && !servletPath.startsWith(AUTH_SERVICE_PREFIX);
     }

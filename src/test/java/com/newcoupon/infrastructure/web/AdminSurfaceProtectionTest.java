@@ -85,10 +85,16 @@ class AdminSurfaceProtectionTest extends ShardedIntegrationTestSupport {
 
         // 开放面走签名链（/open 前缀不经本过滤器）
         assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("POST", "/open/v1/calculate")).isFalse();
+
+        // V6 5B 刀 A：/internal/admin/** 归管理面——摘流量（drain/undrain）是
+        // "把实例请出集群"的能力，与 /api 写口同一认证判据（旧令牌或会话）
+        assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("POST", "/internal/admin/drain")).isTrue();
+        assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("POST", "/internal/admin/undrain")).isTrue();
+        assertThat(LegacyAdminTokenAuthenticationFilter.isProtected("GET", "/internal/admin/anything")).isTrue();
     }
 
     @Test
-    @DisplayName("结构：全部 /api、/console 映射（含 GET）必居'受保护'或'显式豁免'之一")
+    @DisplayName("结构：全部 /api、/console、/internal 映射（含 GET）必居'受保护'或'显式豁免'之一")
     void structural_everyMappingProtectedOrExempted() {
         List<String> violations = new ArrayList<>();
 
@@ -106,7 +112,7 @@ class AdminSurfaceProtectionTest extends ShardedIntegrationTestSupport {
                     : info.getDirectPaths();
 
             for (String path : paths) {
-                if (!(path.startsWith("/api/") || path.startsWith("/console"))) {
+                if (!(path.startsWith("/api/") || path.startsWith("/console") || path.startsWith("/internal/"))) {
                     continue;
                 }
                 for (RequestMethod method : checkedMethods) {
