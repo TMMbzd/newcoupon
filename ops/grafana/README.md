@@ -17,6 +17,18 @@
 不在盘上重新写公式——盘与规则同源，口径改动只改规则文件一处，盘自动跟随。
 SLO 口径全文见 `docs/operations/SLO.md`。
 
+## 抓哪条 target：单实例 vs 双实例（两种形态别互踩）
+
+| 形态 | target | 说明 |
+|---|---|---|
+| 单实例（默认，`make run`/压测） | `host.docker.internal:8080` | prometheus.yml 里 `job_name: newcoupon` 启用 |
+| 双实例（刀 A 滚动重启演练，18091/18092） | 两个直抓 target | 把 `newcoupon` job 的 targets 注释掉、放开文件尾部注释的 `newcoupon-dual` job |
+
+**双实例为什么必须各抓各的、不能经 nginx:8080 合抓一条**：两个实例的
+`coupon_sli_events_total` 是各自 JVM 的计数器，合成一个序列会把"实例重启计数器归零"
+误读成流量塌陷，`increase()` 的重置处理也被两实例交错归零搅乱——SLO 失真。分开抓后
+`instance` 标签天然区分实例，counter 语义干净（up 面板也会各自一条）。
+
 ## 起停（profile `observe`，默认不起）
 
 ```bash

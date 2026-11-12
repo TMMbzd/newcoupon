@@ -21,6 +21,7 @@ rule_files:
   - /etc/prometheus/rules/slo-alerts.rules.yml
 
 scrape_configs:
+  # ── 形态一（默认）：单实例 8080（make run / 刀 B 压测形态）────────────────────
   - job_name: newcoupon
     scrape_interval: 15s
     metrics_path: /actuator/prometheus
@@ -31,3 +32,22 @@ scrape_configs:
       # 应用在宿主机（make run / 演练脚本起的 java，8080）。容器访问宿主走
       # host.docker.internal（compose 里 extra_hosts: host-gateway 映射，Linux Docker 必需）。
       - targets: ['host.docker.internal:8080']
+
+  # ── 形态二：双实例直抓（刀 A 滚动重启演练形态，18091/18092，见 ops/nginx/）──
+  # 用哪个形态就启用哪个的 job，并停掉另一个的 target（把不用的 targets 行注释掉，
+  # 或 up 面板容忍多余的 down 序列）。
+  # **为什么双实例必须"各抓各的"而不是经 nginx:8080 合抓一条**：两个实例的
+  # coupon_sli_events_total 是各自进程的计数器，合成一个序列会把"实例重启计数器归零"
+  # 误读成流量塌陷，increase() 的重置处理也被两实例交错归零搅乱——SLO 失真。
+  # 分开抓（instance 标签区分）后每条序列来自单一进程，counter 语义干净。
+  # 单实例形态下保持下面整段注释（18091/18092 没有监听时这两个 target 会恒 down）。
+  # - job_name: newcoupon-dual
+  #   scrape_interval: 15s
+  #   metrics_path: /actuator/prometheus
+  #   basic_auth:
+  #     username: actuator
+  #     password_file: /tmp/basic-auth-password
+  #   static_configs:
+  #     - targets:
+  #         - 'host.docker.internal:18091'
+  #         - 'host.docker.internal:18092'

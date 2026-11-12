@@ -7,9 +7,9 @@
 | 脚本 | 角色 | 一句话 |
 |---|---|---|
 | `backup.sh` | **全量基线** | mysqldump 单事务快照 + `.meta`（dump 时刻的 binlog 位点=重放起点、行数/摘要=恢复校验基准） |
-| `binlog-archive.sh` | **增量** | FLUSH BINARY LOGS 轮转后，把已关闭的 `mysql-bin.*` 复制+gzip 到归档目录，写 manifest（手动/定时都行） |
+| `binlog-archive.sh` | **增量** | FLUSH BINARY LOGS 轮转后，把已关闭的 `mysql-bin.*` 复制+gzip 到归档目录，写 manifest（手动/定时都行；flock 防重叠，卷世代切换自动归档旧档） |
 | `restore.sh` | 全量恢复 | 恢复到同实例 `newcoupon_restore`，20 条断言对齐 `.meta`（不覆盖源库） |
-| `pitr-drill.sh` | **PITR 演练** | 全量恢复到沙箱容器 + mysqlbinlog 从 dump 位点重放到任意时间点 T，断言"T 前在、T 后不在" |
+| `pitr-drill.sh` | **PITR 演练** | 全量恢复到沙箱容器 + 按 manifest sha256 校验归档 + mysqlbinlog 从 dump 位点重放到任意时间点 T，断言"T 前在、T 后不在" |
 
 两层怎么配合：**dump=基线（整库重建的起点），binlog=基线之后的每一笔行级变更**。
 恢复到时间点 T = restore 全量 + 重放 dump 位点→T 位点之间的 binlog——`pitr-drill.sh`
@@ -21,6 +21,21 @@
 --server-id=1 --sync-binlog=1`（V6 5C）。**command 变更意味着容器重建而不是原地升级**：
 数据卷 `mysql-data` 不受影响（2026-11-10 实测 force-recreate 前后表数/行数一致），
 但旧基名的 `binlog.*` 文件留在卷里、不进新的 `mysql-bin.*` 序列（新序列从 000001 起）。
+
+## 归档目录的两个运行语义
+
+- **卷世代切换（`down -v`/换卷后自动降档）**：新卷 binlog 从 `mysql-bin.000001` 重新
+  编号，与旧归档同名不同内容（同卷内已关闭文件不可变，同名同序号不同 sha 只可能是
+  换了卷）。脚本检测到后把旧归档整体移入 `superseded-<时间戳>/` 留档、本轮继续归档
+  新卷文件——**不卡死**（排班被一个 fail 永久堵死 = RPO 保护静默失效，比丢旧档更糟）、
+  **不覆盖**（旧世代归档仍可单独回溯）。旧档 PITR 要用 `superseded-*/` 里的 manifest。
+- **并发护栏（flock）**：cron 重叠/手工撞车时第二个实例拿不到锁直接退出，绝不并行
+  写归档目录（半截 .gz + manifest 错乱比不跑更糟）。
+- **单轮成本定界**：只对本轮**新增**文件算 sha256，历史条目从上一轮 manifest 增量
+  携带——单轮成本 ∝ 本轮新增 binlog 量，不随归档总量增长（归档目录的清理由保留
+  策略/对象存储生命周期负责，本刀裁剪）。
+- **完整性闭环**：manifest 记录入库当轮 sha256，`pitr-drill.sh` 重放前逐文件核对
+  （归档在磁盘上损坏会在演练里当场暴露，不是"能重放就没事"）。
 
 ## RPO 口径（本仓库统一口径，报告同文）
 

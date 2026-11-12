@@ -27,6 +27,8 @@ Thumbs.db
 
 # ---- 本地私有配置（不进仓库，含密码等敏感信息）----
 application-local.yml
+# docker compose 的环境变量默认文件（5C 刀 B 起 observe profile 的凭据可能写进它）
+.env
 
 # ---- 意外产物防护 ----
 # Windows 侧工具（如 VSCode Java 扩展）以 Windows 路径在 WSL 项目内跑 Maven 时，

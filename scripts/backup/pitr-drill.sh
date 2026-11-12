@@ -43,6 +43,10 @@ PITR_CONTAINER="${PITR_CONTAINER:-newcoupon-mysql-pitr}"
 PITR_IMAGE="${PITR_IMAGE:-mysql:8.0-debian}"
 BACKUP_DIR="${BACKUP_DIR:-$REPO_DIR/target/backup}"
 WORK_DIR="$REPO_DIR/target/pitr-work"
+# 与 binlog-archive.sh 同名同默认：归档目录/文件基名两脚本必须一个认知
+#（重放要从归档目录拿文件，目录或基名配错半边=重放找不到增量）。
+BINLOG_ARCHIVE_DIR="${BINLOG_ARCHIVE_DIR:-$REPO_DIR/target/binlog-archive}"
+BINLOG_BASENAME="${BINLOG_BASENAME:-mysql-bin}"
 
 ASSERTIONS=0
 assert_eq() {   # $1=描述 $2=期望 $3=实际
@@ -203,20 +207,35 @@ assert_eq "导入后沙箱表数 == dump 时刻 meta.tableCount" "$META_TABLES" 
 ok "导入完成（$((IMPORT_MS / 1000)).$((IMPORT_MS % 1000))s）"
 
 # ---------------------------------------------------------------- 9. binlog 重放到 T
-step "9. mysqlbinlog 从 dump 位点重放到 T（ROW + --database 过滤）"
+step "9. mysqlbinlog 从 dump 位点重放到 T（先按 manifest 校验归档完整性，再 ROW 重放）"
 mkdir -p "$WORK_DIR/replay"
 # 选档案里编号在 [START_FILE, T_FILE] 区间内的文件（含两端），按编号排序
 start_num="${START_FILE##*.}"; t_num="${T_FILE##*.}"
 replay_files=()
-for f in $(ls "$REPO_DIR/target/binlog-archive" | grep -E "^mysql-bin\.[0-9]+\.gz$" | sort); do
+for f in $(ls "$BINLOG_ARCHIVE_DIR" | grep -E "^${BINLOG_BASENAME}\.[0-9]+\.gz$" | sort); do
   n="${f%.gz}"; n="${n##*.}"
   if (( 10#$n >= 10#$start_num && 10#$n <= 10#$t_num )); then
     replay_files+=("${f%.gz}")
-    gzip -dc "$REPO_DIR/target/binlog-archive/$f" > "$WORK_DIR/replay/${f%.gz}"
+    gzip -dc "$BINLOG_ARCHIVE_DIR/$f" > "$WORK_DIR/replay/${f%.gz}"
   fi
 done
 [[ ${#replay_files[@]} -gt 0 ]] || fail "归档目录里找不到 [$START_FILE .. $T_FILE] 区间的 binlog 文件"
 ok "重放文件（${#replay_files[@]} 个）：${replay_files[*]}（起点 $START_FILE:$START_POS，终点 $T_FILE:$T_POS）"
+
+# 完整性闭环（审查 S2③）：归档文件在落盘/搬运过程中损坏过，重放"恰好能跑"不代表
+# 数据没缺——manifest 记录了入库当轮的 sha256，重放前逐文件核对（消费方校验）。
+LATEST_MANIFEST=$(ls -1 "$BINLOG_ARCHIVE_DIR"/manifests/*.json 2>/dev/null | sort | tail -1)
+[[ -n "$LATEST_MANIFEST" ]] || fail "归档目录没有 manifest（$BINLOG_ARCHIVE_DIR/manifests/）——先跑 binlog-archive.sh"
+for f in "${replay_files[@]}"; do
+  expected=$(python3 -c "
+import json, sys
+for e in json.load(open('$LATEST_MANIFEST'))['files']:
+    if e['file'] == '$f':
+        print(e['sha256']); break" )
+  [[ -n "$expected" ]] || fail "$f 不在 manifest（$LATEST_MANIFEST）——归档与清单脱节，拒绝盲重放"
+  actual=$(gzip -dc "$BINLOG_ARCHIVE_DIR/$f.gz" | sha256sum | awk '{print $1}')
+  assert_eq "归档完整性：$f sha256 == manifest" "$expected" "$actual"
+done
 
 docker exec "$PITR_CONTAINER" mkdir -p /tmp/binlog-replay
 docker cp "$WORK_DIR/replay/." "$PITR_CONTAINER:/tmp/binlog-replay/" >/dev/null \
