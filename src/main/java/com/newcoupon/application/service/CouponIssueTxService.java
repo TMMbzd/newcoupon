@@ -51,6 +51,8 @@ public class CouponIssueTxService {
     private final com.newcoupon.infrastructure.persistence.mapper.CouponOutboxMapper outboxMapper;
     private final CouponUserDailyCounterMapper userDailyCounterMapper;
     private final CouponDailyCounterMapper dailyCounterMapper;
+    /** tracing 关闭时是 Boot 自动装配的 NoopTracer——里程碑 span 段无分支零开销 */
+    private final io.micrometer.tracing.Tracer tracer;
 
     public CouponIssueTxService(UserCouponRepository userCouponRepository,
                                 TemplateRepository templateRepository,
@@ -59,7 +61,8 @@ public class CouponIssueTxService {
                                 CouponStockShardMapper stockShardMapper,
                                 com.newcoupon.infrastructure.persistence.mapper.CouponOutboxMapper outboxMapper,
                                 CouponUserDailyCounterMapper userDailyCounterMapper,
-                                CouponDailyCounterMapper dailyCounterMapper) {
+                                CouponDailyCounterMapper dailyCounterMapper,
+                                io.micrometer.tracing.Tracer tracer) {
         this.userCouponRepository = userCouponRepository;
         this.templateRepository = templateRepository;
         this.couponEventRepository = couponEventRepository;
@@ -68,6 +71,7 @@ public class CouponIssueTxService {
         this.outboxMapper = outboxMapper;
         this.userDailyCounterMapper = userDailyCounterMapper;
         this.dailyCounterMapper = dailyCounterMapper;
+        this.tracer = tracer;
     }
 
     /**
@@ -129,7 +133,29 @@ public class CouponIssueTxService {
         if (stockShardMapper.casDeduct(current.getId(), layoutVersion, shardNo) == 0) {
             throw new StockShardDeductRejectedException(req.templateId());
         }
-        return persistCoupon(req, current, seq, now);
+
+        // 业务里程碑 span（V6 5B 刀 C2）："落库成"进 trace 而不是只进日志。这是全部四条
+        // 发放链路（同步领券/异步 worker/批量/兑换码）唯一的落库咽喉——每次真实落库在这里
+        // 留下一个带耗时、带成败的 span，Jaeger 上与同一请求的准入/审计段落对齐。
+        // 换片重试（上面 casDeduct 抛信号）不会走到这里：里程碑只在真提交前创建。
+        // Tracer 在 coupon.tracing.enabled=false 时是 NoopTracer，这里没有分支判断。
+        // 基数纪律：span 名固定；模板 id 做标签——span 按事件存储可按标签检索（这是
+        // tracing 与 metrics 标签纪律的差异：指标标签必须有界，span 标签允许业务 id；
+        // user-id 不带：按用户找人走业务 X-Trace-Id，span 标签只留运维检索必需的模板维度）。
+        io.micrometer.tracing.Span milestone = tracer.nextSpan()
+                .name("coupon-issue-persist")
+                .tag("coupon.milestone", "issue-db-commit")
+                .tag("coupon.template-id", String.valueOf(req.templateId()))
+                .start();
+        try (io.micrometer.tracing.Tracer.SpanInScope ignored = tracer.withSpan(milestone)) {
+            UserCoupon saved = persistCoupon(req, current, seq, now);
+            return saved;
+        } catch (RuntimeException e) {
+            milestone.error(e);
+            throw e;
+        } finally {
+            milestone.end();
+        }
     }
 
     /**

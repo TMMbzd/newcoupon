@@ -263,6 +263,15 @@ coupon:
   outbox:
     transport: ${OUTBOX_TRANSPORT:log}
     namesrv-addr: ${ROCKETMQ_NAMESRV:localhost:9876}
+  # ---- V6 5B 生产化模拟刀 C2：链路追踪总开关 ----
+  # 与 management.tracing.* 的映射关系见上方 management 段——语义唯一来源在这里：
+  # false（默认）= 不装配 tracing（零开销零导出，业务行为与 C2 之前完全一致）；
+  # true = 装配 OTel bridge + OTLP 导出，配套：Jaeger（compose profile observe）、
+  # 异步线程传播（审计/发放 worker 的执行器包装）、业务里程碑 span（领券落库/批量轮）。
+  # 完整起停/取证/内存预算：docs/runbook/Tracing与E2E.md。
+  tracing:
+    enabled: ${TRACING_ENABLED:false}
+
   # S1 开放平台（2026-10-01）
   open:
     # 接入方密钥（SK）的加密主密钥：Base64 的 32 字节（AES-256）。
@@ -311,6 +320,22 @@ springdoc:
     enabled: false
 
 management:
+  # ---- Tracing（V6 5B 生产化模拟刀 C2）：Micrometer Tracing + OTLP → Jaeger ----
+  # 总开关是业务命名空间里的 coupon.tracing.enabled（照风控开关纪律：默认 false =
+  # 零开销零导出）——这里只是把它的值接到 Boot 的开关上，语义唯一来源在下面 coupon.tracing。
+  # tracing.enabled=false 时 Boot 连 Tracing 的自动装配都不装（Tracer 注入拿到 NoopTracer），
+  # 业务代码不用写 if，路径上也没有 span 创建开销。
+  tracing:
+    enabled: ${coupon.tracing.enabled:false}
+    sampling:
+      # 采样率：开关开时默认 100%（dev/单机模拟看得全）；生产建议 5~10%（V6 计划 §5B），
+      # 上线前按流量评估——这里跟 coupon.tracing 开关同一个环境变量族，不另开散键。
+      probability: ${TRACING_SAMPLING:1.0}
+  otlp:
+    tracing:
+      # OTLP/HTTP 收集端点（Jaeger all-in-one 4318；compose profile observe）。
+      # tracing 关着时这个值不会被用到（无 exporter 装配）。
+      endpoint: ${TRACING_OTLP_ENDPOINT:http://127.0.0.1:4318/v1/traces}
   endpoints:
     web:
       exposure:
