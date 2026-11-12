@@ -4,9 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.newcoupon.infrastructure.persistence.mapper.AuditChainHeadMapper;
 import com.newcoupon.infrastructure.persistence.mapper.AuditLogMapper;
 import com.newcoupon.infrastructure.persistence.po.AuditLogPO;
-import com.newcoupon.infrastructure.tracing.ContextPropagatingExecutors;
-import io.micrometer.tracing.Span;
-import io.micrometer.tracing.Tracer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.LocalDateTime;
@@ -56,35 +53,23 @@ public class AuditService {
     /** JSON 序列化器（静态——审计序列化不需要 Spring 配置的定制 mapper） */
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    /**
-     * 审计写入专用单线程执行器（守护线程——不阻止 JVM 关闭）。
-     *
-     * <p>外面包一层上下文传播（V6 5B 刀 C2，{@link ContextPropagatingExecutors}）：
-     * 提交线程（通常是 HTTP 请求线程）的 trace 上下文随任务带到 audit-writer 线程——
-     * 不包的话，下面 {@link #record} 里创建的 span 找不到父，审计写入会在 Jaeger 上
-     * 另起一条孤 trace，"这次操作的审计写完没有"就没法在同一时间线上看了。
-     */
-    private final ExecutorService auditExecutor = ContextPropagatingExecutors.wrap(
-            Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "audit-writer");
-                t.setDaemon(true);
-                return t;
-            }));
+    /** 审计写入专用单线程执行器（守护线程——不阻止 JVM 关闭） */
+    private final ExecutorService auditExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "audit-writer");
+        t.setDaemon(true);
+        return t;
+    });
 
     private final AuditLogMapper auditLogMapper;
     private final AuditChainHeadMapper auditChainHeadMapper;
     private final TransactionTemplate transactionTemplate;
-    /** tracing 关闭时是 Boot 自动装配的 NoopTracer（nextSpan 返回 NoopSpan，零开销） */
-    private final Tracer tracer;
 
     public AuditService(AuditLogMapper auditLogMapper,
                         AuditChainHeadMapper auditChainHeadMapper,
-                        PlatformTransactionManager transactionManager,
-                        Tracer tracer) {
+                        PlatformTransactionManager transactionManager) {
         this.auditLogMapper = auditLogMapper;
         this.auditChainHeadMapper = auditChainHeadMapper;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
-        this.tracer = tracer;
     }
 
     /**
@@ -133,27 +118,14 @@ public class AuditService {
     /**
      * 记录一条审计（异步——提交后立即返回，不阻塞调用方）。
      * 写入失败只记 ERROR，不抛异常（审计不影响业务）。
-     *
-     * <p><b>审计 span（V6 5B 刀 C2 的异步传播验证点）</b>：span 在 audit-writer 线程上创建
-     * （nextSpan 的父来自执行器包装恢复出的提交线程上下文）——它是"业务里程碑进 trace 而
-     * 不是只进日志"的直接示例：审计是否落库、耗了多久，在 Jaeger 上与触发它的那次请求
-     * 在同一条 trace 里对齐。span 名固定（低基数）；action 是有限枚举集合，做标签安全；
-     * thread 标签钉死线程名（audit-writer），取证时不用猜 span 跑在哪条线程。
      */
     public void record(AuditContext ctx) {
         auditExecutor.submit(() -> {
-            Span span = tracer.nextSpan().name("audit-write")
-                    .tag("audit.action", ctx.action())
-                    .tag("coupon.thread", Thread.currentThread().getName())
-                    .start();
-            try (Tracer.SpanInScope ignored = tracer.withSpan(span)) {
+            try {
                 writeRecord(ctx);
             } catch (Exception e) {
-                span.error(e);
                 log.error("AUDIT WRITE FAILED: action={} traceId={}（审计写入失败不影响业务，"
                         + "但哈希链可能出现缺口——需排查）", ctx.action(), ctx.traceId(), e);
-            } finally {
-                span.end();
             }
         });
     }

@@ -58,18 +58,12 @@ public class AuditExportService {
     /** JSON 序列化器（静态——与 AuditService 同款立场，不依赖 Spring 定制 mapper）。 */
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    /**
-     * 导出构建专用单线程（守护——不阻止 JVM 关闭；串行也限住了导出对 DB 的并发压力）。
-     * 上下文传播包装与 AuditService.auditExecutor 同款（V6 5B 刀 C2）：受理请求的 trace
-     * 带进构建线程，导出任务在 Jaeger 上挂回受理它的那次管理面操作。
-     */
-    private final ExecutorService exportExecutor =
-            com.newcoupon.infrastructure.tracing.ContextPropagatingExecutors.wrap(
-                    Executors.newSingleThreadExecutor(r -> {
-                        Thread t = new Thread(r, "audit-export-writer");
-                        t.setDaemon(true);
-                        return t;
-                    }));
+    /** 导出构建专用单线程（守护——不阻止 JVM 关闭；串行也限住了导出对 DB 的并发压力）。 */
+    private final ExecutorService exportExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "audit-export-writer");
+        t.setDaemon(true);
+        return t;
+    });
 
     private final AuditExportJobMapper jobMapper;
     private final AuditQueryService queryService;
