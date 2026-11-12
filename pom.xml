@@ -37,6 +37,10 @@
     <bucket4j.version>8.21.0</bucket4j.version>
     <!-- Sentine 版本：1.8.10 是当前最新 GA（2.0.0-alpha 自 2023 起未 GA） -->
     <sentinel.version>1.8.10</sentinel.version>
+    <!-- surefire 默认排除的 JUnit tag（生产化模拟刀 C1）：E2E 重（上下文+Testcontainers+
+         chromium），全量与 CI 都不跑；手动触发用 -De2e.excludedGroups= 置空放行，见
+         docs/runbook/Tracing与E2E.md -->
+    <e2e.excludedGroups>e2e</e2e.excludedGroups>
     <!-- springdoc 版本（V6 2B-2 契约测试）：Boot BOM 不纳管 springdoc，必须显式声明。
          2.6.0 与 Boot 3.3.x 适配（springdoc 官方兼容矩阵），随 Boot 大版本升级时复核。 -->
     <springdoc.version>2.6.0</springdoc.version>
@@ -307,6 +311,9 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
+          <!-- @Tag("e2e") 的 ConsoleE2eIntegrationTest 默认排除（跑法见属性 e2e.excludedGroups
+               的注释）；属性化是为了手动触发时能置空放行，而不是硬编码在插件配置里 -->
+          <excludedGroups>${e2e.excludedGroups}</excludedGroups>
           <systemPropertyVariables>
             <!-- dev profile 默认打开异步/worker；测试默认关闭，异步专项测试用 @SpringBootTest properties 覆盖 -->
             <ISSUE_ASYNC_ENABLED>false</ISSUE_ASYNC_ENABLED>
