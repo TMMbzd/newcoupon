@@ -1,0 +1,29 @@
+== 先红证据摘录（2026-11-12 复核轮补档；mvn 全文在 target/stability/，git 外） ==
+
+-- 红①异步传播：只包 micrometer ContextSnapshot（单层）时子 span 裂新 traceId --
+来源：target/stability/c2-tracing-red1-micrometer单层包装裂trace-mvn.log
+org.opentest4j.AssertionFailedError: 
+[异步线程的子 span 必须挂在父 trace 上（traceId 相同）——裂成新 traceId 说明上下文没有随任务传播] 
+expected: "c78c458d9b10407ad943db564275a4a0"
+ but was: "031de6201141afdc904e53b373820d98"
+	at java.base/jdk.internal.reflect.NativeConstructorAccessorImpl.newInstance0(Native Method)
+--
+
+-- 红②开关语义：management.tracing.enabled=false 时 nextSpan 仍拿到真实 traceId --
+（证明 OtelTracer 仍被装配——TracingOffConfig 存在的根据）
+来源：target/stability/c2-tracing-red2-boot开关语义缺口-mvn.log
+java.lang.AssertionError: 
+[关开关时业务代码拿到的应是无效 span（空 traceId）] 
+Expecting blank but was: "b6b8e4c755bbac57f3ad1727973c4702"
+	at com.newcoupon.integration.TracingSwitchIntegrationTest.tracingOff_noExporterNoRecordedSpans(TracingSwitchIntegrationTest.java:62)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:569)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1511)
+
+-- 红③审查 M1：groupPool（issue-task-shard-group）漏包时，分片组线程上的里程碑裂新 traceId --
+来源：target/stability/c2-red-M1-groupPool漏包裂trace-mvn.log（2026-11-12 复核轮）
+org.opentest4j.AssertionFailedError: 
+[issue-task-shard-group 线程上的里程碑 span 必须挂在 worker 轮 trace 上（漏包 ContextPropagatingExecutors 会裂成新 traceId）。actual=RecordedSpan[name=coupon-issue-persist, traceId=b161d1c05908b98791cadd99861e14db, threadName=issue-task-shard-group]] 
+expected: "f0f4ebacb849e52fd9bb63a1f0467cad"
+ but was: "b161d1c05908b98791cadd99861e14db"
+	at java.base/jdk.internal.reflect.NativeConstructorAccessorImpl.newInstance0(Native Method)
+--

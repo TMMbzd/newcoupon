@@ -188,7 +188,13 @@ snapshot），已包 audit-writer/audit-export-writer/issue-task-worker 三池�
 （NoopTracer/零 SpanExporter/空 traceId 三断言）；Jaeger API 实跑取证含关开关零导出对照
 （docs/evidence/2026-11-12-Tracing取证.md）。X-Trace-Id（业务关联号）与 Micrometer traceId
 （span 树）分工注释进 README/SLO.md §1。生产采样率/tail sampling/Collector/JDBC span 裁剪
-登记见 runbook §5。
+登记见 runbook §5。**2026-11-12 审查修复轮（23-agent 对抗审查，10 项确认全修）**：M1
+groupPool（issue-task-shard-group）漏包补上——批量失败降级路径的里程碑 span 原会裂新
+traceId（TracingGroupPoolPropagationIntegrationTest 先红 `f0f4ebac…` vs `b161d1c0…` 后绿）；
+M2 证据纪律五处补链（先红 traceId/零导出载重佐证/E2E 排除/tick 量级 3 分钟 1127 trace
+归档、yml 旧注释改实测口径）；M3 JDT 并发坑进 runbook §6 速查与 README 规范表；m1 E2E
+断言改解析 passed 数≥1（加用例不误红）；m2 超时强杀改进程树清理（bash exec +
+descendants，不留 chromium 孤儿）；m3 Jaeger 端口只绑 127.0.0.1。
 
 ## 3. 遗留债登记簿
 

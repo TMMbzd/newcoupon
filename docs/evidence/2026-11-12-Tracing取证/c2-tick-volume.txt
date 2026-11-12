@@ -1,0 +1,13 @@
+== @Scheduled 自动 span 量级实测（审查 M2④ 复测归档，2026-11-12 17:00:10–17:03:10，3 分钟窗口） ==
+环境：TRACING_ENABLED=true（dev 全采 1.0）+ dev 默认 worker（200ms/轮）；
+Jaeger API: GET /api/traces?service=newcoupon-server&start/end=窗口（limit=2000）
+
+窗口内 trace 数: 1127
+   861  task coupon-issue-task-worker.scheduled-tick
+   176  task outbox-dispatcher.dispatch
+    35  task coupon-issue-gate-repair-job.run-once
+    35  task cache-invalidation-bus.poll-once
+     8  task worker-id-lease.renew
+     6  task redis-info-metrics.collect
+     5  task coupon-issue-gate-compensation-job.run-once
+     1  task coupon-expire-service.scan

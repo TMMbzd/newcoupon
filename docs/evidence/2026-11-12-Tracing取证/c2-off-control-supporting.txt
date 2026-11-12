@@ -1,0 +1,8 @@
+== 零导出对照的载重佐证（2026-11-12 复核轮补档；全文在 target/stability/，git 外） ==
+来源：target/stability/c2-off-control-app-debug-traced.log（--debug 起的 traced 实例，
+即 straggler 所属进程）与 target/stability/c2-off-control-app-off.log（OFF 实例）。
+
+-- 1) traced（--debug）实例停机时刻：cutoff=15:55:26（kill），shutdown hook 收尾于 15:55:26.627 --
+2026-11-12 15:55:26.611 [SpringApplicationShutdownHook] WARN  [traceId=NA] c.n.infrastructure.id.WorkerIdLease - snowflake worker lease release failed: workerId=1
+2026-11-12 15:55:26.627 [SpringApplicationShutdownHook] WARN  [traceId=NA] io.lettuce.core.RedisChannelHandler - Connection is already closed
+2026-11-12 15:55:26.627 [SpringApplicationShutdownHook] DEBUG [traceId=NA] c.n.i.ratelimit.Bucket4jConfig - Bucket4j 的 Redis 连接已关闭
