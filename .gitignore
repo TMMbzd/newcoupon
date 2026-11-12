@@ -6,6 +6,9 @@ target/
 
 # 控制台前端依赖（node_modules 绝不入 git；构建产物 static/console/ 入 git——克隆即跑）
 console/node_modules/
+# Playwright 运行产物（失败截图/trace 等，跑完即弃；取证截图另存 docs/evidence/）
+console/test-results/
+console/playwright-report/
 
 # ---- IDE ----
 .idea/

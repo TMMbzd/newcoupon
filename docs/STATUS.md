@@ -166,6 +166,30 @@ docs/11-安全与风控全景.md：五层防线全景（每层大厂做法/我�
 **删除了**：`ReceiveInFlightCounter`（JVM 在途计数器——被 pend ZSET 取代，多实例失配问题随之消失）；ADR-0007 容忍带三件套（RESIDUAL_TOLERANCE/二次复核/方向不对称——期望值从"0+容差"变为"精确0"）。
 **实施中抓到**：跨语言契约 Bug（Java `sold_out` vs Lua `soldout` 失配落 INCR 回加）——集成验收⑨钉零断言当场暴露；教训入 ADR-0008。
 
+### 生产化模拟刀 C（2026-11-12，Playwright E2E + Micrometer Tracing；runbook docs/runbook/Tracing与E2E.md）
+
+**C1 E2E**：控制台人工五步冒烟（runbook/控制台最小页.md §6）自动化——console/ 内 Playwright 工程
+（`e2e/console.spec.ts` 五用例 + `playwright.config.ts`，不配 webServer）；驱动者
+`ConsoleE2eIntegrationTest`（@SpringBootTest RANDOM_PORT 起真实应用+Testcontainers →
+ProcessBuilder 拉起 `npx playwright test`，凭据走环境变量，断言退出码 0）。@Tag("e2e") +
+surefire `excludedGroups`（pom 属性 `e2e.excludedGroups`）默认排除——全量与 CI 不跑，手动
+`mvn test -Dtest=ConsoleE2eIntegrationTest -De2e.excludedGroups=`（取证 docs/evidence/2026-11-12-E2E取证.md：
+先红（骨架路径断言）→ 装 chromium → 五步全绿 5 passed；mi1/mi2 的浏览器端回归价值首次兑现）。
+**C2 Tracing**：pom 增 `micrometer-tracing-bridge-otel` + `opentelemetry-exporter-otlp`
+（均 Boot BOM 管版本）；开关 `coupon.tracing.enabled`（默认 false）→
+**Boot 3.3 语义缺口实测**：`management.tracing.enabled=false` 只拦导出器、OtelTracer 仍装配
+span 对象仍创建——补 `TracingOffConfig`（关时提供 `Tracer.NOOP`，业务代码零分支）；
+自定义 span 两处：`CouponIssueTxService.issueC1` 落库里程碑 `coupon-issue-persist` +
+worker 轮 `issue-worker-round`（空轮不建）；**异步传播实测缺口**：Boot 3.3 默认无 OTel
+Context↔micrometer 快照桥，只包 ContextSnapshot 子 span 裂新 trace（TracingAsyncPropagationIntegrationTest
+先红钉住）→ `ContextPropagatingExecutors` 双层包装（OTel `Context.wrap` + micrometer
+snapshot），已包 audit-writer/audit-export-writer/issue-task-worker 三池；compose profile
+`observe` 增 jaeger（all-in-one 1.62.0，mem_limit 512m）。开关契约 `TracingSwitchIntegrationTest`
+（NoopTracer/零 SpanExporter/空 traceId 三断言）；Jaeger API 实跑取证含关开关零导出对照
+（docs/evidence/2026-11-12-Tracing取证.md）。X-Trace-Id（业务关联号）与 Micrometer traceId
+（span 树）分工注释进 README/SLO.md §1。生产采样率/tail sampling/Collector/JDBC span 裁剪
+登记见 runbook §5。
+
 ## 3. 遗留债登记簿
 
 | # | 债 | 风险等级 | 处置计划 | 触发条件 |

@@ -1,0 +1,1157 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] -------------------< com.newcoupon:newcoupon-server >-------------------
+[INFO] Building newcoupon-server 0.1.0-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) @ newcoupon-server ---
+[INFO] Copying 2 resources from src/main/resources to target/classes
+[INFO] Copying 50 resources from src/main/resources to target/classes
+[INFO] 
+[INFO] --- maven-compiler-plugin:3.13.0:compile (default-compile) @ newcoupon-server ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- maven-resources-plugin:3.3.1:testResources (default-testResources) @ newcoupon-server ---
+[INFO] skip non existing resourceDirectory /home/tmm/java-pro/newcoupon/src/test/resources
+[INFO] 
+[INFO] --- maven-compiler-plugin:3.13.0:testCompile (default-testCompile) @ newcoupon-server ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- maven-surefire-plugin:3.2.5:test (default-test) @ newcoupon-server ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.newcoupon.integration.ConsoleE2eIntegrationTest
+15:40:52.218 [main] INFO org.springframework.test.context.support.AnnotationConfigContextLoaderUtils -- Could not detect default configuration classes for test class [com.newcoupon.integration.ConsoleE2eIntegrationTest]: ConsoleE2eIntegrationTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+15:40:52.304 [main] INFO org.testcontainers.images.PullPolicy -- Image pull policy will be performed by: DefaultPullPolicy()
+15:40:52.308 [main] INFO org.testcontainers.utility.ImageNameSubstitutor -- Image name substitution will be performed by: DefaultImageNameSubstitutor (composite of 'ConfigurationFileImageNameSubstitutor' and 'PrefixingImageNameSubstitutor')
+15:40:52.618 [main] INFO org.testcontainers.dockerclient.DockerClientProviderStrategy -- Loaded org.testcontainers.dockerclient.UnixSocketClientProviderStrategy from ~/.testcontainers.properties, will try it first
+15:40:52.969 [main] INFO org.testcontainers.dockerclient.DockerClientProviderStrategy -- Found Docker environment with local Unix socket (unix:///var/run/docker.sock)
+15:40:52.970 [main] INFO org.testcontainers.DockerClientFactory -- Docker host IP address is localhost
+15:40:52.996 [main] INFO org.testcontainers.DockerClientFactory -- Connected to docker: 
+  Server Version: 28.5.2
+  API Version: 1.51
+  Operating System: Docker Desktop
+  Total Memory: 7940 MB
+15:40:53.150 [main] INFO tc.testcontainers/ryuk:0.7.0 -- Creating container for image: testcontainers/ryuk:0.7.0
+15:40:53.366 [main] INFO org.testcontainers.utility.RegistryAuthLocator -- Credential helper/store (docker-credential-desktop.exe) does not have credentials for https://index.docker.io/v1/
+15:40:53.560 [main] INFO tc.testcontainers/ryuk:0.7.0 -- Container testcontainers/ryuk:0.7.0 is starting: 4cc5d70da117c23ebaafb4a8f1d1aec20f661dc59dc60185426e9382d8ed6548
+15:40:54.405 [main] INFO tc.testcontainers/ryuk:0.7.0 -- Container testcontainers/ryuk:0.7.0 started in PT1.254273415S
+15:40:54.412 [main] INFO org.testcontainers.utility.RyukResourceReaper -- Ryuk started - will monitor and terminate Testcontainers containers on JVM exit
+15:40:54.412 [main] INFO org.testcontainers.DockerClientFactory -- Checking the system...
+15:40:54.413 [main] INFO org.testcontainers.DockerClientFactory -- ✔︎ Docker server version should be at least 1.6.0
+15:40:54.416 [main] INFO tc.mysql:8.0 -- Creating container for image: mysql:8.0
+15:40:54.580 [main] INFO tc.mysql:8.0 -- Container mysql:8.0 is starting: aa9d21cbaa79827d7915632b0afa87b1c383756e21a7f244a20002182c2f14ef
+15:40:55.152 [main] INFO tc.mysql:8.0 -- Waiting for database connection to become available at jdbc:mysql://localhost:46397/test using query 'SELECT 1'
+15:41:22.065 [main] INFO tc.mysql:8.0 -- Container mysql:8.0 started in PT27.648686537S
+15:41:22.065 [main] INFO tc.mysql:8.0 -- Container is started (JDBC URL: jdbc:mysql://localhost:46397/test)
+15:41:22.065 [main] INFO tc.redis:7-alpine -- Creating container for image: redis:7-alpine
+15:41:22.223 [main] INFO tc.redis:7-alpine -- Container redis:7-alpine is starting: 54bf1b193bd8b31422439579f3b2984c560931ca2fe4f5519f2ca9892c56a0fa
+15:41:22.904 [main] INFO tc.redis:7-alpine -- Container redis:7-alpine started in PT0.838389526S
+15:41:23.137 [main] INFO org.springframework.boot.test.context.SpringBootTestContextBootstrapper -- Found @SpringBootConfiguration com.newcoupon.NewCouponApplication for test class com.newcoupon.integration.ConsoleE2eIntegrationTest
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::                (v3.3.5)
+
+2026-11-12 15:41:23.814 [background-preinit] INFO  [traceId=NA] o.h.validator.internal.util.Version - HV000001: Hibernate Validator 8.0.1.Final
+2026-11-12 15:41:23.856 [main] INFO  [traceId=NA] c.n.i.ConsoleE2eIntegrationTest - Starting ConsoleE2eIntegrationTest using Java 17.0.21.0.3 with PID 2726046 (started by tmm in /home/tmm/java-pro/newcoupon)
+2026-11-12 15:41:23.857 [main] DEBUG [traceId=NA] c.n.i.ConsoleE2eIntegrationTest - Running with Spring Boot v3.3.5, Spring v6.1.14
+2026-11-12 15:41:23.858 [main] INFO  [traceId=NA] c.n.i.ConsoleE2eIntegrationTest - The following 1 profile is active: "dev"
+2026-11-12 15:41:26.373 [main] INFO  [traceId=NA] o.s.d.r.c.RepositoryConfigurationDelegate - Multiple Spring Data modules found, entering strict repository configuration mode
+2026-11-12 15:41:26.377 [main] INFO  [traceId=NA] o.s.d.r.c.RepositoryConfigurationDelegate - Bootstrapping Spring Data Redis repositories in DEFAULT mode.
+2026-11-12 15:41:26.451 [main] INFO  [traceId=NA] o.s.d.r.c.RepositoryConfigurationDelegate - Finished Spring Data repository scanning in 52 ms. Found 0 Redis repository interfaces.
+2026-11-12 15:41:27.828 [main] INFO  [traceId=NA] o.s.b.w.e.tomcat.TomcatWebServer - Tomcat initialized with port 0 (http)
+2026-11-12 15:41:27.849 [main] INFO  [traceId=NA] o.a.coyote.http11.Http11NioProtocol - Initializing ProtocolHandler ["http-nio-auto-1"]
+2026-11-12 15:41:27.853 [main] INFO  [traceId=NA] o.a.catalina.core.StandardService - Starting service [Tomcat]
+2026-11-12 15:41:27.854 [main] INFO  [traceId=NA] o.a.catalina.core.StandardEngine - Starting Servlet engine: [Apache Tomcat/10.1.31]
+2026-11-12 15:41:27.939 [main] INFO  [traceId=NA] o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring embedded WebApplicationContext
+2026-11-12 15:41:27.940 [main] INFO  [traceId=NA] o.s.b.w.s.c.ServletWebServerApplicationContext - Root WebApplicationContext: initialization completed in 3874 ms
+2026-11-12 15:41:28.735 [main] INFO  [traceId=NA] org.flywaydb.core.FlywayExecutor - Database: jdbc:mysql://localhost:46397/test (MySQL 8.0)
+2026-11-12 15:41:28.831 [main] INFO  [traceId=NA] o.f.c.i.s.JdbcTableSchemaHistory - Schema history table `test`.`flyway_schema_history` does not exist yet
+2026-11-12 15:41:28.837 [main] INFO  [traceId=NA] o.f.core.internal.command.DbValidate - Successfully validated 44 migrations (execution time 00:00.065s)
+2026-11-12 15:41:28.872 [main] INFO  [traceId=NA] o.f.c.i.s.JdbcTableSchemaHistory - Creating Schema History table `test`.`flyway_schema_history` ...
+2026-11-12 15:41:16.496 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Current version of schema `test`: << Empty Schema >>
+2026-11-12 15:41:16.519 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "1 - init coupon core"
+2026-11-12 15:41:30.358 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "2 - stage1 limits and seq"
+2026-11-12 15:41:30.918 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "3 - stock drift log"
+2026-11-12 15:41:31.049 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "5 - coupon expire task"
+2026-11-12 15:41:31.292 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "6 - shard by user"
+2026-11-12 15:42:03.378 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "7 - coupon release task"
+2026-11-12 15:42:28.447 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "8 - conservation"
+2026-11-12 15:42:35.524 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "9 - p2a schema freeze"
+2026-11-12 15:42:53.526 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "10 - p2b stock bucket"
+2026-11-12 15:42:53.846 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "11 - p2d outbox"
+2026-11-12 15:42:53.967 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "12 - p2d event consumed"
+2026-11-12 15:42:54.108 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "13 - l37 allocated hi"
+2026-11-12 15:42:54.448 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "14 - s1 open api"
+2026-11-12 15:43:13.142 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "15 - s2 tenant config"
+2026-11-12 15:43:13.325 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "16 - s2 switch plan"
+2026-11-12 15:43:13.434 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "18 - audit log"
+2026-11-12 15:43:13.571 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "19 - coupon template five dimensions"
+2026-11-12 15:43:13.792 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "20 - coupon daily bill"
+2026-11-12 15:43:13.912 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "21 - ring2 line share and partial refund"
+2026-11-12 15:43:20.693 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "22 - settle party"
+2026-11-12 15:43:23.798 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "23 - pricing snapshot"
+2026-11-12 15:43:25.220 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "24 - settle party daily bill"
+2026-11-12 15:43:25.897 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "25 - c1 stock shards"
+2026-11-12 15:43:26.520 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "26 - c1 stock adjust log"
+2026-11-12 15:43:26.729 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "27 - async issue task and daily counter"
+2026-11-12 15:43:27.311 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "28 - l73 user coupon uk idem app id"
+2026-11-12 15:43:34.492 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "29 - drop legacy stock bucket"
+2026-11-12 15:43:34.569 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "30 - drop stock model column"
+2026-11-12 15:43:35.002 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "31 - issue gate compensation"
+2026-11-12 15:43:35.580 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "35 - audit chain head"
+2026-11-12 15:43:35.791 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "36 - issue gate repair"
+2026-11-12 15:43:36.056 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "37 - stock layout version"
+2026-11-12 15:43:36.479 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "38 - drop legacy shard unique"
+2026-11-12 15:43:36.562 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "39 - grant task domain"
+2026-11-12 15:43:37.014 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "41 - coupon code domain"
+2026-11-12 15:43:37.324 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "42 - budget ledger and activity"
+2026-11-12 15:43:38.301 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "43 - coupon event biz fields"
+2026-11-12 15:43:38.521 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "44 - admin rbac"
+2026-11-12 15:43:39.241 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "45 - app lifecycle and environment"
+2026-11-12 15:43:39.570 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "46 - audit actor and export"
+2026-11-12 15:43:39.959 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "47 - settle quality and hold"
+2026-11-12 15:43:40.709 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "48 - risk decision minimal"
+2026-11-12 15:43:41.311 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "49 - budget ledger account time index"
+2026-11-12 15:43:41.411 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "50 - ops drain permission"
+2026-11-12 15:43:41.550 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Successfully applied 44 migrations to schema `test`, now at version v50 (execution time 02:06.172s)
+Logging initialized using 'class org.apache.ibatis.logging.stdout.StdOutImpl' adapter.
+Get /10.255.255.254 network interface 
+Get network interface info: name:lo (lo)
+Initialization Sequence datacenterId:0 workerId:25
+2026-11-12 15:43:44.364 [main] INFO  [traceId=NA] c.n.i.ratelimit.Bucket4jConfig - Bucket4j 已接线：复用现有 Lettuce 连接，桶状态存 Redis（CAS 模式）
+2026-11-12 15:43:44.519 [main] DEBUG [traceId=NA] c.n.i.web.RiskControlFilter - Filter 'riskControlFilter' configured for use
+2026-11-12 15:43:44.520 [main] DEBUG [traceId=NA] c.n.infrastructure.web.TraceIdFilter - Filter 'traceIdFilter' configured for use
+2026-11-12 15:43:44.521 [main] DEBUG [traceId=NA] c.n.i.web.OpenApiIdempotentFilter - Filter 'openApiIdempotentFilter' configured for use
+2026-11-12 15:43:44.524 [main] DEBUG [traceId=NA] c.n.i.web.OpenApiQuotaFilter - Filter 'openApiQuotaFilter' configured for use
+2026-11-12 15:43:44.525 [main] DEBUG [traceId=NA] c.n.i.web.OpenApiAuthFilter - Filter 'openApiAuthFilter' configured for use
+2026-11-12 15:43:44.525 [main] DEBUG [traceId=NA] c.n.i.web.RiskContextFilter - Filter 'riskContextFilter' configured for use
+2026-11-12 15:43:44.863 [main] INFO  [traceId=NA] c.n.infrastructure.id.WorkerIdLease - snowflake worker lease acquired: workerId=0, owner=fa124fb9-5605-4f4d-addc-24e30a3b6719
+2026-11-12 15:43:45.896 [main] WARN  [traceId=NA] c.n.a.service.CouponCodeService - coupon.code.pepper 使用 dev 默认值；生产必须注入 CODE_PEPPER。注意：更换 pepper 会使全部存量兑换码失效
+2026-11-12 15:43:46.036 [main] INFO  [traceId=NA] c.n.a.s.CouponIssueTaskBatchTxService - issue task raw bulk enabled=true
+2026-11-12 15:43:46.428 [main] INFO  [traceId=NA] c.n.a.service.SwitchPlanStartupCheck - 预案定义校验通过：3 份预案、共 30 项配置
+INFO: Sentinel log output type is: file
+INFO: Sentinel log charset is: utf-8
+INFO: Sentinel log base directory is: /home/tmm/logs/csp/
+INFO: Sentinel log name use pid is: false
+INFO: Sentinel log level is: INFO
+2026-11-12 15:43:47.283 [main] INFO  [traceId=NA] c.n.i.ratelimit.SharedRuleProperty - 租户配额规则槽位已注册（JVM 级，只此一个）
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@60c44f6f] was not registered for synchronization because synchronization is not active
+2026-11-12 15:43:47.747 [main] INFO  [traceId=NA] com.zaxxer.hikari.HikariDataSource - HikariPool-1 - Starting...
+2026-11-12 15:43:48.032 [main] INFO  [traceId=NA] com.zaxxer.hikari.pool.HikariPool - HikariPool-1 - Added connection conn0: url=jdbc:h2:mem:config user=SA
+2026-11-12 15:43:48.034 [main] INFO  [traceId=NA] com.zaxxer.hikari.HikariDataSource - HikariPool-1 - Start completed.
+2026-11-12 15:43:48.188 [main] INFO  [traceId=NA] com.zaxxer.hikari.HikariDataSource - HikariPool-2 - Starting...
+2026-11-12 15:43:48.212 [main] INFO  [traceId=NA] com.zaxxer.hikari.pool.HikariPool - HikariPool-2 - Added connection com.mysql.cj.jdbc.ConnectionImpl@1332d4ae
+2026-11-12 15:43:48.212 [main] INFO  [traceId=NA] com.zaxxer.hikari.HikariDataSource - HikariPool-2 - Start completed.
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@714714cf] will not be managed by Spring
+==>  Preparing: SELECT id,app_id,app_name,status,qps_limit,daily_quota,contact,create_time,update_time,environment,lifecycle_status,closed_at,retention_until,legal_hold FROM open_app ORDER BY id ASC
+==> Parameters: 
+<==    Columns: id, app_id, app_name, status, qps_limit, daily_quota, contact, create_time, update_time, environment, lifecycle_status, closed_at, retention_until, legal_hold
+<==        Row: 1, 1, 内置应用（存量数据归属）, 1, 0, 0, internal, 2026-11-12 15:42:54, 2026-11-12 15:42:54, PROD, ACTIVE, null, null, 0
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@60c44f6f]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2533347e] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@7c92e5ea] will not be managed by Spring
+==>  Preparing: SELECT id,app_id,config_key,config_value,update_time FROM open_app_config WHERE (app_id = ?)
+==> Parameters: 1(String)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2533347e]
+2026-11-12 15:43:52.883 [main] DEBUG [traceId=NA] c.n.a.s.CachedTenantConfigService - 租户配置回源：appId=1 项数=0
+2026-11-12 15:43:52.884 [main] DEBUG [traceId=NA] c.n.i.r.TenantFlowRuleDataSource - 租户配额规则回源：1 个启用租户
+2026-11-12 15:43:52.886 [main] INFO  [traceId=NA] c.n.i.ratelimit.SentinelRuleConfig - 租户配额规则源已注册：每 coupon.sentinel.rule-refresh-ms ms 刷新一次（管理面改动会主动推）
+2026-11-12 15:43:52.895 [main] INFO  [traceId=NA] c.n.i.ratelimit.SentinelSystemRules - 系统自适应规则未启用（默认关）：它会在高峰拒掉所有人且没有归因，开启前请先按 docs/S3 §10.7 标定阈值
+2026-11-12 15:43:52.899 [main] INFO  [traceId=NA] c.n.i.r.c.MetricsClusterTokenClient - 集群 token 客户端装饰器已装载（集群降级会计入 coupon_sentinel_cluster_token_fallback_total）
+2026-11-12 15:43:52.900 [main] INFO  [traceId=NA] c.n.i.r.c.SentinelClusterClientConfig - 集群流控未启用（默认关）：租户配额按**单机**计算——k 个实例合计是 k 倍配额。要跨实例精确，把 coupon.sentinel.cluster.enabled 打开并起一个 Token Server
+2026-11-12 15:43:52.983 [main] WARN  [traceId=NA] c.n.i.security.SecurityConfig - SECURITY: coupon.security.actuator.password 未配置——actuator Basic 凭据随机生成，需要抓取 metrics 的环境请配置 ACTUATOR_AUTH_PASSWORD
+2026-11-12 15:43:53.219 [main] INFO  [traceId=NA] o.s.s.c.a.a.c.InitializeUserDetailsBeanManagerConfigurer$InitializeUserDetailsManagerConfigurer - Global AuthenticationManager configured with UserDetailsService bean with name actuatorUserDetailsService
+2026-11-12 15:43:53.557 [main] INFO  [traceId=NA] o.s.b.a.e.web.EndpointLinksResolver - Exposing 3 endpoints beneath base path '/actuator'
+2026-11-12 15:43:54.809 [main] INFO  [traceId=NA] c.n.config.RuntimeConfigValidator - 运行时配置校验通过：strict=false checked=[mysql-probe, timezone, mysql-pool-budget] warnings=0
+2026-11-12 15:43:54.810 [main] INFO  [traceId=NA] c.n.i.ratelimit.OpenInterfaceCatalog - 开放面路径模式目录已建立：28 条（接口维度未启用）
+2026-11-12 15:43:54.811 [main] DEBUG [traceId=NA] c.n.i.r.TenantFlowRuleDataSource - 开放面路径模式目录就绪（28 条），重推规则
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2a8cfdf5] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@4e3b00c9] will not be managed by Spring
+==>  Preparing: SELECT id,app_id,app_name,status,qps_limit,daily_quota,contact,create_time,update_time,environment,lifecycle_status,closed_at,retention_until,legal_hold FROM open_app ORDER BY id ASC
+==> Parameters: 
+<==    Columns: id, app_id, app_name, status, qps_limit, daily_quota, contact, create_time, update_time, environment, lifecycle_status, closed_at, retention_until, legal_hold
+<==        Row: 1, 1, 内置应用（存量数据归属）, 1, 0, 0, internal, 2026-11-12 15:42:54, 2026-11-12 15:42:54, PROD, ACTIVE, null, null, 0
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2a8cfdf5]
+2026-11-12 15:43:54.821 [main] DEBUG [traceId=NA] c.n.i.r.TenantFlowRuleDataSource - 租户配额规则回源：1 个启用租户
+2026-11-12 15:43:54.855 [main] INFO  [traceId=NA] o.a.coyote.http11.Http11NioProtocol - Starting ProtocolHandler ["http-nio-auto-1"]
+2026-11-12 15:43:54.878 [main] INFO  [traceId=NA] o.s.b.w.e.tomcat.TomcatWebServer - Tomcat started on port 46375 (http) with context path '/'
+2026-11-12 15:43:55.048 [main] INFO  [traceId=NA] c.n.i.ConsoleE2eIntegrationTest - Started ConsoleE2eIntegrationTest in 151.64 seconds (process running for 178.794)
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@4b5a3a27] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@7a895ae3] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE username = ?
+==> Parameters: admin(String)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@4b5a3a27]
+2026-11-12 15:43:55.083 [main] WARN  [traceId=NA] c.n.i.security.AdminSeedInitializer - SECURITY: 种子管理员使用 dev 默认密码——仅限本地/测试环境，生产必须配置 SEED_ADMIN_PASSWORD，并在首次登录后改密
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@57a7f028] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@21e833e] will not be managed by Spring
+==>  Preparing: INSERT INTO admin_user ( username, password_hash, display_name, enabled, auth_version ) VALUES ( ?, ?, ?, ?, ? )
+==> Parameters: admin(String), {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq(String), 平台管理员（种子）(String), 1(Integer), 0(Long)
+<==    Updates: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@57a7f028]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@31adfee] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@67bd5340] will not be managed by Spring
+==>  Preparing: INSERT IGNORE INTO admin_user_role (user_id, role_id) SELECT ?, id FROM admin_role WHERE code = ?
+==> Parameters: 1(Long), PLATFORM_ADMIN(String)
+<==    Updates: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@31adfee]
+2026-11-12 15:43:55.415 [main] INFO  [traceId=NA] c.n.i.security.AdminSeedInitializer - SECURITY: 种子管理员已创建（username=admin，角色=PLATFORM_ADMIN）——该账号仅在建号时读取配置密码，之后以库内哈希为准
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+2026-11-12 15:43:57.041 [http-nio-auto-1-exec-1] INFO  [traceId=NA] o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-11-12 15:43:57.042 [http-nio-auto-1-exec-1] INFO  [traceId=NA] o.s.web.servlet.DispatcherServlet - Initializing Servlet 'dispatcherServlet'
+2026-11-12 15:43:57.045 [http-nio-auto-1-exec-1] INFO  [traceId=NA] o.s.web.servlet.DispatcherServlet - Completed initialization in 3 ms
+2026-11-12 15:43:57.119 [http-nio-auto-1-exec-1] INFO  [traceId=09f9f1c17611466b] c.n.i.s.LegacyAdminTokenAuthenticationFilter - ADMIN ALLOWED: path=/api/templates（管理令牌校验通过）
+2026-11-12 15:43:57.120 [http-nio-auto-1-exec-1] WARN  [traceId=09f9f1c17611466b] c.n.i.s.LegacyAdminTokenAuthenticationFilter - ADMIN LEGACY TOKEN IN USE: 旧管理令牌仍在使用——将在一个发布周期后移除，迁移到 /console/api/auth 会话登录（公告：docs/runbook/管理面认证翻面.md）
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2347f254] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@6f2e5a81] will not be managed by Spring
+==>  Preparing: SELECT code FROM admin_permission ORDER BY code
+==> Parameters: 
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2347f254]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@4e208374] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@3545bc72] will not be managed by Spring
+==>  Preparing: INSERT INTO coupon_template ( template_code, activity_id, name, coupon_type, face_value, threshold, total_count, issued_count, per_user_limit, daily_limit, per_user_daily_limit, valid_type, valid_days, approve_status, publish_status, app_id, version, scope_type, stacking_layer, funder_type, stock_shard_count, stock_layout_version, budget_unit_cost ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )
+==> Parameters: T20261112154357691357(String), 1001(Long), E2E预置模板-518a805a(String), 1(Integer), 100(Long), 1000(Long), 10(Long), 0(Long), 1(Integer), 0(Long), 0(Integer), 2(Integer), 7(Integer), 1(Integer), 0(Integer), 1(String), 0(Integer), 0(Integer), 0(Integer), 1(Integer), 16(Integer), 1(Integer), 100(Long)
+<==    Updates: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@4e208374]
+2026-11-12 15:43:57.404 [http-nio-auto-1-exec-1] INFO  [traceId=09f9f1c17611466b] c.n.a.service.TemplateAppService - template created: id=1, code=T20261112154357691357, name=E2E预置模板-518a805a, totalCount=10
+2026-11-12 15:43:57.412 [http-nio-auto-1-exec-1] DEBUG [traceId=09f9f1c17611466b] c.n.i.redis.CacheInvalidationBus - 缓存失效已广播：namespace=template key=1 channel=c:cache:invalidate
+2026-11-12 15:43:57.413 [http-nio-auto-1-exec-1] INFO  [traceId=09f9f1c17611466b] c.n.a.service.CachedTemplateReader - template cache invalidated: id=1
+2026-11-12 15:43:57.470 [main] WARN  [traceId=NA] c.n.i.m.MetricsCardinalityGuard - METRICS CARDINALITY GUARD 拒绝注册 meter=http.client.requests（标签数 7 超上限 6；累计拒绝 1 次）——疑似无界标签混入，请对照 GovernanceMetrics 的基数纪律排查
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@57864f9d] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@28442e5d] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:43:58.050238542(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@57864f9d]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@56017738] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@48c9fe8f] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:43:59.168100757(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@56017738]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@5aa46a14] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@5e9bf598] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:44:00.180866503(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@5aa46a14]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7bb69f60] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@1c27715] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:44:01.197513582(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7bb69f60]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7ff8807f] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@6d103a4a] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:44:02.215341461(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7ff8807f]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2e98e85b] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@42b645a8] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:43:51.159102179(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2e98e85b]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2ede6796] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@5e35fce0] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:44:05.397456210(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2ede6796]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@54981b54] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@43e8f2fe] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:44:06.410472767(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@54981b54]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@107bac04] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@2d69a07c] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:44:07.434367903(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@107bac04]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@5360d79c] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@51f4f4ea] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE username = ?
+==> Parameters: admin(String)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@5360d79c]
+Creating a new SqlSession
+Registering transaction synchronization for SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2913882]
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@8881628] will be managed by Spring
+==>  Preparing: SELECT last_hash FROM audit_chain_head WHERE id = 1 FOR UPDATE
+==> Parameters: 
+<==    Columns: last_hash
+<==        Row: null
+<==      Total: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2913882]
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2913882] from current transaction
+==>  Preparing: INSERT INTO audit_log ( app_id, trace_id, action, resource_type, resource_id, after_snapshot, ip, result_code, actor_type, hash_version, prev_hash, record_hash, created_at ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )
+==> Parameters: SYSTEM(String), b8fd6741ec9f41c5(String), ADMIN_AUTH_LOGIN_FAILED(String), ADMIN_AUTH(String), admin(String), {"reason":"BAD_PASSWORD"}(String), 127.0.0.1(String), 0(Integer), ADMIN(String), 2(Integer), cc9be683d1bd50804942ff726590d93f75d5ecd7e7d749f766e563afa36a19fb(String), f78810aa3a057902e9a1ab50bf4dd4e2e98ae44575abf5951b414f9d8985460f(String), 2026-11-12T15:44:07(LocalDateTime)
+<==    Updates: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2913882]
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2913882] from current transaction
+==>  Preparing: UPDATE audit_chain_head SET last_hash = ? WHERE id = 1
+==> Parameters: f78810aa3a057902e9a1ab50bf4dd4e2e98ae44575abf5951b414f9d8985460f(String)
+<==    Updates: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2913882]
+2026-11-12 15:44:07.914 [audit-writer] DEBUG [traceId=NA] c.n.application.service.AuditService - AUDIT WRITTEN: id=1 action=ADMIN_AUTH_LOGIN_FAILED actor=ADMIN/null hash=f78810aa3a05…
+Transaction synchronization committing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2913882]
+Transaction synchronization deregistering SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2913882]
+Transaction synchronization closing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2913882]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@d49648e] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@677c0e89] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE username = ?
+==> Parameters: admin(String)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@d49648e]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3e5cc783] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@750caf07] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:44:08.477543265(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3e5cc783]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@13f8946b] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@4c6b1d8e] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@13f8946b]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@248651ab] was not registered for synchronization because synchronization is not active
+Creating a new SqlSession
+Registering transaction synchronization for SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1a4fca3]
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@53c33b51] will be managed by Spring
+==>  Preparing: SELECT last_hash FROM audit_chain_head WHERE id = 1 FOR UPDATE
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@45dca62b] will not be managed by Spring
+==>  Preparing: SELECT r.code FROM admin_role r JOIN admin_user_role ur ON ur.role_id = r.id WHERE ur.user_id = ? ORDER BY r.code
+==> Parameters: 
+==> Parameters: 1(Long)
+<==    Columns: last_hash
+<==        Row: f78810aa3a057902e9a1ab50bf4dd4e2e98ae44575abf5951b414f9d8985460f
+<==      Total: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1a4fca3]
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1a4fca3] from current transaction
+==>  Preparing: INSERT INTO audit_log ( app_id, user_id, trace_id, action, resource_type, resource_id, ip, result_code, actor_type, actor_id, session_id, hash_version, prev_hash, record_hash, created_at ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )
+==> Parameters: SYSTEM(String), 1(Long), 7e70a0ffab4246e0(String), ADMIN_AUTH_LOGIN_SUCCESS(String), ADMIN_AUTH(String), admin(String), 127.0.0.1(String), 0(Integer), ADMIN(String), 1(String), d47130591e36c111(String), 2(Integer), f78810aa3a057902e9a1ab50bf4dd4e2e98ae44575abf5951b414f9d8985460f(String), be7fcb53a4d8af6705b77407178b9c394807685c4c494d74c417f15f4b115bed(String), 2026-11-12T15:44:08(LocalDateTime)
+<==    Columns: code
+<==        Row: PLATFORM_ADMIN
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@248651ab]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@9afc98c] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@2962cb6c] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Updates: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1a4fca3]
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1a4fca3] from current transaction
+==>  Preparing: UPDATE audit_chain_head SET last_hash = ? WHERE id = 1
+==> Parameters: be7fcb53a4d8af6705b77407178b9c394807685c4c494d74c417f15f4b115bed(String)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==    Updates: 1
+<==        Row: risk:write
+<==        Row: session:revoke
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1a4fca3]
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+2026-11-12 15:44:08.703 [audit-writer] DEBUG [traceId=NA] c.n.application.service.AuditService - AUDIT WRITTEN: id=2 action=ADMIN_AUTH_LOGIN_SUCCESS actor=ADMIN/1 hash=be7fcb53a4d8…
+Transaction synchronization committing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1a4fca3]
+Transaction synchronization deregistering SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1a4fca3]
+Transaction synchronization closing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1a4fca3]
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@9afc98c]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1f71492a] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@1f33ca05] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE id = ?
+==> Parameters: 1(Long)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1f71492a]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@195252d2] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@45d904de] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@195252d2]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@6d068c9] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@59d06126] will not be managed by Spring
+==>  Preparing: SELECT COUNT(*) FROM coupon_template
+==> Parameters: 
+<==    Columns: COUNT(*)
+<==        Row: 1
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@6d068c9]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7266266e] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@681aa18b] will not be managed by Spring
+==>  Preparing: SELECT id, name, coupon_type, face_value, publish_status, total_count, issued_count, create_time FROM coupon_template ORDER BY id DESC LIMIT ? OFFSET ?
+==> Parameters: 20(Integer), 0(Long)
+<==    Columns: id, name, coupon_type, face_value, publish_status, total_count, issued_count, create_time
+<==        Row: 1, E2E预置模板-518a805a, 1, 100, 0, 10, 0, 2026-11-12 15:43:57
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7266266e]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@75d64f21] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@6e875484] will not be managed by Spring
+==>  Preparing: SELECT template_id AS templateId, SUM(used) AS used FROM coupon_stock_shard WHERE template_id IN ( ? ) GROUP BY template_id
+==> Parameters: 1(Long)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@75d64f21]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1c294ea3] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@ccdaeb6] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:44:09.488530393(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1c294ea3]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@af7a483] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@ec82105] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE username = ?
+==> Parameters: admin(String)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@af7a483]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2be551f7] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@1f4c4f4b] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2be551f7]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2fab8ebb] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@5260aa12] will not be managed by Spring
+==>  Preparing: SELECT r.code FROM admin_role r JOIN admin_user_role ur ON ur.role_id = r.id WHERE ur.user_id = ? ORDER BY r.code
+Creating a new SqlSession
+Registering transaction synchronization for SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7c9ee929]
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@7258a585] will be managed by Spring
+==>  Preparing: SELECT last_hash FROM audit_chain_head WHERE id = 1 FOR UPDATE
+==> Parameters: 
+==> Parameters: 1(Long)
+<==    Columns: last_hash
+<==    Columns: code
+<==        Row: PLATFORM_ADMIN
+<==        Row: be7fcb53a4d8af6705b77407178b9c394807685c4c494d74c417f15f4b115bed
+<==      Total: 1
+<==      Total: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7c9ee929]
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2fab8ebb]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3979b074] was not registered for synchronization because synchronization is not active
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7c9ee929] from current transaction
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@6e9ebd73] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==>  Preparing: INSERT INTO audit_log ( app_id, user_id, trace_id, action, resource_type, resource_id, ip, result_code, actor_type, actor_id, session_id, hash_version, prev_hash, record_hash, created_at ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )
+==> Parameters: 1(Long)
+==> Parameters: SYSTEM(String), 1(Long), 026bee8147254c3f(String), ADMIN_AUTH_LOGIN_SUCCESS(String), ADMIN_AUTH(String), admin(String), 127.0.0.1(String), 0(Integer), ADMIN(String), 1(String), 7cc66dbd40856de4(String), 2(Integer), be7fcb53a4d8af6705b77407178b9c394807685c4c494d74c417f15f4b115bed(String), e26c32d45cd485a9464efb8494ffaadb8b97d886c3e2942fe7e469f115acecf9(String), 2026-11-12T15:44:09(LocalDateTime)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3979b074]
+<==    Updates: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7c9ee929]
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7c9ee929] from current transaction
+==>  Preparing: UPDATE audit_chain_head SET last_hash = ? WHERE id = 1
+==> Parameters: e26c32d45cd485a9464efb8494ffaadb8b97d886c3e2942fe7e469f115acecf9(String)
+<==    Updates: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7c9ee929]
+2026-11-12 15:44:09.812 [audit-writer] DEBUG [traceId=NA] c.n.application.service.AuditService - AUDIT WRITTEN: id=3 action=ADMIN_AUTH_LOGIN_SUCCESS actor=ADMIN/1 hash=e26c32d45cd4…
+Transaction synchronization committing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7c9ee929]
+Transaction synchronization deregistering SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7c9ee929]
+Transaction synchronization closing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7c9ee929]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@25f00b14] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@3bb44b39] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE id = ?
+==> Parameters: 1(Long)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@25f00b14]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@6e239261] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@e31ec13] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@6e239261]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@46f07561] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@472048d8] will not be managed by Spring
+==>  Preparing: SELECT COUNT(*) FROM coupon_template
+==> Parameters: 
+<==    Columns: COUNT(*)
+<==        Row: 1
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@46f07561]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1da150fe] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@5882ad1a] will not be managed by Spring
+==>  Preparing: SELECT id, name, coupon_type, face_value, publish_status, total_count, issued_count, create_time FROM coupon_template ORDER BY id DESC LIMIT ? OFFSET ?
+==> Parameters: 20(Integer), 0(Long)
+<==    Columns: id, name, coupon_type, face_value, publish_status, total_count, issued_count, create_time
+<==        Row: 1, E2E预置模板-518a805a, 1, 100, 0, 10, 0, 2026-11-12 15:43:57
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@1da150fe]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@9e8e973] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@79317b62] will not be managed by Spring
+==>  Preparing: SELECT template_id AS templateId, SUM(used) AS used FROM coupon_stock_shard WHERE template_id IN ( ? ) GROUP BY template_id
+==> Parameters: 1(Long)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@9e8e973]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@37915988] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@29b7f08] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE id = ?
+==> Parameters: 1(Long)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@37915988]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@5c25e503] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@29722f0b] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@5c25e503]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@51f8552f] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@694a226c] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE id = ?
+==> Parameters: 1(Long)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@51f8552f]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@32843d2d] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@a652053] will not be managed by Spring
+==>  Preparing: SELECT r.code FROM admin_role r JOIN admin_user_role ur ON ur.role_id = r.id WHERE ur.user_id = ? ORDER BY r.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: PLATFORM_ADMIN
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@32843d2d]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@63d700c6] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@4013c357] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@63d700c6]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@31ed33d9] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@732b4806] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE id = ?
+==> Parameters: 1(Long)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@31ed33d9]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@695bce51] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@4019d004] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@695bce51]
+Creating a new SqlSession
+Registering transaction synchronization for SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@27f8fd58]
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@66f22197] will be managed by Spring
+==>  Preparing: SELECT last_hash FROM audit_chain_head WHERE id = 1 FOR UPDATE
+==> Parameters: 
+<==    Columns: last_hash
+<==        Row: e26c32d45cd485a9464efb8494ffaadb8b97d886c3e2942fe7e469f115acecf9
+<==      Total: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@27f8fd58]
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@27f8fd58] from current transaction
+==>  Preparing: INSERT INTO audit_log ( app_id, user_id, trace_id, action, resource_type, resource_id, ip, result_code, actor_type, actor_id, session_id, hash_version, prev_hash, record_hash, created_at ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )
+==> Parameters: SYSTEM(String), 1(Long), a2626ba99cef470d(String), ADMIN_AUTH_LOGOUT(String), ADMIN_AUTH(String), admin(String), 127.0.0.1(String), 0(Integer), ADMIN(String), 1(String), 7cc66dbd40856de4(String), 2(Integer), e26c32d45cd485a9464efb8494ffaadb8b97d886c3e2942fe7e469f115acecf9(String), 48fdc777badd2dac3201eb7d6847979d8cf5e822f47511b31c944591285b3743(String), 2026-11-12T15:44:09(LocalDateTime)
+<==    Updates: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@27f8fd58]
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@27f8fd58] from current transaction
+==>  Preparing: UPDATE audit_chain_head SET last_hash = ? WHERE id = 1
+==> Parameters: 48fdc777badd2dac3201eb7d6847979d8cf5e822f47511b31c944591285b3743(String)
+<==    Updates: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@27f8fd58]
+2026-11-12 15:44:09.960 [audit-writer] DEBUG [traceId=NA] c.n.application.service.AuditService - AUDIT WRITTEN: id=4 action=ADMIN_AUTH_LOGOUT actor=ADMIN/1 hash=48fdc777badd…
+Transaction synchronization committing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@27f8fd58]
+Transaction synchronization deregistering SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@27f8fd58]
+Transaction synchronization closing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@27f8fd58]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@75ca340e] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@11142654] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE username = ?
+==> Parameters: admin(String)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@75ca340e]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7bf9b444] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@1aa01d93] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:44:10.526194732(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7bf9b444]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7fcabd9c] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@4fdc12b7] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7fcabd9c]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@396a8565] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@168c6155] will not be managed by Spring
+==>  Preparing: SELECT r.code FROM admin_role r JOIN admin_user_role ur ON ur.role_id = r.id WHERE ur.user_id = ? ORDER BY r.code
+Creating a new SqlSession
+Registering transaction synchronization for SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3b41498]
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@7b78fe6f] will be managed by Spring
+==>  Preparing: SELECT last_hash FROM audit_chain_head WHERE id = 1 FOR UPDATE
+==> Parameters: 
+==> Parameters: 1(Long)
+<==    Columns: last_hash
+<==    Columns: code
+<==        Row: PLATFORM_ADMIN
+<==        Row: 48fdc777badd2dac3201eb7d6847979d8cf5e822f47511b31c944591285b3743
+<==      Total: 1
+<==      Total: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3b41498]
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@396a8565]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@625f7b9c] was not registered for synchronization because synchronization is not active
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3b41498] from current transaction
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@172c284b] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==>  Preparing: INSERT INTO audit_log ( app_id, user_id, trace_id, action, resource_type, resource_id, ip, result_code, actor_type, actor_id, session_id, hash_version, prev_hash, record_hash, created_at ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )
+==> Parameters: 1(Long)
+==> Parameters: SYSTEM(String), 1(Long), 5b7dc66334754b61(String), ADMIN_AUTH_LOGIN_SUCCESS(String), ADMIN_AUTH(String), admin(String), 127.0.0.1(String), 0(Integer), ADMIN(String), 1(String), c2c0aa82d3e4e2fa(String), 2(Integer), 48fdc777badd2dac3201eb7d6847979d8cf5e822f47511b31c944591285b3743(String), e2e2b184f37cff033101c417a8b1afc0bd9f773697d968f3497a4cf85b5fe9e7(String), 2026-11-12T15:44:10(LocalDateTime)
+<==    Updates: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3b41498]
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3b41498] from current transaction
+==>  Preparing: UPDATE audit_chain_head SET last_hash = ? WHERE id = 1
+==> Parameters: e2e2b184f37cff033101c417a8b1afc0bd9f773697d968f3497a4cf85b5fe9e7(String)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@625f7b9c]
+<==    Updates: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3b41498]
+2026-11-12 15:44:10.681 [audit-writer] DEBUG [traceId=NA] c.n.application.service.AuditService - AUDIT WRITTEN: id=5 action=ADMIN_AUTH_LOGIN_SUCCESS actor=ADMIN/1 hash=e2e2b184f37c…
+Transaction synchronization committing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3b41498]
+Transaction synchronization deregistering SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3b41498]
+Transaction synchronization closing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@3b41498]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@4950213a] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@a3987bf] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE id = ?
+==> Parameters: 1(Long)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@4950213a]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2a8db97d] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@6c4fd7ec] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2a8db97d]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@6bfcbfb8] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@791ee59c] will not be managed by Spring
+==>  Preparing: SELECT COUNT(*) FROM coupon_template
+==> Parameters: 
+<==    Columns: COUNT(*)
+<==        Row: 1
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@6bfcbfb8]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7ff42a98] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@71c802ff] will not be managed by Spring
+==>  Preparing: SELECT id, name, coupon_type, face_value, publish_status, total_count, issued_count, create_time FROM coupon_template ORDER BY id DESC LIMIT ? OFFSET ?
+==> Parameters: 20(Integer), 0(Long)
+<==    Columns: id, name, coupon_type, face_value, publish_status, total_count, issued_count, create_time
+<==        Row: 1, E2E预置模板-518a805a, 1, 100, 0, 10, 0, 2026-11-12 15:43:57
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7ff42a98]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@4db38a91] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@7cddb622] will not be managed by Spring
+==>  Preparing: SELECT template_id AS templateId, SUM(used) AS used FROM coupon_stock_shard WHERE template_id IN ( ? ) GROUP BY template_id
+==> Parameters: 1(Long)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@4db38a91]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@426a1a0d] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@39a3cace] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE id = ?
+==> Parameters: 1(Long)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@426a1a0d]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@4ea36d10] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@69713bb0] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@4ea36d10]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7c8dc05c] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@1c41c8c6] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE id = ?
+==> Parameters: 1(Long)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7c8dc05c]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@62706d97] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@70e58ee7] will not be managed by Spring
+==>  Preparing: SELECT r.code FROM admin_role r JOIN admin_user_role ur ON ur.role_id = r.id WHERE ur.user_id = ? ORDER BY r.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: PLATFORM_ADMIN
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@62706d97]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@68b9eea5] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@3477c7e3] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@68b9eea5]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@14463a4] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@645e3151] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE id = ?
+==> Parameters: 1(Long)
+<==    Columns: id, username, password_hash, display_name, enabled, auth_version, create_time, update_time
+<==        Row: 1, admin, {bcrypt}$2a$12$hCZ3Rkyh3sodNv4c0XS/JuLh9VAwUUeMLXHLLmaUcGs0NxiA/fyWq, 平台管理员（种子）, 1, 0, 2026-11-12 15:43:55.356, 2026-11-12 15:43:55.356
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@14463a4]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@a58aa2c] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@1f19d68f] will not be managed by Spring
+==>  Preparing: SELECT DISTINCT p.code FROM admin_permission p JOIN admin_role_permission rp ON rp.permission_id = p.id JOIN admin_user_role ur ON ur.role_id = rp.role_id WHERE ur.user_id = ? ORDER BY p.code
+==> Parameters: 1(Long)
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@a58aa2c]
+Creating a new SqlSession
+Registering transaction synchronization for SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@39c6313a]
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@457ddffe] will be managed by Spring
+==>  Preparing: SELECT last_hash FROM audit_chain_head WHERE id = 1 FOR UPDATE
+==> Parameters: 
+<==    Columns: last_hash
+<==        Row: e2e2b184f37cff033101c417a8b1afc0bd9f773697d968f3497a4cf85b5fe9e7
+<==      Total: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@39c6313a]
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@39c6313a] from current transaction
+==>  Preparing: INSERT INTO audit_log ( app_id, user_id, trace_id, action, resource_type, resource_id, ip, result_code, actor_type, actor_id, session_id, hash_version, prev_hash, record_hash, created_at ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )
+==> Parameters: SYSTEM(String), 1(Long), 1e8f9b82ae25423e(String), ADMIN_AUTH_LOGOUT(String), ADMIN_AUTH(String), admin(String), 127.0.0.1(String), 0(Integer), ADMIN(String), 1(String), c2c0aa82d3e4e2fa(String), 2(Integer), e2e2b184f37cff033101c417a8b1afc0bd9f773697d968f3497a4cf85b5fe9e7(String), bc2187fb8a9401eea610d6114bc2a511977bd295462fe1914a4f9148792d85ee(String), 2026-11-12T15:44:11(LocalDateTime)
+<==    Updates: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@39c6313a]
+Fetched SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@39c6313a] from current transaction
+==>  Preparing: UPDATE audit_chain_head SET last_hash = ? WHERE id = 1
+==> Parameters: bc2187fb8a9401eea610d6114bc2a511977bd295462fe1914a4f9148792d85ee(String)
+<==    Updates: 1
+Releasing transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@39c6313a]
+2026-11-12 15:44:11.258 [audit-writer] DEBUG [traceId=NA] c.n.application.service.AuditService - AUDIT WRITTEN: id=6 action=ADMIN_AUTH_LOGOUT actor=ADMIN/1 hash=bc2187fb8a94…
+Transaction synchronization committing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@39c6313a]
+Transaction synchronization deregistering SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@39c6313a]
+Transaction synchronization closing SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@39c6313a]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@19bd2da7] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@757e75bf] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T15:44:11.536387526(LocalDateTime), 100(Integer)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@19bd2da7]
+[E2E] Playwright 全绿，输出如下：
+
+Running 5 tests using 1 worker
+
+  ✓  1 e2e/console.spec.ts:33:1 › ① 打开 /console/ 出登录页，且无"会话已过期"弹窗 (869ms)
+  ✓  2 e2e/console.spec.ts:40:1 › ② 错误密码 → 提示"用户名或密码错误" (937ms)
+  ✓  3 e2e/console.spec.ts:47:1 › ③ 正确登录 → 列表见预置模板、右上角用户名、首页上一页禁用 (1.2s)
+  ✓  4 e2e/console.spec.ts:62:1 › ④ 登出 → 回登录视图 (726ms)
+  ✓  5 e2e/console.spec.ts:69:1 › ⑤ 登出后刷新 → 仍停留登录页（会话已亡） (1.4s)
+
+  5 passed (8.3s)
+
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 199.7 s -- in com.newcoupon.integration.ConsoleE2eIntegrationTest
+[INFO] 
+[INFO] Results:
+[INFO] 
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+[INFO] 
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  03:25 min
+[INFO] Finished at: 2026-11-12T15:44:13+08:00
+[INFO] ------------------------------------------------------------------------

@@ -1,0 +1,173 @@
+trace 总数: 30
+
+== trace f5c537e24b70fb98c574a1b2f3860400 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 98740d64ee955ed75654d2a0a5306731 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     7us [root ] task outbox-dispatcher.dispatch  
+
+== trace 4b4cd26d799d775433e5276076ce6a8e (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     5us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 346fbd8219649569b7cb0d79175359ca (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace cf4ad02dceebf0f1fbe848110222e6ea (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     5us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace c1d53620bbd073f66f435eaa6bf63fdf (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     2us [root ] task worker-id-lease.renew  
+
+== trace 876c6536857200e2e0de6ffdd8fc2f74 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     2us [root ] task cache-invalidation-bus.poll-once  
+
+== trace f992a51c618704a6d65ad9ad757f818c (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     5us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace c3ca561f6f1e5e9154d18571d919f61e (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     5us [root ] task coupon-issue-gate-repair-job.run-once  
+
+== trace c885ee3acd50ebd271a74d1964fda8e0 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace ab61e3f9f0ba89c939c07279bf330b48 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     5us [root ] task outbox-dispatcher.dispatch  
+
+== trace 652cdea90154192dc478a9c03a589caa (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 343a72f5ee62d67d5cb8e2cc4deb4ea8 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 0718a1d6d4ab1672d6b95a35a1bd86ed (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     5us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 0c3dd0bb1a82a32c4d4aa5e802609c73 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     5us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 5818aa3c1d4aacaa58401cdf9e7fffed (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     6us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 4bc662260b7073bd6c8af957e224f5cd (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     5us [root ] task outbox-dispatcher.dispatch  
+
+== trace fe8b17c37b9e884f997e691a7bd8c049 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 66fe02d0ef33f9c865a0a1b6406a9f9e (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 6cd992dd0450ba0943aab652179289cb (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 9f77439bacff269d540d41a66818bf49 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 4aa9633dc450efe281343d21ca45159d (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 04e1458dc393a2b19aa7da4b81272644 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     6us [root ] task outbox-dispatcher.dispatch  
+
+== trace 4dbb43689bf71be99c5e7f5a65543f8b (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 6b91e5a691243f625a907d3ab02c355d (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace c27187cf9fa6126563c91478f4360c63 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace d8120f0e8180e362780a9d557158f6a7 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     5us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 8edbb0b3c12dd2406a6da8e3c4fe207c (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     3us [root ] task coupon-issue-task-worker.scheduled-tick  
+
+== trace 880cb33dc5cfdb6e901a3188c79655bb (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     5us [root ] task outbox-dispatcher.dispatch  
+
+== trace 9b34bc42c3fcdcd84b98c06db09a4151 (service=newcoupon-server, spans=1) ==
+  +     0ms dur=     4us [root ] task coupon-issue-task-worker.scheduled-tick  
+trace 总数: 2
+
+== trace 8ab38272f227971984365592dc1069e2 (service=newcoupon-server, spans=6) ==
+  +     0ms dur=   567us [root ] http post /console/api/auth/login  
+  +     4ms dur=     1us [child] security filterchain before  
+  +     6ms dur=     0us [child] authorize request  
+  +     6ms dur=   560us [child] secured request  
+  +   444ms dur=   219us [child] audit-write  coupon.thread=audit-writer audit.action=ADMIN_AUTH_LOGIN_SUCCESS
+  +   566ms dur=     0us [child] security filterchain after  
+
+== trace eaab2f715d38514f1d08cd9f994bcf04 (service=newcoupon-server, spans=6) ==
+  +     0ms dur=   343us [root ] http post /console/api/auth/login  
+  +     1ms dur=     1us [child] security filterchain before  
+  +     2ms dur=     0us [child] authorize request  
+  +     2ms dur=   339us [child] secured request  
+  +   278ms dur=    55us [child] audit-write  coupon.thread=audit-writer audit.action=ADMIN_AUTH_LOGIN_SUCCESS
+  +   342ms dur=     0us [child] security filterchain after  
+
+trace 总数: 2
+
+== trace 1a7a8c729713e0383a10e52a80027a87 (service=newcoupon-server, spans=6) ==
+  +     0ms dur=  1107us [root ] http post /api/coupons/receive  
+  +   125ms dur=     0us [child] security filterchain before  
+  +   126ms dur=     0us [child] authorize request  
+  +   126ms dur=   979us [child] secured request  
+  +   964ms dur=   109us [child] coupon-issue-persist  coupon.milestone=issue-db-commit coupon.template-id=75
+  +  1106ms dur=     0us [child] security filterchain after  
+
+== trace f33ab5fb8c8c2cadaae1cb6b5959bfa3 (service=newcoupon-server, spans=6) ==
+  +     0ms dur=   448us [root ] http post /api/coupons/receive  
+  +    30ms dur=     1us [child] security filterchain before  
+  +    31ms dur=     0us [child] authorize request  
+  +    31ms dur=   415us [child] secured request  
+  +   365ms dur=    64us [child] coupon-issue-persist  coupon.milestone=issue-db-commit coupon.template-id=74
+  +   447ms dur=     0us [child] security filterchain after  
+
+trace 总数: 2
+
+== trace 3aa0a310e977b17e44a5b2bb2d78c809 (service=newcoupon-server, spans=5) ==
+  +     0ms dur=   228us [root ] http post /api/coupons/receive-async  
+  +     4ms dur=     1us [child] security filterchain before  
+  +     5ms dur=     0us [child] authorize request  
+  +     5ms dur=   221us [child] secured request  
+  +   227ms dur=     0us [child] security filterchain after  
+
+== trace d19386b60f23d6c2c406bb7a82c47758 (service=newcoupon-server, spans=5) ==
+  +     0ms dur=   141us [root ] http post /api/coupons/receive-async  
+  +     2ms dur=     0us [child] security filterchain before  
+  +     3ms dur=     0us [child] authorize request  
+  +     3ms dur=   135us [child] secured request  
+  +   139ms dur=     0us [child] security filterchain after  
+
+trace 总数: 2
+
+== trace 2d9aa8d0877ebb5af7b98da44263185b (service=newcoupon-server, spans=7) ==
+  +     0ms dur=   164us [root ] http post /api/templates/{id}/publish  
+  +     1ms dur=     4us [child] security filterchain before  
+  +     5ms dur=     0us [child] authorize request  
+  +     6ms dur=   157us [child] secured request  
+  +     8ms dur=     0us [child] authorize method  
+  +   162ms dur=    20us [child] audit-write  coupon.thread=audit-writer audit.action=TEMPLATE_PUBLISH
+  +   163ms dur=     0us [child] security filterchain after  
+
+== trace a0ee4c2d94b03ef88ecd121d430abab2 (service=newcoupon-server, spans=7) ==
+  +     0ms dur=   112us [root ] http post /api/templates/{id}/publish  
+  +     5ms dur=     4us [child] security filterchain before  
+  +    10ms dur=     0us [child] authorize request  
+  +    10ms dur=   101us [child] secured request  
+  +    15ms dur=     0us [child] authorize method  
+  +   109ms dur=    23us [child] audit-write  coupon.thread=audit-writer audit.action=TEMPLATE_PUBLISH
+  +   111ms dur=     0us [child] security filterchain after  
+
+trace 总数: 2
+
+== trace d3f88a232d6f30f0a0b51725b3513546 (service=newcoupon-server, spans=2) ==
+  +     0ms dur=    88us [root ] task coupon-issue-task-worker.scheduled-tick  
+  +    30ms dur=    58us [child] issue-worker-round  coupon.thread=scheduling-2 issue.claimed=1
+
+== trace 553379fa84f36b02a609dd755c0b38c6 (service=newcoupon-server, spans=2) ==
+  +     0ms dur=   144us [root ] task coupon-issue-task-worker.scheduled-tick  
+  +    29ms dur=   114us [child] issue-worker-round  coupon.thread=scheduling-3 issue.claimed=1
+

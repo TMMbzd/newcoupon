@@ -1,0 +1,16 @@
+== 开关关对照（cutoff 2026-11-12 15:55:26 停 traced 实例，OFF 实例同流量复跑） ==
+
+Jaeger API: GET /api/traces?service=newcoupon-server&start=15:55:26→ now（limit=100）
+OFF 窗口内新 trace 数: 1
+  947dedcc5f3a9415f029195fdeede433 [task coupon-issue-task-worker.scheduled-tick]
+
+该 trace 的 span 起始时刻（关键甄别）：
+  span start: 15:55:26.189547 task coupon-issue-task-worker.scheduled-tick
+→ 15:55:26.1895 == 停机秒：这是 traced 实例的最后一次 scheduled tick（OTel
+  BatchSpanProcessor 在进程关闭时 flush 的收尾 span），不是 OFF 实例导出的。
+
+Jaeger API: start=15:55:30（排除停机 flush）→ now：
+  OFF 窗口（15:55:30 后）新 trace 数: 0
+
+OFF 实例同时段自身的 @Scheduled tick（200ms/轮）一个都没出现——若导出链活着，
+这里应是每分钟 ~300 条 task span（对照：traced 实例同量级）。

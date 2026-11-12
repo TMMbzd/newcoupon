@@ -1,0 +1,309 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] -------------------< com.newcoupon:newcoupon-server >-------------------
+[INFO] Building newcoupon-server 0.1.0-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) @ newcoupon-server ---
+[INFO] Copying 2 resources from src/main/resources to target/classes
+[INFO] Copying 50 resources from src/main/resources to target/classes
+[INFO] 
+[INFO] --- maven-compiler-plugin:3.13.0:compile (default-compile) @ newcoupon-server ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- maven-resources-plugin:3.3.1:testResources (default-testResources) @ newcoupon-server ---
+[INFO] skip non existing resourceDirectory /home/tmm/java-pro/newcoupon/src/test/resources
+[INFO] 
+[INFO] --- maven-compiler-plugin:3.13.0:testCompile (default-testCompile) @ newcoupon-server ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- maven-surefire-plugin:3.2.5:test (default-test) @ newcoupon-server ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.newcoupon.integration.ConsoleE2eIntegrationTest
+14:54:46.857 [main] INFO org.springframework.test.context.support.AnnotationConfigContextLoaderUtils -- Could not detect default configuration classes for test class [com.newcoupon.integration.ConsoleE2eIntegrationTest]: ConsoleE2eIntegrationTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+14:54:46.938 [main] INFO org.testcontainers.images.PullPolicy -- Image pull policy will be performed by: DefaultPullPolicy()
+14:54:46.942 [main] INFO org.testcontainers.utility.ImageNameSubstitutor -- Image name substitution will be performed by: DefaultImageNameSubstitutor (composite of 'ConfigurationFileImageNameSubstitutor' and 'PrefixingImageNameSubstitutor')
+14:54:47.223 [main] INFO org.testcontainers.dockerclient.DockerClientProviderStrategy -- Loaded org.testcontainers.dockerclient.UnixSocketClientProviderStrategy from ~/.testcontainers.properties, will try it first
+14:54:47.722 [main] INFO org.testcontainers.dockerclient.DockerClientProviderStrategy -- Found Docker environment with local Unix socket (unix:///var/run/docker.sock)
+14:54:47.724 [main] INFO org.testcontainers.DockerClientFactory -- Docker host IP address is localhost
+14:54:47.755 [main] INFO org.testcontainers.DockerClientFactory -- Connected to docker: 
+  Server Version: 28.5.2
+  API Version: 1.51
+  Operating System: Docker Desktop
+  Total Memory: 7940 MB
+14:54:47.943 [main] INFO tc.testcontainers/ryuk:0.7.0 -- Creating container for image: testcontainers/ryuk:0.7.0
+14:54:48.199 [main] INFO org.testcontainers.utility.RegistryAuthLocator -- Credential helper/store (docker-credential-desktop.exe) does not have credentials for https://index.docker.io/v1/
+14:54:48.511 [main] INFO tc.testcontainers/ryuk:0.7.0 -- Container testcontainers/ryuk:0.7.0 is starting: 60eccfecb0dae671e65910459ae7cf679b8975c5e6dd2901228ec261ab42bf94
+14:54:49.800 [main] INFO tc.testcontainers/ryuk:0.7.0 -- Container testcontainers/ryuk:0.7.0 started in PT1.857194434S
+14:54:49.811 [main] INFO org.testcontainers.utility.RyukResourceReaper -- Ryuk started - will monitor and terminate Testcontainers containers on JVM exit
+14:54:49.811 [main] INFO org.testcontainers.DockerClientFactory -- Checking the system...
+14:54:49.812 [main] INFO org.testcontainers.DockerClientFactory -- ✔︎ Docker server version should be at least 1.6.0
+14:54:49.815 [main] INFO tc.mysql:8.0 -- Creating container for image: mysql:8.0
+14:54:50.003 [main] INFO tc.mysql:8.0 -- Container mysql:8.0 is starting: 9a9904d311f64dfcb1dab9964b32ac29778b7eaa14ace822337c7f2d27e48557
+14:54:50.753 [main] INFO tc.mysql:8.0 -- Waiting for database connection to become available at jdbc:mysql://localhost:46033/test using query 'SELECT 1'
+14:55:18.571 [main] INFO tc.mysql:8.0 -- Container mysql:8.0 started in PT28.756339417S
+14:55:18.572 [main] INFO tc.mysql:8.0 -- Container is started (JDBC URL: jdbc:mysql://localhost:46033/test)
+14:55:18.572 [main] INFO tc.redis:7-alpine -- Creating container for image: redis:7-alpine
+14:55:18.745 [main] INFO tc.redis:7-alpine -- Container redis:7-alpine is starting: 63c0f3a97731eee28b257c4c1239f8f7cdaf57ef7e36a9d32195657283d2cad2
+14:55:19.481 [main] INFO tc.redis:7-alpine -- Container redis:7-alpine started in PT0.908478495S
+14:55:19.660 [main] INFO org.springframework.boot.test.context.SpringBootTestContextBootstrapper -- Found @SpringBootConfiguration com.newcoupon.NewCouponApplication for test class com.newcoupon.integration.ConsoleE2eIntegrationTest
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::                (v3.3.5)
+
+2026-11-12 14:55:20.338 [background-preinit] INFO  [traceId=NA] o.h.validator.internal.util.Version - HV000001: Hibernate Validator 8.0.1.Final
+2026-11-12 14:55:20.389 [main] INFO  [traceId=NA] c.n.i.ConsoleE2eIntegrationTest - Starting ConsoleE2eIntegrationTest using Java 17.0.21.0.3 with PID 2687470 (started by tmm in /home/tmm/java-pro/newcoupon)
+2026-11-12 14:55:20.389 [main] DEBUG [traceId=NA] c.n.i.ConsoleE2eIntegrationTest - Running with Spring Boot v3.3.5, Spring v6.1.14
+2026-11-12 14:55:20.390 [main] INFO  [traceId=NA] c.n.i.ConsoleE2eIntegrationTest - The following 1 profile is active: "dev"
+2026-11-12 14:55:22.401 [main] INFO  [traceId=NA] o.s.d.r.c.RepositoryConfigurationDelegate - Multiple Spring Data modules found, entering strict repository configuration mode
+2026-11-12 14:55:22.413 [main] INFO  [traceId=NA] o.s.d.r.c.RepositoryConfigurationDelegate - Bootstrapping Spring Data Redis repositories in DEFAULT mode.
+2026-11-12 14:55:22.499 [main] INFO  [traceId=NA] o.s.d.r.c.RepositoryConfigurationDelegate - Finished Spring Data repository scanning in 47 ms. Found 0 Redis repository interfaces.
+2026-11-12 14:55:24.605 [main] INFO  [traceId=NA] o.s.b.w.e.tomcat.TomcatWebServer - Tomcat initialized with port 0 (http)
+2026-11-12 14:55:24.624 [main] INFO  [traceId=NA] o.a.coyote.http11.Http11NioProtocol - Initializing ProtocolHandler ["http-nio-auto-1"]
+2026-11-12 14:55:24.628 [main] INFO  [traceId=NA] o.a.catalina.core.StandardService - Starting service [Tomcat]
+2026-11-12 14:55:24.628 [main] INFO  [traceId=NA] o.a.catalina.core.StandardEngine - Starting Servlet engine: [Apache Tomcat/10.1.31]
+2026-11-12 14:55:24.731 [main] INFO  [traceId=NA] o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring embedded WebApplicationContext
+2026-11-12 14:55:24.731 [main] INFO  [traceId=NA] o.s.b.w.s.c.ServletWebServerApplicationContext - Root WebApplicationContext: initialization completed in 4118 ms
+2026-11-12 14:55:25.568 [main] INFO  [traceId=NA] org.flywaydb.core.FlywayExecutor - Database: jdbc:mysql://localhost:46033/test (MySQL 8.0)
+2026-11-12 14:55:25.686 [main] INFO  [traceId=NA] o.f.c.i.s.JdbcTableSchemaHistory - Schema history table `test`.`flyway_schema_history` does not exist yet
+2026-11-12 14:55:25.693 [main] INFO  [traceId=NA] o.f.core.internal.command.DbValidate - Successfully validated 44 migrations (execution time 00:00.069s)
+2026-11-12 14:55:25.722 [main] INFO  [traceId=NA] o.f.c.i.s.JdbcTableSchemaHistory - Creating Schema History table `test`.`flyway_schema_history` ...
+2026-11-12 14:55:25.929 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Current version of schema `test`: << Empty Schema >>
+2026-11-12 14:55:25.952 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "1 - init coupon core"
+2026-11-12 14:55:26.464 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "2 - stage1 limits and seq"
+2026-11-12 14:55:26.988 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "3 - stock drift log"
+2026-11-12 14:55:27.118 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "5 - coupon expire task"
+2026-11-12 14:55:27.397 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "6 - shard by user"
+2026-11-12 14:56:06.398 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "7 - coupon release task"
+2026-11-12 14:56:24.299 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "8 - conservation"
+2026-11-12 14:56:30.476 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "9 - p2a schema freeze"
+2026-11-12 14:56:47.557 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "10 - p2b stock bucket"
+2026-11-12 14:56:48.085 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "11 - p2d outbox"
+2026-11-12 14:56:48.357 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "12 - p2d event consumed"
+2026-11-12 14:56:48.541 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "13 - l37 allocated hi"
+2026-11-12 14:56:48.863 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "14 - s1 open api"
+2026-11-12 14:57:09.935 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "15 - s2 tenant config"
+2026-11-12 14:57:10.253 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "16 - s2 switch plan"
+2026-11-12 14:57:10.419 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "18 - audit log"
+2026-11-12 14:57:10.581 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "19 - coupon template five dimensions"
+2026-11-12 14:57:10.763 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "20 - coupon daily bill"
+2026-11-12 14:57:10.878 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "21 - ring2 line share and partial refund"
+2026-11-12 14:57:17.211 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "22 - settle party"
+2026-11-12 14:57:18.709 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "23 - pricing snapshot"
+2026-11-12 14:57:19.469 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "24 - settle party daily bill"
+2026-11-12 14:57:20.322 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "25 - c1 stock shards"
+2026-11-12 14:57:20.823 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "26 - c1 stock adjust log"
+2026-11-12 14:57:21.026 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "27 - async issue task and daily counter"
+2026-11-12 14:57:21.378 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "28 - l73 user coupon uk idem app id"
+2026-11-12 14:57:28.173 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "29 - drop legacy stock bucket"
+2026-11-12 14:57:28.251 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "30 - drop stock model column"
+2026-11-12 14:57:28.608 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "31 - issue gate compensation"
+2026-11-12 14:57:29.164 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "35 - audit chain head"
+2026-11-12 14:57:29.359 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "36 - issue gate repair"
+2026-11-12 14:57:29.542 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "37 - stock layout version"
+2026-11-12 14:57:29.939 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "38 - drop legacy shard unique"
+2026-11-12 14:57:30.031 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "39 - grant task domain"
+2026-11-12 14:57:30.508 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "41 - coupon code domain"
+2026-11-12 14:57:30.881 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "42 - budget ledger and activity"
+2026-11-12 14:57:31.469 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "43 - coupon event biz fields"
+2026-11-12 14:57:31.733 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "44 - admin rbac"
+2026-11-12 14:57:32.520 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "45 - app lifecycle and environment"
+2026-11-12 14:57:32.769 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "46 - audit actor and export"
+2026-11-12 14:57:33.113 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "47 - settle quality and hold"
+2026-11-12 14:57:34.178 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "48 - risk decision minimal"
+2026-11-12 14:57:34.684 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "49 - budget ledger account time index"
+2026-11-12 14:57:34.788 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Migrating schema `test` to version "50 - ops drain permission"
+2026-11-12 14:57:34.887 [main] INFO  [traceId=NA] o.f.core.internal.command.DbMigrate - Successfully applied 44 migrations to schema `test`, now at version v50 (execution time 02:03.254s)
+Logging initialized using 'class org.apache.ibatis.logging.stdout.StdOutImpl' adapter.
+Get /10.255.255.254 network interface 
+Get network interface info: name:lo (lo)
+Initialization Sequence datacenterId:0 workerId:26
+2026-11-12 14:57:36.965 [main] INFO  [traceId=NA] c.n.i.ratelimit.Bucket4jConfig - Bucket4j 已接线：复用现有 Lettuce 连接，桶状态存 Redis（CAS 模式）
+2026-11-12 14:57:37.058 [main] DEBUG [traceId=NA] c.n.i.web.RiskControlFilter - Filter 'riskControlFilter' configured for use
+2026-11-12 14:57:37.059 [main] DEBUG [traceId=NA] c.n.infrastructure.web.TraceIdFilter - Filter 'traceIdFilter' configured for use
+2026-11-12 14:57:37.059 [main] DEBUG [traceId=NA] c.n.i.web.OpenApiIdempotentFilter - Filter 'openApiIdempotentFilter' configured for use
+2026-11-12 14:57:37.060 [main] DEBUG [traceId=NA] c.n.i.web.OpenApiQuotaFilter - Filter 'openApiQuotaFilter' configured for use
+2026-11-12 14:57:37.060 [main] DEBUG [traceId=NA] c.n.i.web.OpenApiAuthFilter - Filter 'openApiAuthFilter' configured for use
+2026-11-12 14:57:37.061 [main] DEBUG [traceId=NA] c.n.i.web.RiskContextFilter - Filter 'riskContextFilter' configured for use
+2026-11-12 14:57:37.275 [main] INFO  [traceId=NA] c.n.infrastructure.id.WorkerIdLease - snowflake worker lease acquired: workerId=0, owner=4993a790-3dcc-4f87-b618-9742bfc0e1dd
+2026-11-12 14:57:38.391 [main] WARN  [traceId=NA] c.n.a.service.CouponCodeService - coupon.code.pepper 使用 dev 默认值；生产必须注入 CODE_PEPPER。注意：更换 pepper 会使全部存量兑换码失效
+2026-11-12 14:57:38.500 [main] INFO  [traceId=NA] c.n.a.s.CouponIssueTaskBatchTxService - issue task raw bulk enabled=true
+2026-11-12 14:57:38.811 [main] INFO  [traceId=NA] c.n.a.service.SwitchPlanStartupCheck - 预案定义校验通过：3 份预案、共 30 项配置
+INFO: Sentinel log output type is: file
+INFO: Sentinel log charset is: utf-8
+INFO: Sentinel log base directory is: /home/tmm/logs/csp/
+INFO: Sentinel log name use pid is: false
+INFO: Sentinel log level is: INFO
+2026-11-12 14:57:39.591 [main] INFO  [traceId=NA] c.n.i.ratelimit.SharedRuleProperty - 租户配额规则槽位已注册（JVM 级，只此一个）
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@68400aa5] was not registered for synchronization because synchronization is not active
+2026-11-12 14:57:39.952 [main] INFO  [traceId=NA] com.zaxxer.hikari.HikariDataSource - HikariPool-1 - Starting...
+2026-11-12 14:57:40.171 [main] INFO  [traceId=NA] com.zaxxer.hikari.pool.HikariPool - HikariPool-1 - Added connection conn0: url=jdbc:h2:mem:config user=SA
+2026-11-12 14:57:40.173 [main] INFO  [traceId=NA] com.zaxxer.hikari.HikariDataSource - HikariPool-1 - Start completed.
+2026-11-12 14:57:40.311 [main] INFO  [traceId=NA] com.zaxxer.hikari.HikariDataSource - HikariPool-2 - Starting...
+2026-11-12 14:57:40.325 [main] INFO  [traceId=NA] com.zaxxer.hikari.pool.HikariPool - HikariPool-2 - Added connection com.mysql.cj.jdbc.ConnectionImpl@2c27d6e5
+2026-11-12 14:57:40.325 [main] INFO  [traceId=NA] com.zaxxer.hikari.HikariDataSource - HikariPool-2 - Start completed.
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@2643ff15] will not be managed by Spring
+==>  Preparing: SELECT id,app_id,app_name,status,qps_limit,daily_quota,contact,create_time,update_time,environment,lifecycle_status,closed_at,retention_until,legal_hold FROM open_app ORDER BY id ASC
+==> Parameters: 
+<==    Columns: id, app_id, app_name, status, qps_limit, daily_quota, contact, create_time, update_time, environment, lifecycle_status, closed_at, retention_until, legal_hold
+<==        Row: 1, 1, 内置应用（存量数据归属）, 1, 0, 0, internal, 2026-11-12 14:56:49, 2026-11-12 14:56:49, PROD, ACTIVE, null, null, 0
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@68400aa5]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2887b0ea] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@1c6fd7f4] will not be managed by Spring
+==>  Preparing: SELECT id,app_id,config_key,config_value,update_time FROM open_app_config WHERE (app_id = ?)
+==> Parameters: 1(String)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@2887b0ea]
+2026-11-12 14:57:32.920 [main] DEBUG [traceId=NA] c.n.a.s.CachedTenantConfigService - 租户配置回源：appId=1 项数=0
+2026-11-12 14:57:32.922 [main] DEBUG [traceId=NA] c.n.i.r.TenantFlowRuleDataSource - 租户配额规则回源：1 个启用租户
+2026-11-12 14:57:32.924 [main] INFO  [traceId=NA] c.n.i.ratelimit.SentinelRuleConfig - 租户配额规则源已注册：每 coupon.sentinel.rule-refresh-ms ms 刷新一次（管理面改动会主动推）
+2026-11-12 14:57:32.934 [main] INFO  [traceId=NA] c.n.i.ratelimit.SentinelSystemRules - 系统自适应规则未启用（默认关）：它会在高峰拒掉所有人且没有归因，开启前请先按 docs/S3 §10.7 标定阈值
+2026-11-12 14:57:32.939 [main] INFO  [traceId=NA] c.n.i.r.c.MetricsClusterTokenClient - 集群 token 客户端装饰器已装载（集群降级会计入 coupon_sentinel_cluster_token_fallback_total）
+2026-11-12 14:57:32.941 [main] INFO  [traceId=NA] c.n.i.r.c.SentinelClusterClientConfig - 集群流控未启用（默认关）：租户配额按**单机**计算——k 个实例合计是 k 倍配额。要跨实例精确，把 coupon.sentinel.cluster.enabled 打开并起一个 Token Server
+2026-11-12 14:57:33.030 [main] WARN  [traceId=NA] c.n.i.security.SecurityConfig - SECURITY: coupon.security.actuator.password 未配置——actuator Basic 凭据随机生成，需要抓取 metrics 的环境请配置 ACTUATOR_AUTH_PASSWORD
+2026-11-12 14:57:46.336 [main] INFO  [traceId=NA] o.s.s.c.a.a.c.InitializeUserDetailsBeanManagerConfigurer$InitializeUserDetailsManagerConfigurer - Global AuthenticationManager configured with UserDetailsService bean with name actuatorUserDetailsService
+2026-11-12 14:57:46.766 [main] INFO  [traceId=NA] o.s.b.a.e.web.EndpointLinksResolver - Exposing 3 endpoints beneath base path '/actuator'
+2026-11-12 14:57:48.174 [main] INFO  [traceId=NA] c.n.config.RuntimeConfigValidator - 运行时配置校验通过：strict=false checked=[mysql-probe, timezone, mysql-pool-budget] warnings=0
+2026-11-12 14:57:48.176 [main] INFO  [traceId=NA] c.n.i.ratelimit.OpenInterfaceCatalog - 开放面路径模式目录已建立：28 条（接口维度未启用）
+2026-11-12 14:57:48.177 [main] DEBUG [traceId=NA] c.n.i.r.TenantFlowRuleDataSource - 开放面路径模式目录就绪（28 条），重推规则
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7752ca24] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@624f1682] will not be managed by Spring
+==>  Preparing: SELECT id,app_id,app_name,status,qps_limit,daily_quota,contact,create_time,update_time,environment,lifecycle_status,closed_at,retention_until,legal_hold FROM open_app ORDER BY id ASC
+==> Parameters: 
+<==    Columns: id, app_id, app_name, status, qps_limit, daily_quota, contact, create_time, update_time, environment, lifecycle_status, closed_at, retention_until, legal_hold
+<==        Row: 1, 1, 内置应用（存量数据归属）, 1, 0, 0, internal, 2026-11-12 14:56:49, 2026-11-12 14:56:49, PROD, ACTIVE, null, null, 0
+<==      Total: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@7752ca24]
+2026-11-12 14:57:48.189 [main] DEBUG [traceId=NA] c.n.i.r.TenantFlowRuleDataSource - 租户配额规则回源：1 个启用租户
+2026-11-12 14:57:48.230 [main] INFO  [traceId=NA] o.a.coyote.http11.Http11NioProtocol - Starting ProtocolHandler ["http-nio-auto-1"]
+2026-11-12 14:57:48.260 [main] INFO  [traceId=NA] o.s.b.w.e.tomcat.TomcatWebServer - Tomcat started on port 45385 (http) with context path '/'
+2026-11-12 14:57:48.455 [main] INFO  [traceId=NA] c.n.i.ConsoleE2eIntegrationTest - Started ConsoleE2eIntegrationTest in 148.545 seconds (process running for 177.805)
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@689c285d] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@d7c36b] will not be managed by Spring
+==>  Preparing: SELECT * FROM admin_user WHERE username = ?
+==> Parameters: admin(String)
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@689c285d]
+2026-11-12 14:57:48.482 [main] WARN  [traceId=NA] c.n.i.security.AdminSeedInitializer - SECURITY: 种子管理员使用 dev 默认密码——仅限本地/测试环境，生产必须配置 SEED_ADMIN_PASSWORD，并在首次登录后改密
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@9039c76] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@72842663] will not be managed by Spring
+==>  Preparing: INSERT INTO admin_user ( username, password_hash, display_name, enabled, auth_version ) VALUES ( ?, ?, ?, ?, ? )
+==> Parameters: admin(String), {bcrypt}$2a$12$wFp.8E5WhW2/wB/3ew9hK.t4qFx5bwMYVblfkKbCdPTzq9S6aNwlG(String), 平台管理员（种子）(String), 1(Integer), 0(Long)
+<==    Updates: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@9039c76]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@489a2cfb] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@672dc150] will not be managed by Spring
+==>  Preparing: INSERT IGNORE INTO admin_user_role (user_id, role_id) SELECT ?, id FROM admin_role WHERE code = ?
+==> Parameters: 1(Long), PLATFORM_ADMIN(String)
+<==    Updates: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@489a2cfb]
+2026-11-12 14:57:48.799 [main] INFO  [traceId=NA] c.n.i.security.AdminSeedInitializer - SECURITY: 种子管理员已创建（username=admin，角色=PLATFORM_ADMIN）——该账号仅在建号时读取配置密码，之后以库内哈希为准
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+2026-11-12 14:57:50.963 [http-nio-auto-1-exec-1] INFO  [traceId=NA] o.a.c.c.C.[Tomcat].[localhost].[/] - Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-11-12 14:57:50.963 [http-nio-auto-1-exec-1] INFO  [traceId=NA] o.s.web.servlet.DispatcherServlet - Initializing Servlet 'dispatcherServlet'
+2026-11-12 14:57:50.965 [http-nio-auto-1-exec-1] INFO  [traceId=NA] o.s.web.servlet.DispatcherServlet - Completed initialization in 2 ms
+2026-11-12 14:57:51.004 [http-nio-auto-1-exec-1] INFO  [traceId=0b3a6259ce02437d] c.n.i.s.LegacyAdminTokenAuthenticationFilter - ADMIN ALLOWED: path=/api/templates（管理令牌校验通过）
+2026-11-12 14:57:51.004 [http-nio-auto-1-exec-1] WARN  [traceId=0b3a6259ce02437d] c.n.i.s.LegacyAdminTokenAuthenticationFilter - ADMIN LEGACY TOKEN IN USE: 旧管理令牌仍在使用——将在一个发布周期后移除，迁移到 /console/api/auth 会话登录（公告：docs/runbook/管理面认证翻面.md）
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@672ff796] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@5c566cb3] will not be managed by Spring
+==>  Preparing: SELECT code FROM admin_permission ORDER BY code
+==> Parameters: 
+<==    Columns: code
+<==        Row: app:*
+<==        Row: audit:export
+<==        Row: audit:read
+<==        Row: budget:read
+<==        Row: budget:write
+<==        Row: config:write
+<==        Row: issuance:read
+<==        Row: issuance:write
+<==        Row: ops:drain
+<==        Row: plan:apply
+<==        Row: risk:read
+<==        Row: risk:write
+<==        Row: session:revoke
+<==        Row: settlement:read
+<==        Row: settlement:write
+<==        Row: template:approve
+<==        Row: template:read
+<==        Row: template:write
+<==        Row: tenant:lifecycle
+<==      Total: 19
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@672ff796]
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@761ef6e6] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@a6019c7] will not be managed by Spring
+==>  Preparing: INSERT INTO coupon_template ( template_code, activity_id, name, coupon_type, face_value, threshold, total_count, issued_count, per_user_limit, daily_limit, per_user_daily_limit, valid_type, valid_days, approve_status, publish_status, app_id, version, scope_type, stacking_layer, funder_type, stock_shard_count, stock_layout_version, budget_unit_cost ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )
+==> Parameters: T20261112145751789867(String), 1001(Long), E2E预置模板-d4e5cd95(String), 1(Integer), 100(Long), 1000(Long), 10(Long), 0(Long), 1(Integer), 0(Long), 0(Integer), 2(Integer), 7(Integer), 1(Integer), 0(Integer), 1(String), 0(Integer), 0(Integer), 0(Integer), 1(Integer), 16(Integer), 1(Integer), 100(Long)
+<==    Updates: 1
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@761ef6e6]
+2026-11-12 14:57:51.269 [http-nio-auto-1-exec-1] INFO  [traceId=0b3a6259ce02437d] c.n.a.service.TemplateAppService - template created: id=1, code=T20261112145751789867, name=E2E预置模板-d4e5cd95, totalCount=10
+2026-11-12 14:57:51.277 [http-nio-auto-1-exec-1] DEBUG [traceId=0b3a6259ce02437d] c.n.i.redis.CacheInvalidationBus - 缓存失效已广播：namespace=template key=1 channel=c:cache:invalidate
+2026-11-12 14:57:51.277 [http-nio-auto-1-exec-1] INFO  [traceId=0b3a6259ce02437d] c.n.a.service.CachedTemplateReader - template cache invalidated: id=1
+2026-11-12 14:57:51.336 [main] WARN  [traceId=NA] c.n.i.m.MetricsCardinalityGuard - METRICS CARDINALITY GUARD 拒绝注册 meter=http.client.requests（标签数 7 超上限 6；累计拒绝 1 次）——疑似无界标签混入，请对照 GovernanceMetrics 的基数纪律排查
+Creating a new SqlSession
+SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@538a31f] was not registered for synchronization because synchronization is not active
+JDBC Connection [org.apache.shardingsphere.driver.jdbc.core.connection.ShardingSphereConnection@7c5ebd5d] will not be managed by Spring
+==>  Preparing: SELECT * FROM coupon_outbox WHERE status = 0 AND next_scan_time <= ? ORDER BY id LIMIT ?
+==> Parameters: 2026-11-12T14:57:51.455975071(LocalDateTime), 100(Integer)
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 184.8 s <<< FAILURE! -- in com.newcoupon.integration.ConsoleE2eIntegrationTest
+[ERROR] com.newcoupon.integration.ConsoleE2eIntegrationTest.manualFiveSteps_playwrightGreen -- Time elapsed: 2.632 s <<< FAILURE!
+java.lang.AssertionError: 
+[Playwright 工程应在 console/ 内（console/e2e/console.spec.ts）] 
+Expecting path:
+  /home/tmm/java-pro/console/e2e/console.spec.ts
+to exist (symbolic links were followed).
+	at com.newcoupon.integration.ConsoleE2eIntegrationTest.manualFiveSteps_playwrightGreen(ConsoleE2eIntegrationTest.java:94)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:569)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1511)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1511)
+
+<==      Total: 0
+Closing non transactional SqlSession [org.apache.ibatis.session.defaults.DefaultSqlSession@538a31f]
+[INFO] 
+[INFO] Results:
+[INFO] 
+[ERROR] Failures: 
+[ERROR]   ConsoleE2eIntegrationTest.manualFiveSteps_playwrightGreen:94 [Playwright 工程应在 console/ 内（console/e2e/console.spec.ts）] 
+Expecting path:
+  /home/tmm/java-pro/console/e2e/console.spec.ts
+to exist (symbolic links were followed).
+[INFO] 
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0
+[INFO] 
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  03:10 min
+[INFO] Finished at: 2026-11-12T14:57:53+08:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test (default-test) on project newcoupon-server: There are test failures.
+[ERROR] 
+[ERROR] Please refer to /home/tmm/java-pro/newcoupon/target/surefire-reports for the individual test results.
+[ERROR] Please refer to dump files (if any exist) [date].dump, [date]-jvmRun[N].dump and [date].dumpstream.
+[ERROR] -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoFailureException

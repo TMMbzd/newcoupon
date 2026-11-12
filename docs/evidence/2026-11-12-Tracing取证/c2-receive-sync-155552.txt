@@ -1,0 +1,1 @@
+{"code":0,"message":"成功","data":{"couponId":114271944420884480,"templateCode":"T20261112155553754664","faceValue":100,"validEnd":"2026-11-19T23:59:59","duplicated":false}}

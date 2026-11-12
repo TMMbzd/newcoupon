@@ -15,6 +15,10 @@
 - **谁怎么用**：值班/on-call 看 §5 告警处置；发布决策看 §4 预算政策；
   面试/评审用 §2+§3 讲清"为什么不用 HTTP 200 当 SLI"。
 - **测量口径**：单实例、非 HA（§6）——多实例部署后本文口径要重述，不能直接沿用。
+- **与 Tracing 的分工**（2026-11-12 刀 C 起）：日志/响应头的 **X-Trace-Id 是业务关联号**
+  （TraceIdFilter 生成，报障对账、用户报错时拿号查日志），**Micrometer Tracing 的
+  traceId 是全链路 span 树**（`coupon.tracing.enabled` 开关，默认关）——两套 ID 各自
+  独立、互不替代，见 docs/runbook/Tracing与E2E.md。
 
 ## 2. SLO 目标（28 天滚动窗口）
 
@@ -157,7 +161,7 @@ latency = histogram_quantile(0.99, sum by (journey, le) (rate(coupon_sli_duratio
 | 不做 | 理由 | 升级路径 |
 |---|---|---|
 | Grafana 大盘 JSON | 可用性/预算/燃烧率/延迟四类口径都已有 recording + alerting 执法（ops/prometheus/），大盘是呈现层不产生新口径 | 5B/后续：按 SLO.md 的公式直配面板；provisioning JSON 进 Git |
-| Tracing 全家 | 刀 2（5B）登记总口径：Micrometer Tracing + OTel bridge + OTLP，与 SLI 分开交付 | 见 V6 计划 5B 分节 |
+| Tracing 全家 | 刀 2（5B）登记总口径：Micrometer Tracing + OTel bridge + OTLP，与 SLI 分开交付 | **已交付（2026-11-12 生产化模拟刀 C）**：OTLP→Jaeger、异步传播、里程碑 span，runbook 见 docs/runbook/Tracing与E2E.md；生产采样率/tail sampling 的升级路径在该 runbook 裁剪登记 |
 | 告警路由分级实现（Alertmanager） | 规则里已写 severity: page/ticket（§5 口径），路由是部署侧组件；本地无告警通道可接 | 部署 Alertmanager：page → 值班渠道（电话/IM 加急），ticket → 工单系统；route 按 severity 分组 |
 | 快烧双窗确认（1h AND 5m） | 单窗 + `for: 2m` 已挡记录评估边沿抖动；双窗的边际收益在当前流量形态下不显著 | 流量上来后把 expr 改为 `burn:1h > 14.4 and burn:5m > 14.4`（需补 5m 窗记录） |
 | good-only 延迟分位 | 见 §3.4——bad 事件正是延迟最差的事件，剔除等于藏病 | 如确需：Timer 加 outcome 标签（序列 ×3），另立 good_p99 记录 |

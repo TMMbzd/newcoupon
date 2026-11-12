@@ -1,0 +1,16 @@
+HTTP/1.1 200 
+Transfer-Encoding: chunked
+Cache-Control: no-cache, no-store, max-age=0, must-revalidate
+Connection: keep-alive
+Content-Type: application/json
+Date: Thu, 12 Nov 2026 07:54:22 GMT
+Expires: 0
+Keep-Alive: timeout=4
+Pragma: no-cache
+Proxy-Connection: keep-alive
+Set-Cookie: SESSION=OGUzNmJhN2YtZDg4OS00NTk4LThiZDItZTBhMGZjMTE0ZTE3; Path=/; HttpOnly; SameSite=Lax
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+X-Trace-Id: 1c6f4248c3e140b9
+X-Xss-Protection: 0
+
