@@ -64,7 +64,7 @@ src/main/java/com/newcoupon/
 | 建表 | InnoDB + utf8mb4；每表/每列必须有 COMMENT；必备 id/create_time/update_time；**禁用外键与级联**（一致性在应用层保证） |
 | 接口契约 | 统一 `Result<T>` 响应体；错误码分段（0 成功 / 1xxx 参数 / 2xxx 模板域 / 3xxx 领券域 / 4xxx 用券域 / 5xxx 系统）；入参一律 JSR-303 校验 |
 | 异常 | 业务异常抛 `BizException`，由全局处理器兜底；**堆栈只进日志，不出响应** |
-| 日志 | 每个请求自动注入 traceId（MDC + 响应头 X-Trace-Id），一条日志能用 traceId 串起全链路；X-Trace-Id 是**业务关联号**（报障对账用），与 Micrometer Tracing 的全链路 span 树（`coupon.tracing.enabled` 开关，runbook/Tracing与E2E.md）分工不同、各自独立 |
+| 日志 | 每个请求自动注入 traceId（MDC + 响应头 X-Trace-Id），一条日志能用 traceId 串起全链路；X-Trace-Id 是**业务关联号**（报障对账用），与全链路 span 树（Micrometer Tracing——**已回退**：任何桥进 classpath 会挂死 lettuce 连接，见 runbook/Tracing与E2E.md 头部公告与债 L84）原为分工关系，tracing 回退后 traceId 是唯一关联手段 |
 | 单测 | 秒级、相互独立、不依赖 Spring 容器与真实中间件；状态机用迁移表驱动测试 |
 | 架构决策 | 重大取舍写 ADR（`docs/adr/`），记录背景/决策/后果，防止半年后没人记得为什么 |
 | Git | 分支 main；提交信息 `type: 中文描述`（feat/fix/docs/refactor/test/chore） |

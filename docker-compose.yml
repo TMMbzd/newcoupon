@@ -182,29 +182,6 @@ services:
       - ./ops/grafana/slo-dashboard.json:/var/lib/grafana/dashboards/slo-dashboard.json:ro
     mem_limit: 256m
 
-  # ---------- V6 5B 生产化模拟刀 C2：Jaeger（trace 后端，profile observe） ----------
-  # 默认不起（与 prometheus/grafana 同 profile）；起停/内存预算/取证：docs/runbook/Tracing与E2E.md。
-  # 拓扑：应用跑在宿主机（TRACING_ENABLED=true），OTLP/HTTP 导出到 127.0.0.1:4318 →
-  # 这里收 trace；查证走 16686 的 UI 与 REST API（/api/traces?service=...）。
-  # 选 all-in-one（单二进制全家桶：collector+storage+query+UI，内存 ~300-500MB）——
-  # 单机模拟够用；生产形态（collector 分离 + ES/Cassandra 后端 + tail sampling）在
-  # runbook 裁剪登记。取证完 `docker compose --profile observe stop jaeger` 释放内存。
-  jaeger:
-    image: jaegertracing/all-in-one:1.62.0
-    container_name: newcoupon-jaeger
-    restart: unless-stopped
-    profiles: ["observe"]
-    environment:
-      # OTLP 接收口显式打开（1.43+ 默认开，显式钉住防升级漂移）
-      COLLECTOR_OTLP_ENABLED: "true"
-    ports:
-      # 只绑回环（审查 m3）：16686 是无认证 UI/API（能读全部 trace），4318 是无认证写入口
-      # （能灌假 span）——绑 0.0.0.0 在 WSL mirrored 网络模式下等于局域网可读写；
-      # 本机模拟无需外部访问，回环即最小暴露面
-      - "127.0.0.1:16686:16686"   # UI + REST API（取证 curl 走这里）
-      - "127.0.0.1:4318:4318"     # OTLP/HTTP（应用的 TRACING_OTLP_ENDPOINT 指这里）
-    mem_limit: 512m
-
 volumes:
   mysql-data:
   redis-data:

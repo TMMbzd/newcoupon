@@ -1,5 +1,14 @@
 # 运维手册：链路追踪（Tracing）与控制台 E2E（V6 生产化模拟刀 C）
 
+> ⚠️ **2026-11-12 深夜更新：Tracing 已整体回退，本文 Tracing 部分仅作历史记录**
+> micrometer-tracing 的**任何桥**（bridge-otel / bridge-brave，无论是否带 exporter）进
+> classpath 都会使本项目的 Spring 上下文在 **lettuce 连接 Redis 时永久挂死**（main 线程
+> WAITING 在 DefaultConnectionFuture.get，二分取证见 Tracing取证报告与债 L84）。纯依赖
+> 零代码即复现，与刀 C 的实现代码无关——因此 tracing 依赖与全部接线已 revert，E2E 部分
+> 不受影响继续有效。**重试触发条件**：Boot 3.3.6+/micrometer-tracing 升级或上游 issue
+> 有解时，恢复 12bd724（git revert ed18539 的逆操作）并重跑 SecurityRbacIntegrationTest
+> 做卡死回归探针。
+
 > 面向部署值班/后端开发。覆盖两件交付：C2 Micrometer Tracing + OTLP + Jaeger 的开关与
 > 起停，C1 控制台 Playwright 浏览器 E2E 的触发方式。设计出处：V6 计划 §5B 分节
 > （docs/research-2026-10-21/01-实施计划-V6-从券交易内核到券能力中台.md）；
