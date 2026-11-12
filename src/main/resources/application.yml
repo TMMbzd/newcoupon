@@ -323,8 +323,11 @@ management:
   # ---- Tracing（V6 5B 生产化模拟刀 C2）：Micrometer Tracing + OTLP → Jaeger ----
   # 总开关是业务命名空间里的 coupon.tracing.enabled（照风控开关纪律：默认 false =
   # 零开销零导出）——这里只是把它的值接到 Boot 的开关上，语义唯一来源在下面 coupon.tracing。
-  # tracing.enabled=false 时 Boot 连 Tracing 的自动装配都不装（Tracer 注入拿到 NoopTracer），
-  # 业务代码不用写 if，路径上也没有 span 创建开销。
+  # 实测口径（2026-11-12，Boot 3.3.5）：tracing.enabled=false 时 Boot 只拦"导出器族"的
+  # 自动装配，OtelTracer/Sampler 仍会装配、nextSpan() 仍创建带真实 traceId 的 span 对象
+  #——所以"关=零开销零记录"靠 TracingOffConfig 在关时提供 Tracer.NOOP 让真实 tracer
+  # 让位（@ConditionalOnMissingBean）；业务代码因此不用写 if，契约由
+  # TracingSwitchIntegrationTest 三断言看住。
   tracing:
     enabled: ${coupon.tracing.enabled:false}
     sampling:

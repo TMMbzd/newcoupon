@@ -198,8 +198,11 @@ services:
       # OTLP 接收口显式打开（1.43+ 默认开，显式钉住防升级漂移）
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
-      - "16686:16686"   # UI + REST API（取证 curl 走这里）
-      - "4318:4318"     # OTLP/HTTP（应用的 TRACING_OTLP_ENDPOINT 指这里）
+      # 只绑回环（审查 m3）：16686 是无认证 UI/API（能读全部 trace），4318 是无认证写入口
+      # （能灌假 span）——绑 0.0.0.0 在 WSL mirrored 网络模式下等于局域网可读写；
+      # 本机模拟无需外部访问，回环即最小暴露面
+      - "127.0.0.1:16686:16686"   # UI + REST API（取证 curl 走这里）
+      - "127.0.0.1:4318:4318"     # OTLP/HTTP（应用的 TRACING_OTLP_ENDPOINT 指这里）
     mem_limit: 512m
 
 volumes:

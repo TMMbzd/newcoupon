@@ -35,6 +35,8 @@ OtelTracer/Sampler 仍会装配、span 对象仍会被创建（落不了后端�
 
 ```bash
 # 起观测栈（与 prometheus/grafana 同 profile，默认不起）
+# 端口只绑回环（审查 m3）：16686=无认证 UI/API（可读全部 trace）、4318=无认证 OTLP 写入口
+# （可灌假 span）——不对外暴露，应用与取证 curl 都在本机
 docker compose --profile observe up -d jaeger
 # UI / REST API：http://127.0.0.1:16686（服务名 newcoupon-server）
 # OTLP 接收口：127.0.0.1:4318（应用的 TRACING_OTLP_ENDPOINT 默认即指这里）
@@ -72,9 +74,13 @@ X-Trace-Id 逐服务 grep 时间拼对齐；trace 时代：Jaeger 里找到该�
 **异步传播（TaskDecorator 纪律）**：自建线程池必须包
 `ContextPropagatingExecutors.wrap(...)`（infrastructure/tracing/）——**两层包装缺一不可**
 （实测结论）：OTel `Context.current().wrap(task)` 过 bridge 的 span 上下文 +
-Micrometer `ContextSnapshot` 过 Observation/MDC。已包：audit-writer、audit-export-writer、
-issue-task-worker 池。@Async/@Scheduled 由 Boot 自动挂同源传播，不经本类。
-未包登记：`CachedTemplateReader` 的 Caffeine 刷新池（缓存刷新不产生业务 span，包了无收益）。
+Micrometer `ContextSnapshot` 过 Observation/MDC。已包（2026-11-12 审查 M1 后全量清点）：
+audit-writer、audit-export-writer、issue-task-worker 池（以上两处 worker 链）、
+**issue-task-shard-group**（CouponIssueTaskProcessor 懒建的分片组池——批量事务失败
+退回"按分片拆组"降级路径的事务线程，漏包时恰在故障排查场景裂 trace，
+TracingGroupPoolPropagationIntegrationTest 钉住）。@Async/@Scheduled 由 Boot 自动挂
+同源传播，不经本类。未包登记：`CachedTemplateReader` 的 Caffeine 刷新池
+（缓存刷新不产生业务 span，包了无收益）。
 
 **X-Trace-Id 与 Micrometer traceId 的分工**：现有 `TraceIdFilter` 的 X-Trace-Id 是**业务
 关联号**（报障对账、用户拿号查日志），保持不动、默认常开；Micrometer traceId 是**全链路
@@ -129,6 +135,7 @@ Testcontainers 生命周期不受牵连；前端侧工具链（npm 工程在 con
 |---|---|
 | Jaeger UI 空 | ① `TRACING_ENABLED=true` 是否传到应用（启动日志 grep tracing）② Jaeger 容器起没起（`docker compose --profile observe ps`）③ 应用→4318 连通（宿主机 `curl -s http://127.0.0.1:16686/api/services`） |
 | 按 `POST /path` 搜不到 HTTP span | 命名是小写 OTel 语义：`http post /path`（Jaeger 检索框输 `http post` 就能列出） |
+| 测试启动炸 `Unable to obtain inputstream for resource: db/migration/V10__*.sql`（V1~V9 明明正常） | **不是代码问题**：VSCode Java 语言服务（JDT/redhat.java）在 pom/源码变更后并发重写 target/classes，与正在跑的 maven 读迁移文件竞争——文件被替换的瞬间读到空（2026-11-12 刀 C 实测，取证 docs/evidence/2026-11-12-E2E取证/ `c1-red2`）。处置：改完 Java/pom 等 JDT 静默（`until [ "$(find target/classes -newermt '20 seconds ago' | wc -l)" -eq 0 ]; do sleep 5; done`）再跑 maven；重跑即可 |
 | trace 里没有 audit-write span | audit-writer 池是否还包着 `ContextPropagatingExecutors.wrap`（少了 OTel 层=裂新 trace，TracingAsyncPropagationIntegrationTest 红） |
 | 开关关了但想确认零导出 | `TracingSwitchIntegrationTest`（bean 级）+ 取证文档的关开关对照（运行级） |
 | E2E 报 Playwright 工程不存在 | 在仓库根跑（surefire 工作目录=模块根），或 console/ 被改动——见 console/README.md |

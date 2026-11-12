@@ -97,7 +97,10 @@ class ConsoleE2eIntegrationTest extends ShardedIntegrationTestSupport {
         Path shot = Path.of("target", "e2e", "console-list.png").toAbsolutePath();
         shot.getParent().toFile().mkdirs();
 
-        ProcessBuilder pb = new ProcessBuilder("npx", "playwright", "test", "--reporter=list")
+        // bash -c "exec npx ..."（审查 m2）：让 npx 顶替 shell 成为直接子进程——
+        // 超时强杀时能拿到整棵进程树（npx→node→chromium）的根句柄；配合下面的
+        // descendants() 逐一清理，不会留下 ~0.5-1G 的 chromium 孤儿（WSL 内存纪律）
+        ProcessBuilder pb = new ProcessBuilder("bash", "-c", "exec npx playwright test --reporter=list")
                 .directory(consoleDir.toFile())
                 .redirectErrorStream(true);
         pb.environment().putAll(Map.of(
@@ -122,16 +125,28 @@ class ConsoleE2eIntegrationTest extends ShardedIntegrationTestSupport {
         reader.start();
 
         if (!playwright.waitFor(5, TimeUnit.MINUTES)) {
+            // 先杀子孙再杀根（审查 m2）：只杀 npx 包装进程会把 node/chromium 留成孤儿，
+            // ~0.5-1G 内存白占——ProcessHandle.descendants() 在 Linux 上枚举子树逐一清理
+            playwright.toHandle().descendants().forEach(ProcessHandle::destroyForcibly);
             playwright.destroyForcibly();
             reader.join(5_000);
-            throw new AssertionError("Playwright 进程 5 分钟未结束（已强杀）。输出：\n" + output);
+            throw new AssertionError("Playwright 进程 5 分钟未结束（已强杀整棵进程树）。输出：\n" + output);
         }
         reader.join(5_000);
 
         assertThat(playwright.exitValue())
-                .as("Playwright 应以退出码 0 结束（五步用例全绿）。输出：\n%s", output)
+                .as("Playwright 应以退出码 0 结束（用例全绿）。输出：\n%s", output)
                 .isZero();
-        assertThat(output.toString()).as("五个用例应各跑一次").contains("5 passed");
+        // 不钉死用例数（审查 m1）：解析 passed 统计 ≥1 且无 failed——将来加第 6 个用例
+        // 不需要改这里的魔法数字；退出码 0 已保证无失败，不含 "failed" 是双保险
+        java.util.regex.Matcher passed = java.util.regex.Pattern
+                .compile("(\\d+) passed").matcher(output);
+        assertThat(passed.find())
+                .as("Playwright 输出应含 passed 统计。输出：\n%s", output).isTrue();
+        assertThat(Integer.parseInt(passed.group(1)))
+                .as("至少 1 个用例通过").isGreaterThanOrEqualTo(1);
+        assertThat(output.toString())
+                .as("不应有 failed 字样（退出码 0 的双保险）").doesNotContain("failed");
 
         // 绿的时候也把 Playwright 输出打出来：surefire 日志/取证归档需要它（不只失败时）
         System.out.println("[E2E] Playwright 全绿，输出如下：\n" + output);

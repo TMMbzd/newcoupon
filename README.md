@@ -68,5 +68,6 @@ src/main/java/com/newcoupon/
 | 单测 | 秒级、相互独立、不依赖 Spring 容器与真实中间件；状态机用迁移表驱动测试 |
 | 架构决策 | 重大取舍写 ADR（`docs/adr/`），记录背景/决策/后果，防止半年后没人记得为什么 |
 | Git | 分支 main；提交信息 `type: 中文描述`（feat/fix/docs/refactor/test/chore） |
+| IDE 与 maven 并发 | VSCode Java（JDT）在 pom/源码变更后会并发重写 target/classes，与正在跑的 maven 竞争（症状：Flyway `Unable to obtain inputstream`）——改完 Java/pom 先等 JDT 静默再跑 maven（速查见 docs/runbook/Tracing与E2E.md §6） |
 | 配置 | 环境差异走 profile（application-dev.yml）；敏感信息不入库（application-local.yml 已 ignore） |
 | 优雅停机 | `server.shutdown=graceful`，发版时不切断在途请求 |

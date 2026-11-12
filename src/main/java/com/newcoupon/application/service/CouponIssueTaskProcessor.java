@@ -81,11 +81,17 @@ public class CouponIssueTaskProcessor {
             synchronized (this) {
                 pool = groupPool;
                 if (pool == null) {
-                    pool = Executors.newFixedThreadPool(groupParallelism, r -> {
-                        Thread t = new Thread(r, "issue-task-shard-group");
-                        t.setDaemon(true);
-                        return t;
-                    });
+                    // 上下文传播包装（2026-11-12 审查 M1）：这个池只承接"批量事务失败退回
+                    // 按分片拆组"的降级路径，组内逐条兜底的落库里程碑（coupon-issue-persist）
+                    // 诞生在这些线程上——不包的话恰在故障排查场景里裂成新 traceId
+                    //（TracingGroupPoolPropagationIntegrationTest 先红钉住后补包）。
+                    // 两层包装缺一不可，理由见 ContextPropagatingExecutors 类注释。
+                    pool = com.newcoupon.infrastructure.tracing.ContextPropagatingExecutors.wrap(
+                            Executors.newFixedThreadPool(groupParallelism, r -> {
+                                Thread t = new Thread(r, "issue-task-shard-group");
+                                t.setDaemon(true);
+                                return t;
+                            }));
                     groupPool = pool;
                 }
             }
