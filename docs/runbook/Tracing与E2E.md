@@ -8,6 +8,11 @@
 > 不受影响继续有效。**重试触发条件**：Boot 3.3.6+/micrometer-tracing 升级或上游 issue
 > 有解时，恢复 12bd724（git revert ed18539 的逆操作）并重跑 SecurityRbacIntegrationTest
 > 做卡死回归探针。
+>
+> **2026-11-13 复验记录**：针对"宿主内存压力（IDEA+浏览器崩溃）才是元凶"的合理质疑做了
+> 干净环境重审（available 4572-5593MB、宿主无重负载）：纯 main 基线绿，恢复 tracing 后
+> 同一探针类**同模式卡死**——环境假说证伪，"依赖确定性不兼容"结论维持且置信度升级
+> （详见 STATUS 债 L84 的重审记录）。
 
 > 面向部署值班/后端开发。覆盖两件交付：C2 Micrometer Tracing + OTLP + Jaeger 的开关与
 > 起停，C1 控制台 Playwright 浏览器 E2E 的触发方式。设计出处：V6 计划 §5B 分节
