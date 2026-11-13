@@ -78,7 +78,10 @@ class StockLayoutVersionTest {
 
         CouponIssueTxService service = new CouponIssueTxService(
                 userCouponRepository, templateRepository, eventRepository, expireTaskGateway,
-                shardMapper, outboxMapper, userDailyCounterMapper, dailyCounterMapper);
+                shardMapper, outboxMapper, userDailyCounterMapper, dailyCounterMapper,
+                // 里程碑 span 用：单测里 tracing 不装配，NoopTracer 即可（issueC1 在版本
+                // fence 处就抛了，根本走不到 span 段——这里只满足新构造参数）
+                io.micrometer.tracing.Tracer.NOOP);
 
         ReceiveRequest req = new ReceiveRequest("stale-layout", USER_ID, TEMPLATE_ID);
         assertThatThrownBy(() -> service.issueC1(

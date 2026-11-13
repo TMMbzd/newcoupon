@@ -3,7 +3,10 @@ package com.newcoupon.application.service;
 import com.newcoupon.infrastructure.persistence.mapper.CouponIssueTaskMapper;
 import com.newcoupon.infrastructure.persistence.po.CouponIssueTaskPO;
 import com.newcoupon.infrastructure.redis.RedisIssueGate;
+import com.newcoupon.infrastructure.tracing.ContextPropagatingExecutors;
 import com.xxl.job.core.handler.annotation.XxlJob;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
 import jakarta.annotation.PreDestroy;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -57,6 +60,8 @@ public class CouponIssueTaskWorker {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final ExecutorService taskPool;
     private final ScheduledExecutorService leaseRenewer;
+    /** tracing 关闭时是 NoopTracer（零开销），见 AuditService 同款注释 */
+    private final Tracer tracer;
     /** 本实例当前处理中的 task id；只用于续租，不是任务所有权（所有权在 DB lease_owner）。 */
     private final Set<Long> activeTasks = ConcurrentHashMap.newKeySet();
 
@@ -64,6 +69,7 @@ public class CouponIssueTaskWorker {
                                  CouponIssueTaskProcessor processor,
                                  CouponIssueTaskMapper taskMapper,
                                  RedisIssueGate issueGate,
+                                 Tracer tracer,
                                  @Value("${coupon.issue.worker.batch-size:50}") int batchSize,
                                  @Value("${coupon.issue.worker.batch-tx-size:50}") int batchTxSize,
                                  @Value("${coupon.issue.worker.lease-seconds:30}") int leaseSeconds,
@@ -73,6 +79,7 @@ public class CouponIssueTaskWorker {
         this.processor = processor;
         this.taskMapper = taskMapper;
         this.issueGate = issueGate;
+        this.tracer = tracer;
         this.batchSize = batchSize;
         this.batchTxSize = Math.max(1, Math.min(batchTxSize, batchSize));
         this.leaseSeconds = leaseSeconds;
@@ -81,11 +88,14 @@ public class CouponIssueTaskWorker {
                 : configuredId.substring(0, Math.min(64, configuredId.length()));
         int threads = Math.max(1, Math.min(parallelism, 32));
         // 守护线程：不阻止 JVM 退出；@PreDestroy 负责优雅收尾。
-        this.taskPool = Executors.newFixedThreadPool(threads, r -> {
+        // 外层包上下文传播（V6 5B 刀 C2）：runOnce 的轮 span 在调度线程上 makeCurrent，
+        // taskPool 的分块任务经包装把这份上下文带到 worker 线程——分块里的落库里程碑
+        // （CouponIssueTxService）就能挂进同一轮 trace，而不是每块各开一条新 trace。
+        this.taskPool = ContextPropagatingExecutors.wrap(Executors.newFixedThreadPool(threads, r -> {
             Thread t = new Thread(r, "issue-task-worker-" + workerId.substring(0, 8));
             t.setDaemon(true);
             return t;
-        });
+        }));
         this.leaseRenewer = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "issue-task-lease-" + workerId.substring(0, 8));
             t.setDaemon(true);
@@ -157,6 +167,13 @@ public class CouponIssueTaskWorker {
      *
      * <p>用 running 做单实例重入保护：@Scheduled 与 XXL-JOB 同时触发时，本轮只有一个在跑；
      * 多实例之间不靠这个锁，靠数据库行锁。
+     *
+     * <p><b>轮 span（V6 5B 刀 C2 的批量 worker 示例 + XXL/调度线程入口）</b>：@Scheduled
+     * 与 XXL-JOB 的调度线程上没有父 trace——这里 nextSpan 开出来的是**根 span**，一轮领取
+     * 到的全部任务、taskPool 里每个分块的落库里程碑，都挂在这条 trace 下。空轮（claimed=0）
+     * 不建 span：worker 每 200ms 一轮，空转 span 只会淹没 Jaeger。业务里程碑进 trace 而不是
+     * 只进日志的价值在这最直观——"这批任务是谁（哪一轮）发出去的、每块落库花了多久、哪块
+     * 失败了"，时间线上直接对齐，不用拿日志按任务 id 人肉拼。
      */
     public int runOnce() {
         if (!running.compareAndSet(false, true)) {
@@ -168,9 +185,14 @@ public class CouponIssueTaskWorker {
             if (tasks.isEmpty()) {
                 return 0;
             }
+            Span round = tracer.nextSpan().name("issue-worker-round")
+                    .tag("coupon.thread", Thread.currentThread().getName())
+                    .tag("issue.owner", workerId)
+                    .start();
             List<Long> ids = tasks.stream().map(CouponIssueTaskPO::getId).toList();
             activeTasks.addAll(ids);
-            try {
+            try (Tracer.SpanInScope ignored = tracer.withSpan(round)) {
+                round.tag("issue.claimed", String.valueOf(tasks.size()));
                 // 必须先按模板分组再切块：批量快路径只读一次模板，同一块里混入其它模板会把
                 // A 模板的券发成 B 模板（压测前审查抓到的真问题）。模板数通常个位数，分组成本可忽略。
                 java.util.Map<Long, List<CouponIssueTaskPO>> byTemplate = new java.util.LinkedHashMap<>();
@@ -209,9 +231,13 @@ public class CouponIssueTaskWorker {
                     log.warn("issue task worker interrupted: owner={}", workerId);
                 }
                 return tasks.size();
+            } catch (RuntimeException e) {
+                round.error(e);
+                throw e;
             } finally {
                 activeTasks.removeAll(ids);
                 invalidateFallbackGates(tasks);
+                round.end();
             }
         } finally {
             running.set(false);
