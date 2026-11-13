@@ -1,5 +1,12 @@
 # 运维手册：链路追踪（Tracing）与控制台 E2E（V6 生产化模拟刀 C）
 
+> ✅ **2026-11-13：启动死锁已定位并解决**（排障全程见 STATUS 债 L84 与
+> docs/evidence/2026-11-12-Tracing取证.md 头部）。一句话：tracing 桥激活了 Prometheus
+> exemplar 的惰性 Tracer 解析，与 lettuce Netty 线程指标记录、主线程的单例锁形成循环
+> 等待（Spring Data Redis issue #2814 同构）；解法=application.yml 已 exclude 两个
+> exemplar 自动配置（可选功能，代价为零），勿删该 exclude 除非上游已修（删除前先单跑
+> SecurityRbacIntegrationTest 探针）。
+
 > 面向部署值班/后端开发。覆盖两件交付：C2 Micrometer Tracing + OTLP + Jaeger 的开关与
 > 起停，C1 控制台 Playwright 浏览器 E2E 的触发方式。设计出处：V6 计划 §5B 分节
 > （docs/research-2026-10-21/01-实施计划-V6-从券交易内核到券能力中台.md）；
